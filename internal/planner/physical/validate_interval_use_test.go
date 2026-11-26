@@ -100,6 +100,44 @@ func TestIntervalRuleAtTheBinder(t *testing.T) {
 	})
 }
 
+// A timestamp difference beside an interval (#1713d round 3): the
+// difference is a double of milliseconds here (ADR-0012 temporal r16) and an
+// interval on PostgreSQL 17.11, which answers every refused statement below
+// (the coordinator's tsub/* cells). The refusal is 0A000 with the operation
+// named and the workaround that answers today; `date - date` is an integer
+// on both sides, and PostgreSQL's own 42883 for `integer > interval` stays.
+func TestTimestampDifferenceBesideAnIntervalIsRefused(t *testing.T) {
+	const ms = "it is a number of milliseconds here, not an interval; compare the timestamps themselves instead, " +
+		"for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts + INTERVAL '30 days'"
+	df := "c_ts - TIMESTAMP '2024-01-01 00:00:00'"
+	cells := []brCell{
+		{"SELECT id FROM tm WHERE " + df + " > INTERVAL '30 days'", "0A000", "a timestamp difference (timestamp - timestamp) cannot yet be compared with an interval (>): " + ms},
+		{"SELECT id FROM tm WHERE INTERVAL '30 days' <= " + df, "0A000", "compared with an interval (<=)"},
+		{"SELECT id, " + df + " = INTERVAL '1 day' AS b FROM tm", "0A000", "compared with an interval (=)"},
+		{"SELECT a.id FROM tm a JOIN tm b ON a.c_ts - b.c_ts <> INTERVAL '1 day'", "0A000", "compared with an interval (!=)"},
+		{"SELECT id FROM tm WHERE (" + df + ") < INTERVAL '1 day'", "0A000", "compared with an interval (<)"},
+		{"SELECT id FROM tm WHERE " + df + " >= INTERVAL '1 day'", "0A000", "compared with an interval (>=)"},
+		{"SELECT id FROM tm WHERE " + df + " BETWEEN INTERVAL '1 day' AND INTERVAL '2 days'", "0A000", "compared with an interval (between)"},
+		{"SELECT id FROM tm WHERE " + df + " IN (INTERVAL '1 day', INTERVAL '2 days')", "0A000", "compared with an interval (in)"},
+		{"SELECT id FROM tm WHERE NULLIF(" + df + ", INTERVAL '1 day') IS NULL", "0A000", "compared with an interval (=)"},
+		{"SELECT id FROM tm WHERE (" + df + ") + INTERVAL '1 day' > INTERVAL '2 days'", "0A000", "combined with an interval (+)"},
+		{"SELECT id FROM tm WHERE INTERVAL '1 day' - (" + df + ") > INTERVAL '2 days'", "0A000", "combined with an interval (-)"},
+		{"SELECT id FROM tm WHERE COALESCE(" + df + ", INTERVAL '0 days') > INTERVAL '2 days'", "0A000", "matched with an interval in COALESCE"},
+		{"SELECT id FROM tm WHERE GREATEST(" + df + ", INTERVAL '1 day') > INTERVAL '2 days'", "0A000", "matched with an interval in GREATEST"},
+		{"SELECT id FROM tm WHERE CASE WHEN id > 1 THEN " + df + " ELSE INTERVAL '1 day' END > INTERVAL '2 days'", "0A000", "matched with an interval in CASE"},
+		// PostgreSQL's own refusal: date - date is an integer there too.
+		{"SELECT id FROM tm WHERE c_date - DATE '2024-01-01' > INTERVAL '30 days'", "42883", "operator does not exist: bigint > interval"},
+		// Controls: the workaround, and the difference used as a value
+		// (temporal r16's millisecond double, unchanged).
+		{"SELECT id FROM tm WHERE c_ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days'", "", ""},
+		{"SELECT a.id FROM tm a JOIN tm b ON a.c_ts > b.c_ts + INTERVAL '30 days'", "", ""},
+		{"SELECT " + df + " AS d FROM tm", "", ""},
+		{"SELECT id FROM tm WHERE " + df + " > 1000", "", ""},
+		{"SELECT id FROM tm WHERE extract(epoch FROM " + df + ") > 1000", "", ""},
+	}
+	runBRCells(t, cells)
+}
+
 // A DML door's expression is judged as on SELECT (RefuseIntervalWrite); the
 // written value itself is the assignment's (wadjet's assignSource.check).
 func TestIntervalRuleOnTheWriteDoors(t *testing.T) {

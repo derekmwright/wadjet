@@ -727,8 +727,19 @@ func TestArc1713cMeasure(t *testing.T) {
 //   - tsub/*: timestamp subtraction is a double of milliseconds here and an
 //     interval there (temporal r16); date - date is bigint here, integer
 //     there; timestamp - date is 42883 here. Measured and left unchanged (the
-//     brief's correction 1). tsub/vsInterval: comparing that number with an
-//     interval is 42883 under the rule (a non-interval operand).
+//     brief's correction 1). Beside an interval (compared, combined by + or
+//     -, a CASE / COALESCE / NULLIF / GREATEST / LEAST branch) the difference
+//     is refused 0A000 (ivRefused, #1713d round 3): PostgreSQL answers those
+//     statements, so its 42883 would be a false claim, and base's answers
+//     compared milliseconds with an interval. tsub/tsDateVsInterval and
+//     tsub/tsMinusDiff: 42883 at base already (timestamp - date and
+//     timestamp - double have no operator here), unchanged.
+//     tsub/epochVsNumber: EXTRACT(epoch) of the difference is its millisecond
+//     count (frozen by the dispatch). tsub/intervalTimesDiff: interval ×
+//     the double is 22008 here (the product overflows), 42883 there
+//     (interval * interval), unchanged from round 2.
+//   - lp/multiField: a multi-field interval literal is 22007 here, accepted
+//     there (1713c's literal grammar, unchanged).
 //   - fam/opaqueEmpty@dag*, pos/divZeroEmpty@dag*: a row-dependent error
 //     under a conjunct that rejects every row. The stage DAG evaluates the
 //     conjuncts in another order than the single-process plan and raises the
@@ -766,7 +777,11 @@ var ivKnown = map[string]string{
 	"tsub/tsTs":                     "a | 97200000",
 	"tsub/tsDate":                   "ERR 42883",
 	"tsub/rows":                     "l,r,dt | 2,1,2554200000; 3,2,-5268600000; 4,3,5313600000; 5,4,NULL",
-	"tsub/vsInterval":               "ERR 42883",
+	"tsub/tsDateVsInterval":         "ERR 42883",
+	"tsub/tsMinusDiff":              "ERR 42883",
+	"tsub/epochVsNumber":            "id | 1; 2; 4",
+	"tsub/intervalTimesDiff":        "ERR 22008",
+	"lp/multiField":                 "ERR 22007",
 	"tsub/vsNumber":                 "id | 1; 2; 4",
 	"tsub/groupKey":                 "k,n | -86400000,1; 2628000000,1; 5182200000,1; 5227200000,1",
 	"tsub/sum":                      "s | 12951000000",
@@ -979,6 +994,34 @@ var ivRefused = map[string]bool{
 	"pos/concat":                true,
 	"pos/rowCompare":            true,
 	"ddl/intervalColumn":        true,
+	// A timestamp difference beside an interval (tsDiffRefusal).
+	"tsub/vsInterval":          true,
+	"tsub/vsIntervalEq":        true,
+	"tsub/vsIntervalNe":        true,
+	"tsub/vsIntervalLt":        true,
+	"tsub/vsIntervalLe":        true,
+	"tsub/vsIntervalGt":        true,
+	"tsub/vsIntervalGe":        true,
+	"tsub/vsIntervalRev":       true,
+	"tsub/vsIntervalSelect":    true,
+	"tsub/vsIntervalCols":      true,
+	"tsub/vsIntervalColsWhere": true,
+	"tsub/vsIntervalBetween":   true,
+	"tsub/vsIntervalIn":        true,
+	"tsub/vsIntervalCase":      true,
+	"tsub/plusInterval":        true,
+	"tsub/minusInterval":       true,
+	"tsub/intervalPlus":        true,
+	"tsub/intervalMinus":       true,
+	"tsub/plusIntervalWhere":   true,
+	"tsub/intervalPlusWhere":   true,
+	"tsub/coalesce":            true,
+	"tsub/greatest":            true,
+	"tsub/least":               true,
+	"tsub/leastGt":             true,
+	"tsub/leastWide":           true,
+	"tsub/nullif":              true,
+	"tsub/case":                true,
 }
 
 // ivTypeGaps is a cell's declared header where its VALUE agrees with
@@ -989,6 +1032,11 @@ var ivTypeGaps = map[string]string{
 	// date - date is bigint here, integer there (temporal r16's class,
 	// unchanged).
 	"tsub/dateDate": "a:bigint",
+	// `INTERVAL '1 day' + NULL` is NULL on both sides, published as text
+	// here (the NULL addend is not classified interval-valued, so the
+	// publication rule does not see an interval) and interval there.
+	"lp/plusNull":     "a:text",
+	"lp/casePlusNull": "a:text",
 }
 
 // ivAllPairs is every (l, r) with l < r whose LEFT row's text is not NULL —

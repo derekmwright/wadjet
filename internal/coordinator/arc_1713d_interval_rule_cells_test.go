@@ -161,6 +161,52 @@ func ivCellsD() []ivCell {
 	add("tsub/groupKey", "SELECT ts - TIMESTAMP '2024-01-01 00:00:00' AS k, count(*) AS n FROM iv_t WHERE ts IS NOT NULL GROUP BY ts - TIMESTAMP '2024-01-01 00:00:00' ORDER BY k")
 	add("tsub/sum", "SELECT sum(ts - TIMESTAMP '2024-01-01 00:00:00') AS s FROM iv_t")
 	add("tsub/epoch", "SELECT id, extract(epoch FROM ts - TIMESTAMP '2024-01-01 00:00:00') AS e FROM iv_t ORDER BY id")
+
+	// #1713d round 3: a timestamp difference beside an interval. PostgreSQL
+	// answers every one (the difference is its interval); here the difference
+	// is a millisecond double, so each is refused 0A000 (tsDiffRefusal), not
+	// PostgreSQL-absent 42883 / 42804. `date - date` is an integer on both
+	// sides, and PostgreSQL's own 42883 stays (tsub/dateVsInterval).
+	t0 := "TIMESTAMP '2024-01-01 00:00:00'"
+	df := "ts - " + t0
+	for _, op := range []struct{ name, op string }{{"Eq", "="}, {"Ne", "<>"}, {"Lt", "<"}, {"Le", "<="}, {"Gt", ">"}, {"Ge", ">="}} {
+		add("tsub/vsInterval"+op.name, "SELECT id FROM iv_t WHERE "+df+" "+op.op+" INTERVAL '1452 hours' ORDER BY id")
+	}
+	add("tsub/vsIntervalRev", "SELECT id FROM iv_t WHERE INTERVAL '30 days' < "+df+" ORDER BY id")
+	add("tsub/vsIntervalSelect", "SELECT id, "+df+" >= INTERVAL '60 days' AS b FROM iv_t ORDER BY id")
+	add("tsub/vsIntervalCols", "SELECT a.id AS l, b.id AS r FROM iv_t a JOIN iv_t b ON a.ts - b.ts > INTERVAL '30 days' ORDER BY l, r")
+	add("tsub/vsIntervalColsWhere", "SELECT a.id AS l, b.id AS r FROM iv_t a, iv_t b WHERE INTERVAL '30 days' < a.ts - b.ts ORDER BY l, r")
+	add("tsub/vsIntervalBetween", "SELECT id FROM iv_t WHERE "+df+" BETWEEN INTERVAL '30 days' AND INTERVAL '61 days' ORDER BY id")
+	add("tsub/vsIntervalIn", "SELECT id FROM iv_t WHERE "+df+" IN (INTERVAL '-1 day', INTERVAL '1452 hours') ORDER BY id")
+	add("tsub/vsIntervalCase", "SELECT id, CASE "+df+" WHEN INTERVAL '-1 day' THEN 'neg' ELSE 'other' END AS k FROM iv_t ORDER BY id")
+	// The workaround the refusal names, answered (controls).
+	add("tsub/workaround", "SELECT id FROM iv_t WHERE ts > "+t0+" + INTERVAL '30 days' ORDER BY id")
+	add("tsub/workaroundCols", "SELECT a.id AS l, b.id AS r FROM iv_t a JOIN iv_t b ON a.ts > b.ts + INTERVAL '30 days' ORDER BY l, r")
+	add("tsub/dateVsInterval", "SELECT id FROM iv_t WHERE d - DATE '2024-01-01' > INTERVAL '30 days' ORDER BY id")
+	add("tsub/tsDateVsInterval", "SELECT id FROM iv_t WHERE ts - DATE '2024-01-01' > INTERVAL '30 days' ORDER BY id")
+	// The rest of the mixed class.
+	add("tsub/plusInterval", "SELECT id, ("+df+") + INTERVAL '1 day' AS a FROM iv_t WHERE id = 1")
+	add("tsub/minusInterval", "SELECT id, ("+df+") - INTERVAL '1 day' AS a FROM iv_t WHERE id = 1")
+	add("tsub/intervalPlus", "SELECT id, INTERVAL '1 day' + ("+df+") AS a FROM iv_t WHERE id = 1")
+	add("tsub/intervalMinus", "SELECT id, INTERVAL '1 day' - ("+df+") AS a FROM iv_t WHERE id = 1")
+	add("tsub/plusIntervalWhere", "SELECT id FROM iv_t WHERE ("+df+") + INTERVAL '1 day' > INTERVAL '31 days' ORDER BY id")
+	add("tsub/intervalPlusWhere", "SELECT id FROM iv_t WHERE INTERVAL '1 day' + ("+df+") > INTERVAL '31 days' ORDER BY id")
+	add("tsub/coalesce", "SELECT id FROM iv_t WHERE COALESCE("+df+", INTERVAL '0 days') > INTERVAL '30 days' ORDER BY id")
+	add("tsub/greatest", "SELECT id FROM iv_t WHERE GREATEST("+df+", INTERVAL '40 days') > INTERVAL '50 days' ORDER BY id")
+	add("tsub/least", "SELECT id FROM iv_t WHERE LEAST("+df+", INTERVAL '40 days') < INTERVAL '35 days' ORDER BY id")
+	// The same LEAST over other bounds: base answered tsub/least and
+	// tsub/leastGt right by coincidence and tsub/leastWide wrong (every row).
+	add("tsub/leastGt", "SELECT id FROM iv_t WHERE LEAST("+df+", INTERVAL '40 days') > INTERVAL '35 days' ORDER BY id")
+	add("tsub/leastWide", "SELECT id FROM iv_t WHERE LEAST("+df+", INTERVAL '100 days') < INTERVAL '31 days' ORDER BY id")
+	add("tsub/nullif", "SELECT id FROM iv_t WHERE NULLIF("+df+", INTERVAL '-1 day') IS NULL ORDER BY id")
+	add("tsub/case", "SELECT id FROM iv_t WHERE CASE WHEN id > 2 THEN "+df+" ELSE INTERVAL '100 days' END > INTERVAL '30 days' ORDER BY id")
+	add("tsub/tsMinusDiff", "SELECT id, ts - (ts - "+t0+") AS a FROM iv_t ORDER BY id")
+	add("tsub/epochVsNumber", "SELECT id FROM iv_t WHERE extract(epoch FROM "+df+") > 3000000 ORDER BY id")
+	add("tsub/intervalTimesDiff", "SELECT id FROM iv_t WHERE INTERVAL '1 day' * ("+df+") > INTERVAL '1 day' ORDER BY id")
+	// The reviewer's lesser points (behaviour unchanged, measured).
+	add("lp/plusNull", "SELECT INTERVAL '1 day' + NULL AS a")
+	add("lp/casePlusNull", "SELECT CASE WHEN true THEN INTERVAL '1 day' + NULL END AS a")
+	add("lp/multiField", "SELECT CAST(INTERVAL '1 day 2 hours' AS TEXT) AS a")
 	return out
 }
 

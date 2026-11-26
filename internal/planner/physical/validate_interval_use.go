@@ -73,6 +73,31 @@ func intervalRefusal(use string) error {
 		"stored nanosecond duration", use)
 }
 
+// tsDiffRefusal is the 0A000 for a timestamp difference used beside an
+// interval. `timestamp - timestamp` is a double of milliseconds here
+// (ADR-0012 temporal r16) where PostgreSQL types it interval and answers the
+// statement, so a 42883 / 42804 for a number beside an interval would claim
+// a refusal PostgreSQL does not make, and an answer would compare or combine
+// a millisecond count with an interval.
+func tsDiffRefusal(use string) error {
+	return sqlerr.New("0A000", "a timestamp difference (timestamp - timestamp) cannot yet be %s: "+
+		"it is a number of milliseconds here, not an interval; compare the timestamps themselves "+
+		"instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or "+
+		"a.ts > b.ts + INTERVAL '30 days'", use)
+}
+
+// isTimestampDifference reports `timestamp - timestamp` (r16's millisecond
+// double), parentheses aside.
+func (t intervalTyper) isTimestampDifference(n plansql.Node) bool {
+	b, ok := plansql.Unparen(n).(*plansql.BinaryOp)
+	if !ok || b.Op != "-" {
+		return false
+	}
+	l, lok := t.declaredID(b.Left)
+	r, rok := t.declaredID(b.Right)
+	return lok && rok && l == parquet.TypeTimestamp && r == parquet.TypeTimestamp
+}
+
 // intervalTyper carries the declarations an operand's type is read from.
 type intervalTyper struct {
 	decls ColDecls
@@ -347,6 +372,8 @@ func (t intervalTyper) comparison(op string, left plansql.Node, rights []plansql
 			if err := checkUnknown(k); err != nil {
 				return err
 			}
+		case t.isTimestampDifference(k):
+			return tsDiffRefusal("compared with an interval (" + strings.ToLower(op) + ")")
 		default:
 			l, r := "interval", t.typeName(k)
 			if !t.isInterval(left) {
@@ -397,6 +424,9 @@ func (t intervalTyper) binaryOp(n *plansql.BinaryOp) error {
 	other, otherIsLeft := n.Right, false
 	if ri {
 		other, otherIsLeft = n.Left, true
+	}
+	if (n.Op == "+" || n.Op == "-") && t.isTimestampDifference(other) {
+		return tsDiffRefusal("combined with an interval (" + n.Op + ")")
 	}
 	opName := func() error {
 		l, r := "interval", t.typeName(other)
@@ -510,6 +540,8 @@ func (t intervalTyper) choice(what string, branches []plansql.Node) error {
 			if err := checkUnknown(b); err != nil {
 				return err
 			}
+		case t.isTimestampDifference(b):
+			return tsDiffRefusal("matched with an interval in " + what)
 		default:
 			first, second := t.typeName(b), "interval"
 			for _, p := range branches[:i] {
