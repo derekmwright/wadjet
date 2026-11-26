@@ -546,9 +546,15 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 	case e.nullifArms != nil:
 		out = evalNullIf(b, args, e.nullifArms)
 	default:
-		if v, ok := e.intervalExtract(args); ok {
-			out = v
-		} else if v, inf := e.infiniteExtract(args); inf {
+		// An INTERVAL as the last argument (EXTRACT's field function,
+		// date_part): checked inline, so no other call pays a method call.
+		if n := len(args); n > 0 && isIntervalBox(args[n-1]) {
+			if v, ok := e.intervalExtract(args); ok {
+				out = v
+				break
+			}
+		}
+		if v, inf := e.infiniteExtract(args); inf {
 			out = v
 		} else {
 			out = e.fn(args)

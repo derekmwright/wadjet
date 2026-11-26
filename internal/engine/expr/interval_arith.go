@@ -301,3 +301,26 @@ func intervalPair(lv, rv any) bool {
 
 // IsIntervalInputText is intervalInputText for the plan's declaration.
 func IsIntervalInputText(s string) bool { return intervalInputText(s) }
+
+// isIntervalBox reports an IntervalValue box; small enough to inline on the
+// per-row paths that ask it of every value.
+func isIntervalBox(v any) bool {
+	_, ok := v.(IntervalValue)
+	return ok
+}
+
+// eitherInterval reports an IntervalValue on either side of an operator.
+func eitherInterval(lv, rv any) bool { return isIntervalBox(lv) || isIntervalBox(rv) }
+
+// intervalArithFirst is the interval arithmetic BinOp.Eval asks before its
+// date arms: `* / %` with an interval operand, and `±` over two intervals or
+// an interval beside a quoted operand. Out of line, so the per-row Eval of
+// every other operand pair carries only eitherInterval's two type checks.
+//
+//go:noinline
+func intervalArithFirst(op string, lv, rv any) (any, bool) {
+	if op == "*" || op == "/" || op == "%" || intervalPair(lv, rv) {
+		return intervalArith(op, lv, rv)
+	}
+	return nil, false
+}
