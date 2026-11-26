@@ -2960,6 +2960,21 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 		}
 
 		hj := exec.NewHashJoin(joinType, spec.LeftKeys, spec.RightKeys)
+		// An unsuccessful construction closes the join it made. Nobody else
+		// can: the cleanup closure below is installed only for a join this
+		// function returns, and the broadcast cache never receives one from a
+		// failed build. A Build that failed (a refusal, an I/O error, a
+		// cancel) or a panic unwinding through here (buildGuarded recovers it
+		// above) otherwise left every charge the build took on the shared
+		// pool, and its spill state reachable (#1706, line 1706o). Build has
+		// returned or unwound by the time this runs, so no build worker is
+		// still running; Close is idempotent.
+		built := false
+		defer func() {
+			if !built {
+				hj.Close()
+			}
+		}()
 		// The key pair's resolved COMMON type: both sides' key bytes are
 		// built at it and the integer / bloom fast paths are gated on it
 		// (#615, ADR-0023). The coordinator resolved it from the two sides'
@@ -3045,6 +3060,7 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 			slog.Warn("join key repair fired at runtime — plan-time side assignment missed a pair",
 				"left_keys", hj.LeftKeys, "right_keys", hj.RightKeys)
 		}
+		built = true
 		return hj, nil
 	}
 
