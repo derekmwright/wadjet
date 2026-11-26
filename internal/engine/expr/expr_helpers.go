@@ -448,6 +448,17 @@ func compare(a, b any, op CmpOp) bool {
 	if isNumeric(a) && isNumeric(b) {
 		return cmpFloat64Op(ToFloat64(a), ToFloat64(b), op)
 	}
+	// Two INTERVAL values order by PostgreSQL's normalized value, never by
+	// their rendered text: "1 day" and "24:00:00" are one interval, and
+	// "2 days" orders before "10 days" (#1713c). An opaque interval
+	// (IntervalValue.text) has no value here and keeps the text order below.
+	if ai, ok := a.(IntervalValue); ok {
+		if bi, ok := b.(IntervalValue); ok {
+			if c, ok := intervalOrder(ai, bi); ok {
+				return cmpOrder(c, op)
+			}
+		}
+	}
 	// Fall back to string comparison
 	as := toString(a)
 	bs := toString(b)

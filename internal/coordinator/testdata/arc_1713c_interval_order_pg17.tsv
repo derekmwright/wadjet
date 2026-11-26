@@ -1,0 +1,156 @@
+# PostgreSQL 17.11 (postgres:17-alpine, --locale=C --encoding=UTF8, IntervalStyle postgres) answers for arc_1713c_interval_order_arms_test.go (TestArc1713cMeasure).
+# name<TAB>names | rows (t/f booleans) | ERR <SQLSTATE> | ok (DDL).
+ddl/create	ok
+ddl/insert	ok
+cmp/lit/1 day~24 hours	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/cast/1 day~24 hours	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/mixed/1 day~24 hours	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/lit/24 hours~1 day	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/cast/24 hours~1 day	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/mixed/24 hours~1 day	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/lit/1 day~1 day	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/cast/1 day~1 day	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/mixed/1 day~1 day	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/lit/1 month~30 days	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/cast/1 month~30 days	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/mixed/1 month~30 days	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/lit/1 month~720 hours	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/cast/1 month~720 hours	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/mixed/1 month~720 hours	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/lit/30 days~720 hours	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/cast/30 days~720 hours	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/mixed/30 days~720 hours	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/lit/1 month~31 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/cast/1 month~31 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/mixed/1 month~31 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/lit/1 month~29 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,f,f,t,t,t,f
+cmp/cast/1 month~29 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,f,f,t,t,t,f
+cmp/mixed/1 month~29 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,f,f,t,t,t,f
+cmp/lit/1 year~12 months	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/cast/1 year~12 months	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/mixed/1 year~12 months	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/lit/1 year~360 days	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/cast/1 year~360 days	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/mixed/1 year~360 days	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/lit/1 year~365 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/cast/1 year~365 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/mixed/1 year~365 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/lit/12 months~8640 hours	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/cast/12 months~8640 hours	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/mixed/12 months~8640 hours	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/lit/2 days~10 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/cast/2 days~10 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/mixed/2 days~10 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/lit/10 days~2 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,f,f,t,t,t,f
+cmp/cast/10 days~2 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,f,f,t,t,t,f
+cmp/mixed/10 days~2 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,f,f,t,t,t,f
+cmp/lit/25 hours~1 day	eq,ne,lt,le,gt,ge,dist,ndist | f,t,f,f,t,t,t,f
+cmp/cast/25 hours~1 day	eq,ne,lt,le,gt,ge,dist,ndist | f,t,f,f,t,t,t,f
+cmp/mixed/25 hours~1 day	eq,ne,lt,le,gt,ge,dist,ndist | f,t,f,f,t,t,t,f
+cmp/lit/23 hours~1 day	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/cast/23 hours~1 day	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/mixed/23 hours~1 day	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/lit/1 hour~60 minutes	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/cast/1 hour~60 minutes	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/mixed/1 hour~60 minutes	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/lit/1 hour~3600 seconds	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/cast/1 hour~3600 seconds	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/mixed/1 hour~3600 seconds	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/lit/59 minutes~3600 seconds	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/cast/59 minutes~3600 seconds	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/mixed/59 minutes~3600 seconds	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/lit/1 week~7 days	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/cast/1 week~7 days	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/mixed/1 week~7 days	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/lit/1 week~168 hours	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/cast/1 week~168 hours	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/mixed/1 week~168 hours	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/lit/0 days~0 seconds	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/cast/0 days~0 seconds	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/mixed/0 days~0 seconds	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/lit/0 days~0 months	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/cast/0 days~0 months	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/mixed/0 days~0 months	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/lit/-1 day~-24 hours	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/cast/-1 day~-24 hours	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/mixed/-1 day~-24 hours	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/lit/-1 day~1 day	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/cast/-1 day~1 day	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/mixed/-1 day~1 day	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/lit/-1 month~-30 days	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/cast/-1 month~-30 days	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/mixed/-1 month~-30 days	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/lit/-1 month~-29 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/cast/-1 month~-29 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/mixed/-1 month~-29 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/lit/-2 hours~-1 day	eq,ne,lt,le,gt,ge,dist,ndist | f,t,f,f,t,t,t,f
+cmp/cast/-2 hours~-1 day	eq,ne,lt,le,gt,ge,dist,ndist | f,t,f,f,t,t,t,f
+cmp/mixed/-2 hours~-1 day	eq,ne,lt,le,gt,ge,dist,ndist | f,t,f,f,t,t,t,f
+cmp/lit/100000 years~1200000 months	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/cast/100000 years~1200000 months	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/mixed/100000 years~1200000 months	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/lit/100000 years~36000000 days	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/cast/100000 years~36000000 days	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/mixed/100000 years~36000000 days	eq,ne,lt,le,gt,ge,dist,ndist | t,f,f,t,f,t,f,t
+cmp/lit/100000 years~36000001 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/cast/100000 years~36000001 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/mixed/100000 years~36000001 days	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/lit/9 seconds~10 seconds	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/cast/9 seconds~10 seconds	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+cmp/mixed/9 seconds~10 seconds	eq,ne,lt,le,gt,ge,dist,ndist | f,t,t,t,f,f,t,f
+box/between	a,b,c,d | t,t,t,f
+box/in	a,b,c,d | t,t,f,NULL
+box/case	a,b | 1,1
+box/null	a,b,c,d | NULL,NULL,t,t
+box/subsecond	a | t
+box/multifield	a,b,c | t,t,t
+box/where	one | 1
+row/eq	id | 1; 2
+row/eqMonth	id | 3; 4; 5
+row/ne	id | 3; 4; 5; 6; 7; 8; 10; 11; 12; 13; 14; 15
+row/lt	id | 1; 2; 6; 8; 12; 15
+row/ge	id | 3; 4; 5; 10; 11
+row/in	id | 1; 2; 3; 4; 5
+row/notIn	id | 6; 7; 8; 10; 11; 12; 13; 14; 15
+row/between	id | 1; 2; 3; 4; 5; 6; 7; 12; 13; 14
+row/notDistinct	id | 1; 2
+row/distinct	id | 1; 2; 3; 4; 5; 6; 7; 8; 9; 10; 11; 12; 15
+row/project	id,e,l | 1,f,t; 2,f,t; 3,t,f; 4,t,f; 5,t,f; 6,f,f; 7,f,f; 8,f,t; 9,NULL,NULL; 10,f,f; 11,f,f; 12,f,t; 13,f,f; 14,f,f; 15,f,t
+row/case	id,k | 1,day; 2,day; 3,month; 4,month; 5,month; 6,other; 7,other; 8,other; 9,other; 10,other; 11,other; 12,other; 13,other; 14,other; 15,other
+row/crossLt	l,r | 1,3; 1,4; 1,5; 1,6; 1,7; 1,10; 1,11; 1,12; 1,13; 1,14
+row/crossEqResidual	l,r | 1,2; 3,4; 3,5; 4,5; 10,11; 13,14
+row/exists	id | 2; 3; 4; 5; 6; 7; 10; 11; 12; 13; 14
+key/groupBy	k,n | -1 days,1; 00:00:00,1; 25:00:00,1; 2 days,1; 10 days,1; NULL,1; 1 day,2; 7 days,2; 1 year,2; 1 mon,3
+key/groupCount	g | 10
+key/distinctCount	g | 10
+key/countDistinct	n | 9
+key/join	l,r | 1,2; 3,4; 3,5; 4,5; 10,11; 13,14
+key/inSubquery	id | 1; 2
+key/existsEq	id | 1; 2; 3; 4; 5; 10; 11; 13; 14
+key/scalarSub	id | 1; 2
+key/joinDerived	l,r | 1,2; 3,4; 3,5; 4,5; 10,11; 13,14
+key/joinMixed	l,r | 1,2; 3,4; 3,5; 4,5; 10,11; 13,14
+key/leftJoin	l,r | 1,2; 2,NULL; 3,4; 3,5; 4,5; 5,NULL; 6,NULL; 7,NULL; 8,NULL; 9,NULL; 10,11; 11,NULL; 12,NULL; 13,14; 14,NULL; 15,NULL
+key/derivedFilter	id | 1; 2
+key/partition	id,n | 1,2; 2,2; 3,3; 4,3; 5,3; 6,1; 7,1; 8,1; 9,1; 10,2; 11,2; 12,1; 13,2; 14,2; 15,1
+key/union	n | 1
+key/intersect	n | 1
+key/except	n | 0
+key/valuesGroup	g | 2
+order/asc	id | 8; 1; 12; 6; 7; 3
+order/desc	id | 3; 7; 6; 12; 1; 8
+order/topN	id | 3; 7
+order/minMax	lo,hi | 1 day,10 days
+order/values	x | 25:00:00; 2 days; 10 days
+print/fields	a,b,c,d,e | 1 mon,30 days,25:00:00,1 year 2 mons,-1 days
+print/castText	a,b | 1 mon,720:00:00
+arith/times	a | 2 days
+arith/div	a | 12:00:00
+arith/plus	a | 1 day 01:00:00
+arith/neg	a | -1 days
+arith/tsMonth	a | 2024-02-29 00:00:00
+arith/tsDays	a | 2024-03-01 00:00:00
+arith/justifyDays	a | 1 mon
+arith/extract	a | 30
+box/array	a,b,c | t,t,t
+box/arrayGroup	g | 1

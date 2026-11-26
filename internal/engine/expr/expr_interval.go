@@ -6,6 +6,7 @@ package expr
 import (
 	"fmt"
 	"math"
+	"math/big"
 	"regexp"
 	"strings"
 	"time"
@@ -118,6 +119,85 @@ func (iv IntervalValue) DurationNanos() (int64, bool) {
 		total += p
 	}
 	return total, ok
+}
+
+// intervalOrder orders two INTERVAL values as PostgreSQL 17.11's interval_cmp
+// does: by one normalized value (interval_cmp_value) in which a month is 30
+// days and a day is 24 hours, so `INTERVAL '1 day' = INTERVAL '24 hours'`,
+// `INTERVAL '1 month' = INTERVAL '30 days'` and `INTERVAL '2 days' <
+// INTERVAL '10 days'` (#1713c, measured: arc_1713c_interval_order_pg17.tsv).
+// The fields are kept as written for printing; only the ORDER is normalized.
+// It is DurationNanos' metric, in seconds (this type has no sub-second field)
+// and exact at any magnitude: a sum past int64 is redone in big.Int rather
+// than wrapped.
+//
+// false is an OPAQUE interval on either side (IntervalValue.text: input this
+// type's fields cannot hold), whose value this engine does not know; the
+// caller keeps its old answer for it.
+func intervalOrder(a, b IntervalValue) (int, bool) {
+	if a.text != "" || b.text != "" {
+		return 0, false
+	}
+	x, xok := a.cmpSeconds()
+	y, yok := b.cmpSeconds()
+	if xok && yok {
+		switch {
+		case x < y:
+			return -1, true
+		case x > y:
+			return 1, true
+		}
+		return 0, true
+	}
+	return a.cmpSecondsBig().Cmp(b.cmpSecondsBig()), true
+}
+
+// cmpSeconds is interval_cmp_value in seconds, false when it leaves int64.
+func (iv IntervalValue) cmpSeconds() (int64, bool) {
+	months, ok := checkedMulAdd(int64(iv.Years), 12, int64(iv.Months))
+	if !ok {
+		return 0, false
+	}
+	days, ok := checkedMulAdd(months, 30, int64(iv.Days))
+	if !ok {
+		return 0, false
+	}
+	total, ok := checkedMulAdd(days, 86400, 0)
+	for _, f := range []struct{ n, unit int64 }{{int64(iv.Hours), 3600}, {int64(iv.Minutes), 60}, {int64(iv.Seconds), 1}} {
+		if !ok {
+			return 0, false
+		}
+		total, ok = checkedMulAdd(f.n, f.unit, total)
+	}
+	return total, ok
+}
+
+// cmpSecondsBig is cmpSeconds exactly, for a value past int64.
+func (iv IntervalValue) cmpSecondsBig() *big.Int {
+	total := new(big.Int)
+	for _, f := range []struct{ n, unit int64 }{
+		{int64(iv.Years), 12 * 30 * 86400},
+		{int64(iv.Months), 30 * 86400},
+		{int64(iv.Days), 86400},
+		{int64(iv.Hours), 3600},
+		{int64(iv.Minutes), 60},
+		{int64(iv.Seconds), 1},
+	} {
+		total.Add(total, new(big.Int).Mul(big.NewInt(f.n), big.NewInt(f.unit)))
+	}
+	return total
+}
+
+// checkedMulAdd is n*unit + acc, false on int64 overflow.
+func checkedMulAdd(n, unit, acc int64) (int64, bool) {
+	p := n * unit
+	if n != 0 && (p/n != unit || (n == -1 && unit == math.MinInt64)) {
+		return 0, false
+	}
+	if (p > 0 && acc > math.MaxInt64-p) || (p < 0 && acc < math.MinInt64-p) {
+		return 0, false
+	}
+	return p + acc, true
 }
 
 // String renders an INTERVAL as PostgreSQL's default (`postgres` style)
