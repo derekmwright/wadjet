@@ -388,6 +388,10 @@ func setupTPCHStreamingFixture(tb testing.TB, sf ScaleFactor, f Fixture) (*wadje
 		// TPCH_SCALE=1 go test -run TestTPCHQueriesLarge` is a same-process
 		// treatment arm.
 		LateMaterialization: os.Getenv("WADJET_LATE_MATERIALIZATION") == "1",
+		// WADJET_TPCH_MEMORY_BUDGET (bytes) runs the streaming-loaded suites
+		// (TestTPCHBaselineSF1, TestTPCHQueriesLarge) under a chosen pool
+		// budget; unset is the detected default.
+		MemoryBudget: tpchMemoryBudget(),
 	})
 	if err != nil {
 		tb.Fatal(err)
