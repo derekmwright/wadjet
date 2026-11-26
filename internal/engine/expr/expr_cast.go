@@ -406,6 +406,14 @@ func (e *Cast) castStringRender(b *batch.RecordBatch, row int, v any) string {
 	case []float32:
 		// A VECTOR's text is pgvector's vector_out, `[1,2,3]`.
 		return batch.FormatPGText(v, nil)
+	case IntervalValue:
+		// An explicit text cast of an interval is the display workaround
+		// (#1713d); an opaque one has no canonical text here.
+		iv := v.(IntervalValue)
+		if iv.text != "" {
+			raiseIntervalNotRenderable(iv.text)
+		}
+		return iv.String()
 	}
 	text := boxedTextOperand(b, row, operand, v)
 	if raw, ok := text.([]byte); ok {

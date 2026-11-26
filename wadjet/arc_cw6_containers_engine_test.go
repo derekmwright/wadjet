@@ -4,10 +4,10 @@ package wadjet
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 )
 
@@ -62,38 +62,19 @@ func TestArcCW6IntervalArraysAnswerAsPostgreSQLOnTheEmbeddedEngine(t *testing.T)
 		{"control/is-not-null", "SELECT ARRAY[INTERVAL '1 day'] IS NOT NULL", "true"},
 		{"control/element-equality", "SELECT (ARRAY[INTERVAL '1 day'])[1] = INTERVAL '1 day'", "true"},
 	}
+	// #1713d: an interval is never materialized, not even as an array
+	// element — the DURATION carrier above answered these by value, and the
+	// interval rule refuses every one 0A000 at plan time now (the want column
+	// is PostgreSQL 17.11's answer, kept as measured). So do the text cast
+	// (#1268's refusal, now the rule's) and the bare projection, which
+	// answered the nanosecond count.
+	cells = append(cells,
+		struct{ name, sql, want string }{"cast-to-text", "SELECT CAST(ARRAY[INTERVAL '1 day'] AS TEXT)", "{\"1 day\"}"},
+		struct{ name, sql, want string }{"bare-projection", "SELECT ARRAY[INTERVAL '1 hour']", "{01:00:00}"})
 	for _, c := range cells {
-		res, err := db.Query(ctx, c.sql)
-		if err != nil {
-			t.Errorf("%s: %s refused: %v", c.name, c.sql, err)
-			continue
+		_, err := db.Query(ctx, c.sql)
+		if sqlerr.StateOf(err) != "0A000" || !strings.Contains(err.Error(), "array element") {
+			t.Errorf("%s: %s: %v, want the interval rule's 0A000 (PostgreSQL 17.11 answers %s)", c.name, c.sql, err, c.want)
 		}
-		if len(res.Rows) != 1 {
-			t.Errorf("%s: %s answered %d rows", c.name, c.sql, len(res.Rows))
-			continue
-		}
-		if got := fmt.Sprint(res.Cells(0)[0]); got != c.want {
-			t.Errorf("%s: %s\n  got %s, want %s (PostgreSQL 17.11)", c.name, c.sql, got, c.want)
-		}
-	}
-	// CAST(… AS TEXT) still refuses (#1268, unchanged by this round): the
-	// refusal reads the runtime box directly (expr.refuseUnrenderable), which
-	// this fix never converts.
-	if _, err := db.Query(ctx, "SELECT CAST(ARRAY[INTERVAL '1 day'] AS TEXT)"); err == nil ||
-		!strings.Contains(err.Error(), "has no text form here") {
-		t.Errorf("cast-to-text still refuses: got %v, want the 0A000 refusal", err)
-	}
-	// A BARE projection of the array is not the CAST door: it renders through
-	// DURATION's own carrier now (an interval element's nanosecond count,
-	// PostgreSQL's own convention for none of it — docs/postgres-differences.md
-	// #125 records DURATION's rendering already), where it used to refuse
-	// 42000. Not PostgreSQL's value; not a crash either. This is the one
-	// sentence #1268's close text changes (N10).
-	res, err := db.Query(ctx, "SELECT ARRAY[INTERVAL '1 hour']")
-	if err != nil {
-		t.Fatalf("bare projection: %v", err)
-	}
-	if got := fmt.Sprint(res.Cells(0)[0]); got != "[3600000000000]" {
-		t.Errorf("bare projection: got %s, want [3600000000000] (DURATION nanoseconds)", got)
 	}
 }

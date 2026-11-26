@@ -1102,6 +1102,12 @@ func (v *Vector) SetValue(i int, val any) {
 		v.setShapeOnlyLen(i, int(n))
 		return
 	}
+	if _, ok := val.(IntervalBox); ok && v.Type != TypeDuration {
+		// An INTERVAL never leaves the expression that computes it (#1713d:
+		// the planner refuses its publication); the STRING arm below would
+		// store its text, the silent coercion that rule exists to prevent.
+		v.mismatch(val)
+	}
 	switch v.Type {
 	case TypeBool:
 		// A value-shape mismatch here used to write NULL, and before that an

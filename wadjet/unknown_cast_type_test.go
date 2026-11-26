@@ -152,7 +152,9 @@ func TestUnknownCastDestinationIsUndefinedObject(t *testing.T) {
 		// INTERVAL is implemented since arc VL round 4 (a TEXT operand is read
 		// by the INTERVAL literal's grammar); a bigint has no cast to it —
 		// PostgreSQL's 42846, pinned in wadjet.TestTextCastToIntervalIsTheLiteralsInterval.
-		`SELECT CAST('1 day' AS INTERVAL) AS v FROM ` + tbl + ` WHERE id = 1`,
+		// #1713d: the interval itself is never a result column, so the name is
+		// shown recognized through the explicit text cast.
+		`SELECT CAST(CAST('1 day' AS INTERVAL) AS TEXT) AS v FROM ` + tbl + ` WHERE id = 1`,
 		`SELECT CAST(c_str AS BYTES) AS v FROM ` + tbl + ` WHERE id = 1`,
 	} {
 		t.Run("ctl_unimplemented_but_named", func(t *testing.T) {

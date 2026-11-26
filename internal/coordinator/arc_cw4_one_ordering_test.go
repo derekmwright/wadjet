@@ -315,6 +315,18 @@ func TestArcCW4OneOrderingEveryOperandComparatorElement(t *testing.T) {
 						continue
 					}
 					sql := cm.sql(o)
+					if strings.HasPrefix(p.name, "interval") {
+						// #1713d: an interval is never materialized, not
+						// even as an array element: every INTERVAL-pair cell
+						// is the interval rule's 0A000 on every arm (the
+						// DURATION carrier ordered them by value before;
+						// PostgreSQL answers each by its sign).
+						if _, _, err := arm.run(sql); err == nil || !strings.Contains(err.Error(), "array element") {
+							t.Errorf("%s / %s / %s / %s: %s: %v, want the interval rule's 0A000", arm.name, p.name, o.name, cm.name, sql, err)
+						}
+						refused["interval-rule"]++
+						continue
+					}
 					want++
 					_, rows, err := arm.run(sql)
 					if err != nil {

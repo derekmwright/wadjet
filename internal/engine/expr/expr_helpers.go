@@ -450,14 +450,11 @@ func compare(a, b any, op CmpOp) bool {
 	}
 	// Two INTERVAL values order by PostgreSQL's normalized value, never by
 	// their rendered text: "1 day" and "24:00:00" are one interval, and
-	// "2 days" orders before "10 days" (#1713c). An opaque interval
-	// (IntervalValue.text) has no value here and keeps the text order below.
-	if ai, ok := a.(IntervalValue); ok {
-		if bi, ok := b.(IntervalValue); ok {
-			if c, ok := intervalOrder(ai, bi); ok {
-				return cmpOrder(c, op)
-			}
-		}
+	// "2 days" orders before "10 days" (#1713c). An interval with no such
+	// value (an opaque IntervalValue.text), or one met by a non-interval, is
+	// refused 0A000 (compareIntervals, #1713d), never ordered as text.
+	if isIntervalBox(a) || isIntervalBox(b) {
+		return compareIntervals(a, b, op)
 	}
 	// Fall back to string comparison
 	as := toString(a)

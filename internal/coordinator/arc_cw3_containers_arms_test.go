@@ -212,7 +212,8 @@ func TestArcCW3ContainerCastsRenderTheDeclaredElementOnEveryArm(t *testing.T) {
 			}
 		}
 		_, _, err := arm.run(`SELECT CAST(ARRAY[INTERVAL '1 hour'] AS TEXT) AS a`)
-		if err == nil || !strings.Contains(err.Error(), "no text form") {
+		// #1713d: the interval rule refuses the element itself first.
+		if err == nil || !strings.Contains(err.Error(), "array element") {
 			t.Errorf("%s: an INTERVAL element's text: want the refusal, got %v", arm.name, err)
 		}
 	}

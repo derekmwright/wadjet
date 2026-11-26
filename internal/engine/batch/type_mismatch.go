@@ -20,6 +20,13 @@ import (
 // number to store and is loud, not a plausible zero.
 type DurationNanoser interface{ DurationNanos() (int64, bool) }
 
+// IntervalBox marks an INTERVAL value (expr.IntervalValue). Vector.SetValue
+// refuses one into every vector but a DURATION's (whose DurationNanoser arm
+// is ADR-0045's explicit carrier): an interval is never materialized as its
+// text (#1713d). The planner refuses every statement that would publish one,
+// so reaching this guard is a hole in that rule, never an answer.
+type IntervalBox interface{ IntervalBox() }
+
 // TypeMismatchError panics when a writer's Go type has no storage conversion
 // (#361; #310, #327, #331, #333, #345, #353, #371, #372).
 // It implements FatalEvalPanic (Error + FatalEvalError): drivers, worker recover,

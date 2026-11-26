@@ -143,36 +143,6 @@ var windowValueFunctions = map[string]bool{
 	"lag": true, "lead": true, "first_value": true, "last_value": true, "nth_value": true,
 }
 
-// refuseIntervalAggregateArgument refuses an INTERVAL value (expr.IsIntervalNode:
-// a literal, a CAST, interval arithmetic, a NULLIF / GREATEST / LEAST / CASE /
-// COALESCE that answers one) as the argument of an aggregate or of a window
-// function, 0A000 at plan time (#1713c). There is no interval accumulator and
-// no interval column type (ADR-0012 temporal r20): the aggregate's input was
-// declared float8, so max / min / sum / avg of an interval answered 0 or NULL
-// and min / max of a CAST compared the rendered TEXT ("25:00:00" above "10
-// days"), and since interval arithmetic answers its interval (round 2) the
-// value met the store guard instead (`count(INTERVAL '1 day' * 2)`, every
-// arm). PostgreSQL answers all of them; until an interval column type exists
-// the statement is refused, identically on every arm — count included, whose
-// answer would be right, so that one rule covers the argument whatever the
-// aggregate. A COUNT(*), and an argument that only uses an interval (a
-// comparison, an EXTRACT), are not this rule's.
-func refuseIntervalAggregateArgument(fc *plansql.FuncCallNode) error {
-	if fc == nil || fc.Star {
-		return nil
-	}
-	name := strings.ToLower(strings.TrimSpace(fc.Name))
-	if !plansql.IsAggregate(name) && !windowValueFunctions[name] {
-		return nil
-	}
-	for _, a := range fc.Args {
-		if expr.IsIntervalNode(a) {
-			return sqlerr.New("0A000", "%s over an interval argument is not supported", name)
-		}
-	}
-	return nil
-}
-
 // refuseAggregateArgument applies the rule to one call.
 func refuseAggregateArgument(fc *plansql.FuncCallNode, typeOf func(plansql.Node) (parquet.TypeID, bool)) error {
 	if fc == nil || fc.Star {

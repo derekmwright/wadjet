@@ -80,7 +80,10 @@ func bindColumns(ctx context.Context, src tableColumnSource, info *plansql.Selec
 	for _, c := range info.EnclosingCTEs() {
 		b.ctes[strings.ToLower(c.Name)] = cteEntry{open: true, ident: c.Identity()}
 	}
-	return b.validateBlock(ctx, info, nil)
+	if err := b.validateBlock(ctx, info, nil); err != nil {
+		return err
+	}
+	return b.intervalErr
 }
 
 // outerDiagScope accumulates the enclosing query levels a DERIVED TABLE's body
@@ -736,6 +739,11 @@ type binder struct {
 	blockSubs map[string]plansql.Node
 	// memoBodies memoizes validatedMemo, as bodies memoizes validatedBody.
 	memoBodies map[memoKey]*plansql.SelectInfo
+	// intervalErr is the first refusal of the INTERVAL rule
+	// (validate_interval_use.go, #1713d), raised once the whole statement has
+	// bound: every refusal PostgreSQL itself raises — a name, a grouping
+	// error — takes precedence over this engine's 0A000.
+	intervalErr error
 }
 
 func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, outer *colScope) error {
@@ -1169,6 +1177,17 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		if err := b.checkExpr(expr, withOut); err != nil {
 			return err
 		}
+	}
+
+	// The INTERVAL rule over this block's own expressions (#1713d), kept
+	// until the whole statement has bound.
+	if b.intervalErr == nil {
+		b.intervalErr = refuseIntervalBlock(info, rowFieldScopeDecls(resolve), func(sql string) (parquet.TypeID, bool) {
+			if types := b.subqueryDeclaredTypes(sql, resolve); len(types) == 1 && types[0] != typeAmbiguous {
+				return types[0], true
+			}
+			return 0, false
+		})
 	}
 
 	// Every participant's binding, recorded when every one of them binds.

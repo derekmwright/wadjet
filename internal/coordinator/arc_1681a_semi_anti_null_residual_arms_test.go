@@ -695,7 +695,7 @@ func nrVerdict(want string, res *oracle.Result, err error) (string, string) {
 // PostgreSQL's.
 func nrKnown(name, arm string) (verdict, cause string, known bool) {
 	p := strings.Split(name, "/")
-	single := arm == "single" || arm == "spilled512k"
+	_ = arm
 	in := func(s string, set ...string) bool {
 		for _, x := range set {
 			if s == x {
@@ -721,10 +721,12 @@ func nrKnown(name, arm string) (verdict, cause string, known bool) {
 		return "refused", "the per-row correlated re-run has no literal for a float outer value", true
 	case op == "innerOnly" && in(col, "c_by", "c_ip", "c_ip6"):
 		return "refused", "the ::bytea / ::inet cast spelling in the body: type does not exist", true
-	case op == "innerOnly" && col == "c_iv" && single:
-		return "refused", "an INTERVAL literal in an inner-only body filter: invalid input syntax for type duration \"04:00:00\"", true
 	case op == "innerOnly" && col == "c_iv":
-		return "wrong", "an INTERVAL literal in an inner-only body filter on the DAG", true
+		// #1713d: the twin column is DURATION (bigint) here, and an interval
+		// meets only an interval — 42883 on every arm, as PostgreSQL raises
+		// for bigint > interval (the DAG arms answered wrong rows before,
+		// the single-process arms 22007).
+		return "refused", "an INTERVAL literal beside the DURATION twin column: operator does not exist: bigint > interval", true
 	}
 	return "", "", false
 }

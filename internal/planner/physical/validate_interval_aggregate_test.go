@@ -35,13 +35,18 @@ func TestIntervalAggregateArgumentIsRefused(t *testing.T) {
 		{"SELECT (SELECT max(INTERVAL '1 day') FROM lat_ord) AS v", "0A000", msg},
 		// Controls.
 		{"SELECT count(*) AS v FROM lat_ord", "", ""},
-		{"SELECT count(*) OVER (PARTITION BY CAST(customer AS INTERVAL)) AS v FROM lat_ord", "", ""},
 		{"SELECT max(c_ts + INTERVAL '1 day') AS v FROM tm", "", ""},
 		{"SELECT min_by(id, c_ts + INTERVAL '1 second') AS v FROM tm", "", ""},
 		{"SELECT count(CAST(customer AS INTERVAL) = INTERVAL '1 day') AS v FROM lat_ord", "", ""},
-		{"SELECT sum(extract(day FROM CAST(customer AS INTERVAL))) AS v FROM lat_ord", "", ""},
+		{"SELECT sum(date_part('day', CAST(customer AS INTERVAL))) AS v FROM lat_ord", "", ""},
 		{"SELECT sum(c_dur) AS v FROM tm", "", ""},
 		{"SELECT max(CASE WHEN id = 1 THEN CAST(INTERVAL '1 day' AS TEXT) END) AS v FROM lat_ord", "", ""},
-		{"SELECT CAST(customer AS INTERVAL) * 2 AS v FROM lat_ord", "", ""},
+		{"SELECT CAST(CAST(customer AS INTERVAL) * 2 AS TEXT) AS v FROM lat_ord", "", ""},
+		// #1713d: the interval rule refuses these too (a key, EXTRACT's
+		// numeric/float8 type gap, a published interval); they were
+		// controls under #1713c.
+		{"SELECT count(*) OVER (PARTITION BY CAST(customer AS INTERVAL)) AS v FROM lat_ord", "0A000", "PARTITION BY key"},
+		{"SELECT sum(extract(day FROM CAST(customer AS INTERVAL))) AS v FROM lat_ord", "0A000", "EXTRACT over an interval"},
+		{"SELECT CAST(customer AS INTERVAL) * 2 AS v FROM lat_ord", "0A000", "query result column"},
 	})
 }

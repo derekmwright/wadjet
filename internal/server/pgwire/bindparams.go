@@ -29,6 +29,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/engine/exec/kernel"
 	"github.com/derekmwright/wadjet/internal/engine/expr"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
 
@@ -51,6 +52,7 @@ const (
 	oidTime        = 1083
 	oidTimestamp   = 1114
 	oidTimestampTZ = 1184
+	oidInterval    = 1186
 	oidNumeric     = 1700
 	oidUUID        = 2950
 )
@@ -250,6 +252,11 @@ func renderTextParam(s string, oid uint32) (string, error) {
 		return timestamptzParamLiteral(s), nil
 	case oid == oidUUID:
 		return "CAST(" + quoteLiteral(s) + " AS UUID)", nil
+	case oid == oidInterval:
+		// An interval parameter stays an INTERVAL (#1713d): spliced as SQL's
+		// unknown it lost the type before the plan's interval rule could see
+		// it, and a quoted literal beside a timestamp read as a date.
+		return "CAST(" + quoteLiteral(s) + " AS INTERVAL)", nil
 	default:
 		// Text family and unknown: SQL's unknown literal, which the
 		// position it lands in reads by its own input function — the
@@ -370,6 +377,8 @@ func paramNullLiteral(oid uint32) string {
 		return "CAST(NULL AS TIMESTAMP)"
 	case oidUUID:
 		return "CAST(NULL AS UUID)"
+	case oidInterval:
+		return "CAST(NULL AS INTERVAL)"
 	}
 	return "NULL"
 }
@@ -525,6 +534,11 @@ func renderBinaryParam(raw []byte, oid uint32) (string, error) {
 		// form.
 		return renderTextParam(string(raw), oid)
 
+	case oidInterval:
+		// PostgreSQL's binary interval is microseconds / days / months; this
+		// engine's interval holds whole seconds and is never materialized
+		// (#1713d), so the binary form is refused rather than misread.
+		return "", sqlerr.New("0A000", "an interval parameter in binary format is not supported: send it in text format")
 	default:
 		// An unknown type in binary format cannot be read. Saying so beats
 		// quoting the raw bytes, which is how a silent wrong answer starts.

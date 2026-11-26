@@ -5,6 +5,8 @@ package expr
 import (
 	"math"
 	"testing"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // #1713c: two INTERVAL values compare by PostgreSQL 17.11's interval_cmp
@@ -55,9 +57,34 @@ func TestIntervalCompareIsPostgresIntervalCmp(t *testing.T) {
 		}
 	}
 	// An OPAQUE interval (input the single-unit fields cannot hold) has no
-	// value here: it keeps the text order it always had, never a guess.
+	// value here: compared, it is refused 0A000 (#1713d) — its text order
+	// ("1 day 02:00:00" against "26:00:00", one interval on PostgreSQL) was
+	// no interval order. So is an interval met by a non-interval.
 	opaque := IntervalValue{text: "1 day 02:00:00"}
-	if !compare(opaque, IntervalValue{text: "1 day 02:00:00"}, CmpEq) || compare(opaque, IntervalValue{Hours: 26}, CmpEq) {
-		t.Errorf("an opaque interval must keep its text comparison")
+	for _, pair := range [][2]any{
+		{opaque, IntervalValue{text: "1 day 02:00:00"}},
+		{opaque, IntervalValue{Hours: 26}},
+		{IntervalValue{Hours: 26}, opaque},
+		{IntervalValue{Days: 1}, "1 day"},
+		{int64(86400), IntervalValue{Days: 1}},
+	} {
+		if state := comparePanicState(pair[0], pair[1]); state != "0A000" {
+			t.Errorf("compare(%#v, %#v): refusal %q, want 0A000", pair[0], pair[1], state)
+		}
 	}
+}
+
+// comparePanicState is the SQLSTATE compare() raises for a pair, or "".
+func comparePanicState(a, b any) (state string) {
+	defer func() {
+		if r := recover(); r != nil {
+			if fe, ok := r.(fatalEval); ok {
+				state = sqlerr.StateOf(fe.err)
+				return
+			}
+			panic(r)
+		}
+	}()
+	compare(a, b, CmpEq)
+	return ""
 }

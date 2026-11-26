@@ -37,7 +37,10 @@ func IsIntervalNode(node plansql.Node) bool {
 		l, r := IsIntervalNode(n.Left), IsIntervalNode(n.Right)
 		switch n.Op {
 		case "+", "-":
-			return l && r
+			// A quoted operand that reads as interval input beside an
+			// interval is one (PostgreSQL resolves the unknown to interval;
+			// intervalPair evaluates it so): `INTERVAL '1 day' + '1 hour'`.
+			return (l && r) || (l && isQuotedIntervalText(n.Right)) || (r && isQuotedIntervalText(n.Left))
 		case "*":
 			return l != r
 		case "/":
@@ -67,6 +70,19 @@ func IsIntervalNode(node plansql.Node) bool {
 		}
 	}
 	return false
+}
+
+// isQuotedIntervalText reports a quoted literal that reads as interval input.
+func isQuotedIntervalText(n plansql.Node) bool {
+	for {
+		p, ok := n.(*plansql.ParenNode)
+		if !ok {
+			break
+		}
+		n = p.Inner
+	}
+	l, ok := n.(*plansql.Lit)
+	return ok && l.Kind == plansql.LitString && intervalInputText(l.Value)
 }
 
 // intervalOrNullChoice reports a choice's branches that are each an interval,

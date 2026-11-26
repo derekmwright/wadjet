@@ -908,6 +908,11 @@ func (pt *paramTyper) windowCall(f *plansql.FuncCallNode, sc *scope) {
 // column declaration uses — `CAST($1 AS INTEGER)` takes integer, whatever
 // width the engine's integer CAST then carries.
 func castOID(c *plansql.CastNode) uint32 {
+	if strings.EqualFold(strings.TrimSpace(c.TypeName), "interval") {
+		// The column grammar resolves INTERVAL to DURATION (bigint); a CAST
+		// to INTERVAL takes an interval (#1713d).
+		return oidInterval
+	}
 	col, err := parquet.ResolveColumn("p", c.TypeName)
 	if err != nil {
 		return 0

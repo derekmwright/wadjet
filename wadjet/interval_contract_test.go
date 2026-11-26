@@ -55,15 +55,19 @@ func TestIntervalAnswersNothingBaseAnsweredRight(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct{ sql, want, state string }{
-		// B4 — PostgreSQL's own output spellings, as base answered them.
-		{"SELECT CAST('1 day 02:00:00' AS INTERVAL) AS v", "1 day 02:00:00", ""},
-		{"SELECT CAST('00:30:00' AS INTERVAL) AS v", "00:30:00", ""},
-		{"SELECT CAST('02:00:00' AS INTERVAL) AS v", "02:00:00", ""},
-		{"SELECT CAST('1 year 2 mons' AS INTERVAL) AS v", "1 year 2 mons", ""},
-		{"SELECT CAST('10 days 10:00:00' AS INTERVAL) AS v", "10 days 10:00:00", ""},
-		{"SELECT '1 day 02:00:00'::interval AS v", "1 day 02:00:00", ""},
-		{"SELECT CAST(CAST('1 day 02:00:00' AS INTERVAL) AS TEXT) AS v", "1 day 02:00:00", ""},
-		{"SELECT CAST(s AS INTERVAL) AS v FROM ivc", "1 day 02:00:00", ""},
+		// B4 — PostgreSQL's own output spellings. #1713d: an interval is never
+		// a result column (0A000, the explicit text cast is the workaround),
+		// and the text of one the single-unit fields cannot hold is refused
+		// too (it is the input spelling, not PostgreSQL's canonical output in
+		// general). These answered that text, declared text, before.
+		{"SELECT CAST('1 day 02:00:00' AS INTERVAL) AS v", "", "0A000"},
+		{"SELECT CAST('00:30:00' AS INTERVAL) AS v", "", "0A000"},
+		{"SELECT CAST('02:00:00' AS INTERVAL) AS v", "", "0A000"},
+		{"SELECT CAST('1 year 2 mons' AS INTERVAL) AS v", "", "0A000"},
+		{"SELECT CAST('10 days 10:00:00' AS INTERVAL) AS v", "", "0A000"},
+		{"SELECT '1 day 02:00:00'::interval AS v", "", "0A000"},
+		{"SELECT CAST(CAST('1 day 02:00:00' AS INTERVAL) AS TEXT) AS v", "", "0A000"},
+		{"SELECT CAST(s AS INTERVAL) AS v FROM ivc", "", "0A000"},
 		{"SELECT id AS v FROM ivc WHERE CAST(s AS INTERVAL) IS NOT NULL", "1", ""},
 		// ... and applying one is loud, never the +1 ms base added.
 		{"SELECT ts + CAST('1 day 02:00:00' AS INTERVAL) AS v FROM ivc", "", "0A000"},
@@ -72,13 +76,14 @@ func TestIntervalAnswersNothingBaseAnsweredRight(t *testing.T) {
 		{"SELECT CAST('abc' AS INTERVAL) AS v", "", "22007"},
 		{"SELECT CAST('1 fortnight' AS INTERVAL) AS v", "", "22007"},
 		// P3 — PostgreSQL's interval output.
-		{"SELECT CAST('-1 days' AS INTERVAL) AS v", "-1 days", ""},
-		{"SELECT INTERVAL '-1 day' AS v", "-1 days", ""},
-		{"SELECT INTERVAL '14 months' AS v", "1 year 2 mons", ""},
-		{"SELECT INTERVAL '25 hours' AS v", "25:00:00", ""},
-		{"SELECT INTERVAL '90 minutes' AS v", "01:30:00", ""},
-		{"SELECT CAST('1 week' AS INTERVAL) AS v", "7 days", ""},
-		{"SELECT CAST('0' AS INTERVAL) AS v", "00:00:00", ""},
+		{"SELECT CAST(CAST('-1 days' AS INTERVAL) AS TEXT) AS v", "-1 days", ""},
+		{"SELECT CAST(INTERVAL '-1 day' AS TEXT) AS v", "-1 days", ""},
+		{"SELECT CAST(INTERVAL '14 months' AS TEXT) AS v", "1 year 2 mons", ""},
+		{"SELECT CAST(INTERVAL '25 hours' AS TEXT) AS v", "25:00:00", ""},
+		{"SELECT INTERVAL '25 hours' AS v", "", "0A000"},
+		{"SELECT CAST(INTERVAL '90 minutes' AS TEXT) AS v", "01:30:00", ""},
+		{"SELECT CAST(CAST('1 week' AS INTERVAL) AS TEXT) AS v", "7 days", ""},
+		{"SELECT CAST(CAST('0' AS INTERVAL) AS TEXT) AS v", "00:00:00", ""},
 		// B1 — the clock part past ±292 years of nanoseconds.
 		{"SELECT CAST(TIMESTAMP '2026-03-03 00:00:00' + INTERVAL '3000000 hours' AS TEXT) AS v", "2368-05-29 00:00:00", ""},
 		{"SELECT CAST(TIMESTAMP '2026-03-03 00:00:00' + INTERVAL '10000000000 seconds' AS TEXT) AS v", "2343-01-21 17:46:40", ""},
@@ -123,21 +128,23 @@ func TestIntervalAnswersNothingBaseAnsweredRight(t *testing.T) {
 		fmt.Sprint(res.Rows[0]["s"]) != "1 day 02:00:00" || res.Rows[0]["n"] != nil {
 		t.Errorf("after the refused writes: %v (%v), want the one seeded row unchanged", res, err)
 	}
-	// An INTERVAL into TEXT is its PostgreSQL text on every door (PostgreSQL
-	// 17.11: `1 day`, `01:30:00`).
-	for i, st := range []string{
+	// An INTERVAL into TEXT: PostgreSQL 17.11 stores its text (`1 day`,
+	// `01:30:00`); #1713d refuses it 0A000 — an interval is never stored as
+	// its text — and the explicit text cast stores it.
+	for _, st := range []string{
 		"INSERT INTO ivc (id, s) VALUES (10, INTERVAL '1 day')",
 		"INSERT INTO ivc (id, s) SELECT 11, INTERVAL '1 day'",
 		"INSERT INTO ivc (id, s) VALUES (12, CAST('90 minutes' AS INTERVAL))",
 		"INSERT INTO ivc (id, s) VALUES (13, CAST('1 year 2 mons' AS INTERVAL))",
 	} {
-		if _, err := db.Execute(ctx, st); err != nil {
-			t.Fatalf("%s: %v", st, err)
+		if _, err := db.Execute(ctx, st); sqlerr.StateOf(err) != "0A000" {
+			t.Errorf("%s: %v, want 0A000", st, err)
 		}
-		want := []string{"1 day", "1 day", "01:30:00", "1 year 2 mons"}[i]
-		res, err := db.Query(ctx, fmt.Sprintf("SELECT s FROM ivc WHERE id = %d", 10+i))
-		if err != nil || len(res.Rows) != 1 || fmt.Sprint(res.Rows[0]["s"]) != want {
-			t.Errorf("%s stored %v (%v), PostgreSQL 17.11 %q", st, res, err, want)
-		}
+	}
+	if _, err := db.Execute(ctx, "INSERT INTO ivc (id, s) VALUES (14, CAST(CAST('90 minutes' AS INTERVAL) AS TEXT))"); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := db.Query(ctx, "SELECT s FROM ivc WHERE id = 14"); err != nil || len(res.Rows) != 1 || fmt.Sprint(res.Rows[0]["s"]) != "01:30:00" {
+		t.Errorf("the explicit text cast stored %v (%v), PostgreSQL 17.11 %q", res, err, "01:30:00")
 	}
 }

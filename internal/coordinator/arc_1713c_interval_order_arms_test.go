@@ -74,50 +74,6 @@ func ivHeaderTypes(s string) string {
 	return head
 }
 
-// ivTypes is each typed cell's declared header on every arm. An interval
-// declares text here (temporal r20; PostgreSQL: interval, OID 1186).
-var ivTypes = map[string]string{
-	"nullif/equal":       "a:text",
-	"nullif/equalMonth":  "a:text",
-	"nullif/unequal":     "a:text",
-	"nullif/unequalText": "a:text",
-	"nullif/nullSecond":  "a:text",
-	"nullif/nullFirst":   "a:text",
-	"nullif/cast":        "a:text,b:text",
-	"nullif/unknown":     "a:text,b:text",
-	"ext/greatestLeast":  "g:text,l:text",
-	// Round 3: an interval aggregate argument is refused before a header
-	// exists; a CASE / COALESCE interval declares text as the literal does;
-	// EXTRACT is float-carried (ADR-0024 §2c: PostgreSQL's numeric, OID
-	// 1700), date_part float8 on both.
-	"agg/countTimes":        "ERR 0A000",
-	"agg/countNeg":          "ERR 0A000",
-	"agg/countDistinctNeg":  "ERR 0A000",
-	"agg/countDistinctPlus": "ERR 0A000",
-	"agg/countRowsTimes":    "ERR 0A000",
-	"agg/countLit":          "ERR 0A000",
-	"agg/countCast":         "ERR 0A000",
-	"agg/maxLit":            "ERR 0A000",
-	"agg/maxArith":          "ERR 0A000",
-	"agg/maxCast":           "ERR 0A000",
-	"agg/minLit":            "ERR 0A000",
-	"agg/minArith":          "ERR 0A000",
-	"agg/minCast":           "ERR 0A000",
-	"agg/sumLit":            "ERR 0A000",
-	"agg/sumArith":          "ERR 0A000",
-	"agg/sumCast":           "ERR 0A000",
-	"agg/avgLit":            "ERR 0A000",
-	"agg/avgArith":          "ERR 0A000",
-	"agg/avgCast":           "ERR 0A000",
-	"choice/caseTimes":      "a:text",
-	"choice/caseNeg":        "a:text",
-	"choice/coalesceTimes":  "a:text",
-	"choice/case":           "a:text",
-	"choice/coalesceFirst":  "a:text",
-	"obs/extractType":       "a:double precision,b:double precision",
-	"obs/extractTsType":     "a:double precision,b:double precision",
-}
-
 const ivAnswersPath = "testdata/arc_1713c_interval_order_pg17.tsv"
 
 // ivPairs are the operand pairs of the scalar comparison cells, as interval
@@ -182,6 +138,7 @@ func ivCells() []ivCell {
 		vals = append(vals, "("+strconv.Itoa(i+1)+", "+v+")")
 	}
 	out = append(out, ivCell{name: "ddl/insert", sql: "INSERT INTO iv_s VALUES " + strings.Join(vals, ", "), ddl: true})
+	out = append(out, ivFixturesD()...)
 
 	// Scalar comparison: two literals, two CASTs, a literal beside a CAST.
 	for _, p := range ivPairs {
@@ -257,7 +214,8 @@ func ivCells() []ivCell {
 	add("box/array", "SELECT ARRAY[INTERVAL '1 day'] = ARRAY[INTERVAL '24 hours'] AS a, ARRAY[INTERVAL '2 days'] < ARRAY[INTERVAL '10 days'] AS b, ARRAY[INTERVAL '1 month'] = ARRAY[INTERVAL '30 days'] AS c")
 	add("box/arrayGroup", "SELECT count(*) AS g FROM (SELECT x FROM (VALUES (ARRAY[INTERVAL '1 day']), (ARRAY[INTERVAL '24 hours'])) v(x) GROUP BY x) t")
 	out = append(out, ivCellsR2()...)
-	return append(out, ivCellsR3()...)
+	out = append(out, ivCellsR3()...)
+	return append(out, ivCellsD()...)
 }
 
 // ivCellsR3 is round 3's classes (#1713c r3): an interval as an AGGREGATE or
@@ -607,7 +565,9 @@ func TestArc1713cMeasure(t *testing.T) {
 	if r := run("SET statement_timeout = '30s'"); r.Err != nil {
 		t.Fatal(r.Err)
 	}
-	run("DROP TABLE IF EXISTS iv_s")
+	for _, tbl := range ivDDLTables {
+		run("DROP TABLE IF EXISTS " + tbl)
+	}
 	var b strings.Builder
 	b.WriteString("# PostgreSQL 17.11 (postgres:17-alpine, --locale=C --encoding=UTF8, IntervalStyle postgres) answers for arc_1713c_interval_order_arms_test.go (TestArc1713cMeasure).\n")
 	b.WriteString("# name<TAB>names | rows (t/f booleans) | ERR <SQLSTATE> | ok (DDL).\n")
@@ -627,9 +587,7 @@ func TestArc1713cMeasure(t *testing.T) {
 			header := make([]string, len(r.FieldDescriptions))
 			for i, fd := range r.FieldDescriptions {
 				header[i] = fd.Name
-				if c.typed {
-					header[i] += ":" + ivPGTypeName(fd.DataTypeOID)
-				}
+				header[i] += ":" + ivPGTypeName(fd.DataTypeOID)
 			}
 			rows := make([]string, len(r.Rows))
 			for i, row := range r.Rows {
@@ -725,91 +683,312 @@ func TestArc1713cMeasure(t *testing.T) {
 //     quoted constant as interval input when it resolves the statement
 //     (22007 for 'x'); here a branch is cast only when it is reached, so the
 //     unreached 'x' is never read (base-identical).
+//
+// ivKnown is Wadjet's expected answer for every (cell, arm) that does not
+// give PostgreSQL's (#1713d: the disposition, kept apart from PostgreSQL's
+// measured answers in the TSV). A key "cell@arm" overrides "cell" on that arm.
+// A pin FAILS the moment the arm's answer changes in any way — re-pin it, or
+// delete it when the arm starts agreeing.
+//
+// ivRefused: the INTERVAL rule's refusals (physical/validate_interval_use.go,
+// the maintainer's A+ interim), 0A000 at plan time on every arm unless noted:
+// a published interval (a result column, a derived table / CTE / set
+// operation / VALUES column, which is what every key, order, min / max and
+// subquery-membership cell of r28's representation class reaches), a GROUP BY
+// / ORDER BY / PARTITION BY / window ORDER BY key, an aggregate's or window
+// function's argument (r30), an array or row element, EXTRACT (numeric there,
+// float8 here; date_part answers), `||`, a comparison with a subquery's
+// column, a table function's argument; and at run time an OPAQUE interval
+// (input the single-unit fields cannot hold, IntervalValue.text) wherever it
+// is applied, compared or rendered, and a sub-second or infinite arithmetic
+// result (r29). PostgreSQL answers each of them.
+//
+// The rest, each with its reason:
+//   - box/subsecond: a sub-second interval is 22007 here (r29's class).
+//   - sweep/rowCtor: the ROW(...) constructor spelling is 42601 here, every
+//     type alike. pos/rangeFrame: an offset RANGE frame is 42601 here, 0A000
+//     there; value-offset RANGE was never supported (pinned, unchanged).
+//     ddl/intervalArray: the `type[]` column spelling is 42601 here.
+//   - sweep/derivedSum: sum over a derived column whose block publishes an
+//     interval: the binder's own 42883 (sum of a text-declared column) comes
+//     before the interval rule's 0A000; refused either way.
+//   - ddl/intervalColumn: a NEW column spelled INTERVAL is refused 0A000 (the
+//     ruling's point 3); PostgreSQL creates it.
+//   - ex/secondTimestamp: a TIMESTAMP's EXTRACT, not an interval's (ADR-0024
+//     §2c's float carrier: 5 where PostgreSQL's numeric prints 5.000000).
+//   - obs/timeBucket*, ctl/timeBucket: PostgreSQL has no time_bucket (42883);
+//     it is this engine's extension, and its stride is on the rule's
+//     allowlist (a TIMESTAMP result; calendar, opaque and non-positive
+//     strides refused by the function). obs/timeBucket* print the TIMESTAMP
+//     box's epoch milliseconds through this harness (no text cast).
+//   - obs/dateAdd*, ctl/dateAdd: date_add answers PostgreSQL's instant as a
+//     timestamp where PostgreSQL's date_add is timestamptz ("+00"): the zone
+//     type this engine lacks (temporal r9 / r10's family), not the interval.
+//   - tsub/*: timestamp subtraction is a double of milliseconds here and an
+//     interval there (temporal r16); date - date is bigint here, integer
+//     there; timestamp - date is 42883 here. Measured and left unchanged (the
+//     brief's correction 1). tsub/vsInterval: comparing that number with an
+//     interval is 42883 under the rule (a non-interval operand).
+//   - fam/opaqueEmpty@dag*, pos/divZeroEmpty@dag*: a row-dependent error
+//     under a conjunct that rejects every row. The stage DAG evaluates the
+//     conjuncts in another order than the single-process plan and raises the
+//     error the other arms never reach: the opaque interval's run-time
+//     refusal here exactly as 22012 for a division by zero (pos/divZeroEmpty,
+//     the same disagreement with no interval anywhere).
 var ivKnown = map[string]string{
-	"box/subsecond":              "ERR 22007",
-	"box/multifield":             "a,b,c | f,f,t",
-	"key/groupBy":                "k,n | -1 days,1; 00:00:00,1; 1 day,1; 1 mon,1; 1 year,1; 10 days,1; 2 days,1; 24:00:00,1; 25:00:00,1; 30 days,1; 360 days,1; 720:00:00,1; NULL,1; 7 days,2",
-	"key/groupCount":             "g | 14",
-	"key/distinctCount":          "g | 14",
-	"key/countDistinct":          "ERR 0A000",
-	"key/inSubquery":             "id | 2",
-	"key/inSubquery@single":      "(0 rows)",
-	"key/inSubquery@spilled512k": "(0 rows)",
-	"key/scalarSub":              "id | 2",
-	"key/joinDerived":            "l,r | 13,14",
-	"key/joinMixed":              "l,r | 13,14",
-	"key/joinMixed@dag":          ivAllPairs(),
-	"key/joinMixed@dag-shuffled": ivAllPairs(),
-	"key/joinMixed@dag-morsel4":  ivAllPairs(),
-	"key/partition":              "id,n | 1,1; 2,1; 3,1; 4,1; 5,1; 6,1; 7,1; 8,1; 9,1; 10,1; 11,1; 12,1; 13,2; 14,2; 15,1",
-	"key/union":                  "n | 2",
-	"key/intersect":              "n | 0",
-	"key/except":                 "n | 1",
-	"key/valuesGroup":            "g | 4",
-	"order/asc":                  "id | 8; 1; 3; 7; 6; 12",
-	"order/desc":                 "id | 12; 6; 7; 3; 1; 8",
-	"order/topN":                 "id | 12; 6",
-	"order/minMax":               "ERR 0A000",
-	"order/values":               "x | 10 days; 2 days; 25:00:00",
-	"arith/justifyDays":          "ERR 42883",
-	"key/unionAllMax":            "a | 2 days",
-	"unk/caseSubject":            "a | 0",
-	"unk/number":                 "a | f",
-	"ar/unaryPlus":               "a | 1 day",
-	"ar/plusUnknownDate":         "a | 1704153600000",
-	"ar/textColPlus":             "id,a | 1,NULL; 6,NULL",
-	"ar/mulSubSecond":            "ERR 0A000",
-	"ar/mulSubSecondCascade":     "ERR 0A000",
-	"ar/mulInf":                  "ERR 0A000",
-	"ar/divSubSecond":            "ERR 0A000",
-	"ar/divSubSecondCascade":     "ERR 0A000",
-	"ar/opaque":                  "ERR 0A000",
-	"ar/opaqueNeg":               "ERR 0A000",
-	"ex/opaque":                  "ERR 0A000",
-	"ex/second":                  "a,b | 30,-30",
-	"ex/epoch":                   "a,b,c,d | 86400,2592000,31557600,-31557600",
-	"ex/secondTimestamp":         "a | 5",
-	"ex/millisecond":             "ERR 42883",
-	"ex/decade":                  "ERR 42883",
-	"agg/countTimes":             "ERR 0A000",
-	"agg/countNeg":               "ERR 0A000",
-	"agg/countDistinctNeg":       "ERR 0A000",
-	"agg/countDistinctPlus":      "ERR 0A000",
-	"agg/countRowsTimes":         "ERR 0A000",
-	"agg/countGroupPlus":         "ERR 0A000",
-	"agg/countLit":               "ERR 0A000",
-	"agg/countCast":              "ERR 0A000",
-	"agg/maxLit":                 "ERR 0A000",
-	"agg/maxArith":               "ERR 0A000",
-	"agg/maxCast":                "ERR 0A000",
-	"agg/minLit":                 "ERR 0A000",
-	"agg/minArith":               "ERR 0A000",
-	"agg/minCast":                "ERR 0A000",
-	"agg/sumLit":                 "ERR 0A000",
-	"agg/sumArith":               "ERR 0A000",
-	"agg/sumCast":                "ERR 0A000",
-	"agg/avgLit":                 "ERR 0A000",
-	"agg/avgArith":               "ERR 0A000",
-	"agg/avgCast":                "ERR 0A000",
-	"agg/having":                 "ERR 0A000",
-	"agg/caseArg":                "ERR 0A000",
-	"win/maxLit":                 "ERR 0A000",
-	"win/countArith":             "ERR 0A000",
-	"win/firstArith":             "ERR 0A000",
-	"win/lagCast":                "ERR 0A000",
-	"win/sumCast":                "ERR 0A000",
-	"obs/arrayTimes":             "a | [172800000000000]",
-	"obs/arrayNeg":               "a | [-86400000000000]",
-	"obs/arrayLit":               "a | [86400000000000]",
-	"obs/timeBucket":             "a | 1704153600000",
-	"obs/timeBucketLit":          "a | 1704153600000",
-	"obs/dateAdd":                "a | 2024-02-02 00:00:00",
-	"obs/dateAddLit":             "a | 2024-02-02 00:00:00",
-	"sweep/rowCtor":              "ERR 42601",
-	"sweep/caseQuotedAgg":        "ERR 0A000",
-	"sweep/derivedSum":           "ERR 42883",
-	"sweep/caseQuotedBad":        "a | 1 day",
-	"sweep/coalesceQuotedBad":    "a | 1 day",
+	// arc VL's text-date reading beside an interval (temporal r19's
+	// family), base-identical and left as it was: `interval + text_column`
+	// reads the column as a date (NULL for interval input) and a quoted
+	// date beside an interval is a date shift, where PostgreSQL resolves the
+	// unknown to interval (42883 / 22007). Not interval-valued; outside the
+	// rule's families.
+	"ar/textColPlus":                "id,a | 1,NULL; 6,NULL",
+	"ar/plusUnknownDate":            "a | 1704153600000",
+	"box/subsecond":                 "ERR 22007",
+	"ex/secondTimestamp":            "a | 5",
+	"obs/timeBucket":                "a | 1704153600000",
+	"obs/timeBucketLit":             "a | 1704153600000",
+	"obs/dateAdd":                   "a | 2024-02-02 00:00:00",
+	"obs/dateAddLit":                "a | 2024-02-02 00:00:00",
+	"sweep/rowCtor":                 "ERR 42601",
+	"sweep/derivedSum":              "ERR 42883",
+	"fam/opaqueEmpty":               "(0 rows)",
+	"fam/opaqueEmpty@dag":           "ERR 0A000",
+	"fam/opaqueEmpty@dag-shuffled":  "ERR 0A000",
+	"fam/opaqueEmpty@dag-morsel4":   "ERR 0A000",
+	"ctl/timeBucket":                "id,b | 1,2024-01-31 10:00:00; 2,2024-02-29 23:00:00; 3,2023-12-31 00:00:00; 4,2024-03-01 12:00:00; 5,NULL",
+	"ctl/dateAdd":                   "id,a | 1,2024-02-29 00:00:00; 2,2024-03-29 00:00:00; 3,2024-01-31 00:00:00; 4,2024-04-01 00:00:00; 5,NULL",
+	"pos/rangeFrame":                "ERR 42601",
+	"pos/divZeroEmpty":              "(0 rows)",
+	"pos/divZeroEmpty@dag":          "ERR 22012",
+	"pos/divZeroEmpty@dag-shuffled": "ERR 22012",
+	"pos/divZeroEmpty@dag-morsel4":  "ERR 22012",
+	"tsub/tsTs":                     "a | 97200000",
+	"tsub/tsDate":                   "ERR 42883",
+	"tsub/rows":                     "l,r,dt | 2,1,2554200000; 3,2,-5268600000; 4,3,5313600000; 5,4,NULL",
+	"tsub/vsInterval":               "ERR 42883",
+	"tsub/vsNumber":                 "id | 1; 2; 4",
+	"tsub/groupKey":                 "k,n | -86400000,1; 2628000000,1; 5182200000,1; 5227200000,1",
+	"tsub/sum":                      "s | 12951000000",
+	"tsub/epoch":                    "id,e | 1,2628000000; 2,5182200000; 3,-86400000; 4,5227200000; 5,NULL",
+	"ddl/intervalArray":             "ERR 42601",
+}
+
+// ivRefused are the cells the INTERVAL rule refuses 0A000 on every arm
+// (ivKnown's first paragraph); ivPin answers "ERR 0A000" for each.
+var ivRefused = map[string]bool{
+	"box/multifield":            true,
+	"key/groupBy":               true,
+	"key/groupCount":            true,
+	"key/distinctCount":         true,
+	"key/countDistinct":         true,
+	"key/inSubquery":            true,
+	"key/scalarSub":             true,
+	"key/joinDerived":           true,
+	"key/joinMixed":             true,
+	"key/derivedFilter":         true,
+	"key/partition":             true,
+	"key/union":                 true,
+	"key/intersect":             true,
+	"key/except":                true,
+	"key/valuesGroup":           true,
+	"order/asc":                 true,
+	"order/desc":                true,
+	"order/topN":                true,
+	"order/minMax":              true,
+	"order/values":              true,
+	"print/fields":              true,
+	"arith/times":               true,
+	"arith/div":                 true,
+	"arith/plus":                true,
+	"arith/neg":                 true,
+	"arith/justifyDays":         true,
+	"arith/extract":             true,
+	"box/array":                 true,
+	"box/arrayGroup":            true,
+	"nullif/equal":              true,
+	"nullif/equalMonth":         true,
+	"nullif/unequal":            true,
+	"nullif/unequalText":        true,
+	"nullif/nullSecond":         true,
+	"nullif/nullFirst":          true,
+	"nullif/cast":               true,
+	"nullif/unknown":            true,
+	"nullif/rows":               true,
+	"ext/greatestLeast":         true,
+	"ext/month":                 true,
+	"ext/null":                  true,
+	"ext/three":                 true,
+	"ext/unknown":               true,
+	"ext/rows":                  true,
+	"ext/coalesce":              true,
+	"ext/coalesceUnknown":       true,
+	"range/yearsOk":             true,
+	"range/monthsOk":            true,
+	"range/monthsNegOk":         true,
+	"range/daysOk":              true,
+	"range/weeksOk":             true,
+	"range/hoursOk":             true,
+	"range/secondsOk":           true,
+	"key/unionAllMax":           true,
+	"ar/mulInt":                 true,
+	"ar/mulMonths":              true,
+	"ar/mulFrac":                true,
+	"ar/mulCascade":             true,
+	"ar/mulTypes":               true,
+	"ar/mulNeg":                 true,
+	"ar/mulRounding":            true,
+	"ar/mulSubSecond":           true,
+	"ar/mulSubSecondCascade":    true,
+	"ar/mulInf":                 true,
+	"ar/mulNull":                true,
+	"ar/divWhole":               true,
+	"ar/divCascade":             true,
+	"ar/divFrac":                true,
+	"ar/divMore":                true,
+	"ar/divText":                true,
+	"ar/divSubSecond":           true,
+	"ar/divSubSecondCascade":    true,
+	"ar/plus":                   true,
+	"ar/minus":                  true,
+	"ar/plusZero":               true,
+	"ar/plusUnknown":            true,
+	"ar/plusCast":               true,
+	"ar/neg":                    true,
+	"ar/negSum":                 true,
+	"ar/unaryPlus":              true,
+	"ar/opaque":                 true,
+	"ar/opaqueNeg":              true,
+	"ar/rows":                   true,
+	"ex/fields":                 true,
+	"ex/minuteQuarter":          true,
+	"ex/negative":               true,
+	"ex/quarter":                true,
+	"ex/zero":                   true,
+	"ex/second":                 true,
+	"ex/epoch":                  true,
+	"ex/millisecond":            true,
+	"ex/decade":                 true,
+	"ex/cast":                   true,
+	"ex/opaque":                 true,
+	"ex/rows":                   true,
+	"agg/countTimes":            true,
+	"agg/countNeg":              true,
+	"agg/countDistinctNeg":      true,
+	"agg/countDistinctPlus":     true,
+	"agg/countRowsTimes":        true,
+	"agg/countGroupPlus":        true,
+	"agg/countLit":              true,
+	"agg/countCast":             true,
+	"agg/maxLit":                true,
+	"agg/maxArith":              true,
+	"agg/maxCast":               true,
+	"agg/minLit":                true,
+	"agg/minArith":              true,
+	"agg/minCast":               true,
+	"agg/sumLit":                true,
+	"agg/sumArith":              true,
+	"agg/sumCast":               true,
+	"agg/avgLit":                true,
+	"agg/avgArith":              true,
+	"agg/avgCast":               true,
+	"agg/having":                true,
+	"agg/caseArg":               true,
+	"win/maxLit":                true,
+	"win/countArith":            true,
+	"win/firstArith":            true,
+	"win/lagCast":               true,
+	"win/sumCast":               true,
+	"agg/sumExtractControl":     true,
+	"choice/caseTimes":          true,
+	"choice/caseNeg":            true,
+	"choice/coalesceTimes":      true,
+	"choice/case":               true,
+	"choice/coalesceFirst":      true,
+	"choice/casePlus":           true,
+	"obs/arrayTimes":            true,
+	"obs/arrayNeg":              true,
+	"obs/arrayLit":              true,
+	"obs/extractType":           true,
+	"sweep/scalarSubTimes":      true,
+	"sweep/derivedTimes":        true,
+	"sweep/cteNeg":              true,
+	"sweep/unionAllTimes":       true,
+	"sweep/valuesTimes":         true,
+	"sweep/orderByTimes":        true,
+	"sweep/groupByTimes":        true,
+	"sweep/distinctNeg":         true,
+	"sweep/concat":              true,
+	"sweep/nullifTimes":         true,
+	"sweep/greatestNeg":         true,
+	"sweep/coalesceNeg":         true,
+	"sweep/caseThenTimes":       true,
+	"sweep/rowsNeg":             true,
+	"sweep/caseQuotedAgg":       true,
+	"sweep/caseQuotedTimes":     true,
+	"sweep/coalesceQuotedTimes": true,
+	"sweep/caseQuoted":          true,
+	"sweep/caseColumnControl":   true,
+	"sweep/derivedCount":        true,
+	"sweep/derivedMax":          true,
+	"rv/derivedCountTimes":      true,
+	"rv/derivedCountCoalesce":   true,
+	"rv/derivedCountCase":       true,
+	"rv/derivedMaxTimes":        true,
+	"rv/derivedMaxCoalesce":     true,
+	"rv/derivedCountNullif":     true,
+	"rv/gatherGroup":            true,
+	"rv/gatherGlobal":           true,
+	"rv/gatherCase":             true,
+	"rv/orderTimes":             true,
+	"rv/windowOrderTimes":       true,
+	"fam/groupDirect":           true,
+	"fam/groupDerived":          true,
+	"fam/groupCTE":              true,
+	"fam/groupSetOp":            true,
+	"fam/groupCase":             true,
+	"fam/groupContainer":        true,
+	"fam/distinctDerived":       true,
+	"fam/distinctCTE":           true,
+	"fam/distinctCase":          true,
+	"fam/setOpDerived":          true,
+	"fam/setOpCTE":              true,
+	"fam/setOpCoalesce":         true,
+	"fam/partitionDerived":      true,
+	"fam/partitionCase":         true,
+	"fam/orderAlias":            true,
+	"fam/orderDerived":          true,
+	"fam/orderCTE":              true,
+	"fam/orderCoalesce":         true,
+	"fam/orderWindow":           true,
+	"fam/minMaxDerived":         true,
+	"fam/minMaxCTE":             true,
+	"fam/minMaxCase":            true,
+	"fam/joinCTE":               true,
+	"fam/subAny":                true,
+	"fam/subInText":             true,
+	"fam/subScalarCTE":          true,
+	"fam/opaqueRowCompare":      true,
+	"fam/opaqueRowText":         true,
+	"fam/opaqueRowShift":        true,
+	"pos/generateSeries":        true,
+	"pos/dateTrunc":             true,
+	"pos/limit0":                true,
+	"pos/emptyInput":            true,
+	"pos/nullLiteral":           true,
+	"pos/concat":                true,
+	"pos/rowCompare":            true,
+	"ddl/intervalColumn":        true,
+}
+
+// ivTypeGaps is a cell's declared header where its VALUE agrees with
+// PostgreSQL's and its TYPE does not, each a gap outside the interval rule.
+var ivTypeGaps = map[string]string{
+	// A TIMESTAMP's EXTRACT is float8 here, numeric there (ADR-0024 §2c).
+	"obs/extractTsType": "a:double precision,b:double precision",
+	// date - date is bigint here, integer there (temporal r16's class,
+	// unchanged).
+	"tsub/dateDate": "a:bigint",
 }
 
 // ivAllPairs is every (l, r) with l < r whose LEFT row's text is not NULL —
@@ -832,6 +1011,9 @@ func ivAllPairs() string {
 func ivPin(cell, arm string) string {
 	if p, ok := ivKnown[cell+"@"+arm]; ok {
 		return p
+	}
+	if ivRefused[cell] {
+		return "ERR 0A000"
 	}
 	return ivKnown[cell]
 }
@@ -863,30 +1045,31 @@ func TestArc1713cIntervalOrderEveryArm(t *testing.T) {
 			t.Fatalf("cell %s has no PostgreSQL answer: re-measure the table", c.name)
 		}
 		if c.ddl {
-			if got := writer(c.sql); got != want {
-				t.Errorf("%s\n  %s\n  writer got  %s\n  want        %s (PostgreSQL 17.11)", c.name, c.sql, got, want)
+			// A DDL cell answers PostgreSQL's "ok" or its pinned refusal
+			// (#1713d: a NEW interval column is refused).
+			exp := want
+			if pin := ivPin(c.name, ""); pin != "" {
+				exp = pin
+			}
+			if got := writer(c.sql); got != exp {
+				t.Errorf("%s\n  %s\n  writer got  %s\n  want        %s (PostgreSQL 17.11 %s)", c.name, c.sql, got, exp, want)
 			}
 			continue
 		}
-		wantTypes := ""
-		if c.typed {
-			// The declared types ride beside the value: PostgreSQL's from
-			// the wire OID, ours from the result's column declaration, which
-			// is what pgwire publishes. Compared against ivTypes, never
-			// against PostgreSQL's (temporal r20: an interval declares text).
-			wantTypes = ivHeaderTypes(want)
-			want = ivNormalize(want)
-		}
+		// The VALUE (names and rows) and, for an answer, the declared TYPES
+		// (#1713d restored them): PostgreSQL's types from the wire OIDs in
+		// the answer file, ours from the result's column declaration — what
+		// pgwire publishes — compared after ivTypeName, unless ivTypeGaps
+		// names the cell's known type divergence.
+		wantTypes := ivHeaderTypes(want)
+		wantValue := ivNormalize(want)
 		for _, arm := range arms {
 			raw := arm.run(c.sql)
 			got := ivNormalize(raw)
+			gotTypes := ivTypeNames(ivHeaderTypes(raw))
 			dump.WriteString(c.name + "\t" + arm.name + "\t" + got + "\n")
-			if c.typed {
-				gotTypes := ivHeaderTypes(raw)
+			if strings.Contains(raw, " | ") {
 				dump.WriteString(c.name + "\t" + arm.name + "\ttypes\t" + gotTypes + "\tPostgreSQL\t" + wantTypes + "\n")
-				if gotTypes != ivTypes[c.name] {
-					t.Errorf("%s on %s: declared %q, pinned %q (PostgreSQL 17.11 %q)", c.name, arm.name, gotTypes, ivTypes[c.name], wantTypes)
-				}
 			}
 			if pin := ivPin(c.name, arm.name); pin != "" {
 				pinned++
@@ -895,9 +1078,19 @@ func TestArc1713cIntervalOrderEveryArm(t *testing.T) {
 				}
 				continue
 			}
-			if got != want {
-				t.Errorf("%s\n  %s\n  arm  %s\n  got  %s\n  want %s (PostgreSQL 17.11)", c.name, c.sql, arm.name, got, want)
+			if got != wantValue {
+				t.Errorf("%s\n  %s\n  arm  %s\n  got  %s\n  want %s (PostgreSQL 17.11)", c.name, c.sql, arm.name, got, wantValue)
 				continue
+			}
+			if strings.Contains(raw, " | ") {
+				expTypes := wantTypes
+				if gap, ok := ivTypeGaps[c.name]; ok {
+					expTypes = gap
+				}
+				if gotTypes != expTypes {
+					t.Errorf("%s on %s: declared %q, want %q (PostgreSQL 17.11 %q)", c.name, arm.name, gotTypes, expTypes, wantTypes)
+					continue
+				}
 			}
 			agree++
 		}
@@ -925,6 +1118,11 @@ func TestArc1713cIntervalOrderEveryArm(t *testing.T) {
 			t.Errorf("pin %s names no cell", k)
 		}
 	}
+	for k := range ivRefused {
+		if _, ok := answers[k]; !ok {
+			t.Errorf("refusal pin %s names no cell", k)
+		}
+	}
 	if equalSpellings < 15 || pinned != wantPinned {
 		t.Fatalf("%d equal-but-differently-spelled pairs, %d pinned (cell, arm) answers: the table must discriminate and every pin must be read", equalSpellings, pinned)
 	}
@@ -936,12 +1134,18 @@ func TestArc1713cIntervalOrderEveryArm(t *testing.T) {
 // refuse the statement with a SQLSTATE first.
 const ivStoreGuard = "cannot store"
 
-// TestArc1713cNoStoreGuardEveryArm drives every statement of the interval
-// table (#1713c), the round-3 store sweep included, on every arm and fails
-// if any error's text is the store guard's: an interval value the plan
-// declared as something else (float8 for an aggregate's argument, a CASE, a
-// COALESCE) must be declared or refused 0A000 at plan time, identically on
-// every arm. IV_ERRDUMP=<path> writes every (cell, arm, error text).
+// TestArc1713cNoStoreGuardEveryArm is the INTERVAL rule's invariant (#1713d):
+// no statement, on any arm, produces the store guard's error — and since
+// batch.Vector.SetValue refuses an interval into every vector but a
+// DURATION's (batch.IntervalBox), no interval-valued expression is ever
+// written into a vector without this test failing. It drives every statement
+// of the interval table on every arm, the TABLE-BACKED shapes that reach a
+// DAG worker's projection and aggregate builders (rv/derived*, fam/*: a
+// derived column read from iv_s) and the coordinator's gather-side expression
+// columns (rv/gather*) included: 1713c round 3's invariant selected its
+// derived cells from no table and never reached either. The planner's
+// publication rule must refuse first, with a SQLSTATE, identically on every
+// arm. IV_ERRDUMP=<path> writes every (cell, arm, error text).
 func TestArc1713cNoStoreGuardEveryArm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: six arms over the interval table")
@@ -960,7 +1164,7 @@ func TestArc1713cNoStoreGuardEveryArm(t *testing.T) {
 	ran := 0
 	for _, c := range ivCells() {
 		if c.ddl {
-			if got := writer(c.sql); got != "ok" {
+			if got := writer(c.sql); got != "ok" && ivPin(c.name, "") == "" {
 				t.Fatalf("%s: %s", c.name, got)
 			}
 			continue
@@ -971,7 +1175,7 @@ func TestArc1713cNoStoreGuardEveryArm(t *testing.T) {
 			if errText != "" {
 				dump.WriteString(c.name + "\t" + arm.name + "\t" + errText + "\n")
 			}
-			if strings.Contains(errText, ivStoreGuard) {
+			if strings.Contains(errText, ivStoreGuard) || strings.Contains(errText, "IntervalValue") {
 				t.Errorf("%s on %s reached the store guard\n  %s\n  %s", c.name, arm.name, c.sql, errText)
 			}
 		}

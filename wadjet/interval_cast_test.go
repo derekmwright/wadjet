@@ -43,12 +43,17 @@ func TestTextCastToIntervalIsTheLiteralsInterval(t *testing.T) {
 		{"SELECT CAST(d + CAST('3 days' AS INTERVAL) AS TEXT) AS v FROM iv", "2026-03-06 00:00:00", ""},
 		{"SELECT CAST(ts - CAST('90' AS INTERVAL) AS TEXT) AS v FROM iv", "2026-03-03 09:58:30", ""},
 		{"SELECT CAST(ts + CAST('abc' AS INTERVAL) AS TEXT) AS v FROM iv", "", "22007"},
-		// The interval VALUE prints as PostgreSQL's interval output; the text
-		// cast used to hand back its operand, the literal printed Go's struct.
-		{"SELECT CAST('1 day' AS INTERVAL) AS v", "1 day", ""},
-		{"SELECT CAST('2 hours' AS INTERVAL) AS v", "02:00:00", ""},
-		{"SELECT INTERVAL '90' AS v", "00:01:30", ""},
-		{"SELECT CAST('-2 days' AS INTERVAL) AS v", "-2 days", ""},
+		// The interval VALUE prints as PostgreSQL's interval output through
+		// the explicit text cast; the text cast used to hand back its
+		// operand, the literal printed Go's struct. #1713d: a bare interval
+		// result column is refused 0A000 (it answered its text, declared
+		// text).
+		{"SELECT CAST(CAST('1 day' AS INTERVAL) AS TEXT) AS v", "1 day", ""},
+		{"SELECT CAST(CAST('2 hours' AS INTERVAL) AS TEXT) AS v", "02:00:00", ""},
+		{"SELECT CAST(INTERVAL '90' AS TEXT) AS v", "00:01:30", ""},
+		{"SELECT CAST(CAST('-2 days' AS INTERVAL) AS TEXT) AS v", "-2 days", ""},
+		{"SELECT CAST('1 day' AS INTERVAL) AS v", "", "0A000"},
+		{"SELECT INTERVAL '90' AS v", "", "0A000"},
 		{"SELECT CAST(5 AS INTERVAL) AS v", "", "42846"},
 	} {
 		res, err := db.Query(ctx, tc.sql)

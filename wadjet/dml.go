@@ -1736,6 +1736,11 @@ type assignSource struct {
 	// evaluated inside an expression (`CASE … THEN 2.50 END`) arrives as a
 	// float box and is numeric at that scale (arc VL).
 	declScale int
+	// interval is an interval-valued source (expr.IsIntervalNode): there is
+	// no INTERVAL column type, so check refuses it — 0A000 into TEXT, where
+	// it would be stored as its text (#1713d), and PostgreSQL's 42804 into
+	// any other column.
+	interval bool
 }
 
 // assignSourceOf classifies a source expression. schema resolves column
@@ -1744,6 +1749,9 @@ type assignSource struct {
 // (nil for a catalog schema) and p declares a scalar subquery from its own
 // plan — see dmlSourceIsFloat. A JSON field read declares TEXT (dmlJSONAccess).
 func assignSourceOf(node plansql.Node, schema []parquet.Column, cat []expr.PGCategory, p *physical.Planner) assignSource {
+	if expr.IsIntervalNode(node) {
+		return assignSource{interval: true}
+	}
 	if lit, ok := dmlLiteralText(node); ok {
 		src := assignSource{literal: lit, isLiteral: true}
 		src.declType, src.declKnown = literalDeclaredType(node)
@@ -1836,6 +1844,13 @@ func numericLiteralText(lit string) string {
 // the table too when the source is DECLARED by a plan's output (INSERT …
 // SELECT), which is where they reach a write.
 func (s assignSource) check(col parquet.Column) error {
+	if s.interval {
+		if col.Type == parquet.TypeString {
+			return physical.IntervalWriteRefusal()
+		}
+		return sqlerr.New("42804", "column %q is of type %s but expression is of type interval",
+			col.Name, physical.PgTypeName(col.Type))
+	}
 	if s.typedText {
 		return ingest.AssignableFromUnknownLiteral(col)
 	}
@@ -1920,8 +1935,16 @@ func assignmentClassified(t parquet.TypeID) bool {
 // `-` pairs PostgreSQL has no operator for, 42883). The earlier implementation installed that
 // rule in the binder only, so the same expression was refused on SELECT and
 // INSERT … SELECT and stored on VALUES / UPDATE (case B3).
+//
+// The INTERVAL rule (physical.RefuseIntervalWrite, #1713d) is the same
+// SELECT-side rule for the same reason: an interval is consumed inline or
+// refused. The written value itself is assignSource.check's (0A000 into TEXT,
+// 42804 into anything else).
 func dmlExpressionTyping(node plansql.Node, alias string, schema []parquet.Column) error {
-	return physical.RefuseTemporalArithmetic(node, alias, schema)
+	if err := physical.RefuseTemporalArithmetic(node, alias, schema); err != nil {
+		return err
+	}
+	return physical.RefuseIntervalWrite(node, alias, schema)
 }
 
 // refuseAggregateOrWindow is PostgreSQL's placement rule for an expression a
@@ -2292,14 +2315,17 @@ func assignEvaluatedValue(v any, col parquet.Column, srcFloat bool, srcType parq
 	if v == nil {
 		return nil, nil
 	}
-	if iv, isInterval := v.(expr.IntervalValue); isInterval {
+	if _, isInterval := v.(expr.IntervalValue); isInterval {
 		// There is no INTERVAL column type. A TEXT column takes an interval's
 		// text (PostgreSQL's assignment cast through interval's output — the
 		// value INSERT … SELECT already stored); every other column is
 		// PostgreSQL's 42804. Both used to reach the writer's box validation
 		// and fail there with no SQLSTATE (arc VL measurement P1).
+		// #1713d: an interval is never stored — check refuses every
+		// interval-valued source before a row is read; this is the backstop
+		// for one it could not see.
 		if col.Type == parquet.TypeString {
-			return iv.String(), nil
+			return nil, physical.IntervalWriteRefusal()
 		}
 		return nil, sqlerr.New("42804", "column %q is of type %s but expression is of type interval",
 			col.Name, physical.PgTypeName(col.Type))

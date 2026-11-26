@@ -36,6 +36,73 @@ type IntervalValue struct {
 	text string
 }
 
+// IntervalBox marks an INTERVAL value for batch.Vector.SetValue's guard
+// (batch.IntervalBox): an interval never leaves the expression that computes
+// it (#1713d, the planner's publication rule), so one reaching a vector is a
+// hole in that rule and is refused there rather than stored as its text.
+func (IntervalValue) IntervalBox() {}
+
+// compareIntervals is compare() for a pair holding an INTERVAL: two intervals
+// order by PostgreSQL's normalized value (intervalOrder). An opaque interval
+// (IntervalValue.text: input this engine's fields cannot hold, decided by
+// the ROW's text, so no plan can see it) and an interval met by anything
+// other than an interval are refused 0A000: the old fallback ordered their
+// rendered text, which is no interval order (#1713d, the runtime half of the
+// interval rule; the planner refuses every pairing it can see).
+func compareIntervals(a, b any, op CmpOp) bool {
+	ai, aok := a.(IntervalValue)
+	bi, bok := b.(IntervalValue)
+	if aok && bok {
+		if c, ok := intervalOrder(ai, bi); ok {
+			return cmpOrder(c, op)
+		}
+	}
+	if aok && ai.text != "" {
+		raiseIntervalNotComparable(ai.text)
+	}
+	if bok && bi.text != "" {
+		raiseIntervalNotComparable(bi.text)
+	}
+	panic(fatalEval{sqlerr.New("0A000",
+		"an interval can only be compared with another interval: cast the other operand to INTERVAL")})
+}
+
+// raiseIntervalNotComparable refuses an opaque interval wherever it is
+// compared (#1713d).
+func raiseIntervalNotComparable(text string) {
+	panic(fatalEval{sqlerr.New("0A000",
+		"interval %s cannot be compared: only a single-unit interval (YEAR, MONTH, "+
+			"WEEK, DAY, HOUR, MINUTE or SECOND) is supported", sqlerr.Quote(text))})
+}
+
+// raiseIntervalNotRenderable refuses the text of an opaque interval: it is
+// the input spelling, which is not PostgreSQL's canonical output in general
+// ('26 hours' prints 26:00:00 there) (#1713d).
+func raiseIntervalNotRenderable(text string) {
+	panic(fatalEval{sqlerr.New("0A000",
+		"interval %s cannot be rendered as text: only a single-unit interval (YEAR, MONTH, "+
+			"WEEK, DAY, HOUR, MINUTE or SECOND) is supported", sqlerr.Quote(text))})
+}
+
+// CheckIntervalLiteralText is CAST('<s>' AS INTERVAL)'s refusal for constant
+// text, answered at plan time: PostgreSQL reads a constant when it resolves
+// the statement, so 22007 (and the range's 22015 / 22008) are raised whether
+// or not a row reaches the expression (#1713d). nil for text it reads,
+// opaque input included (refused where it is applied or compared).
+func CheckIntervalLiteralText(s string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			fe, ok := r.(fatalEval)
+			if !ok {
+				panic(r)
+			}
+			err = fe.err
+		}
+	}()
+	castToIntervalText(s)
+	return nil
+}
+
 // raiseIntervalNotApplicable is the refusal for an interval whose fields this
 // engine cannot hold (IntervalValue.text).
 func raiseIntervalNotApplicable(iv IntervalValue) {
