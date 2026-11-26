@@ -208,6 +208,9 @@ func decodeFooter(r io.ReaderAt, size int64, validateHeader bool) (*footerEntry,
 			return nil, err
 		}
 	}
+	if err := refuseIntervalAnnotation(meta.Schema); err != nil {
+		return nil, err
+	}
 	root, leaves := BuildSchemaTree(meta.Schema)
 	// readerSchema, not the bare schemaFromTree: every OTHER FileReader
 	// constructor (OpenFileReader, OpenFileReaderMetadata, OpenFileReaderAt,

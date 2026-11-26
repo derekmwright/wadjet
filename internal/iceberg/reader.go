@@ -10,6 +10,7 @@ import (
 	"path"
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 )
@@ -58,6 +59,15 @@ func (r *TableReader) ReadTable(ctx context.Context, metadataPath string) (*Tabl
 	meta, err := ParseTableMetadata(metaData)
 	if err != nil {
 		return nil, err
+	}
+	// Iceberg has no interval type; a field spelled so would fall to
+	// icebergTypeToWadjet's STRING fallback and read as text (#1713d).
+	if s := meta.ActiveSchema(); s != nil {
+		for _, f := range s.Fields {
+			if strings.EqualFold(strings.TrimSpace(f.Type), "interval") {
+				return nil, sqlerr.New("0A000", "iceberg column %s of type interval is not supported", sqlerr.Quote(f.Name))
+			}
+		}
 	}
 
 	snap := meta.CurrentSnapshot()

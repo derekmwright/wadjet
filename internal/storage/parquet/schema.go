@@ -461,6 +461,18 @@ func ParseDecimalParams(s string) (precision, scale int, err error) {
 // Catalog.checkDistinctColumnNames still enforces schema fold-uniqueness.
 // See docs/internals/parquet-ddl-column-resolution.md for the design.
 func DeclaredColumn(name, typeStr string, nullable bool) (Column, error) {
+	if declaresInterval(typeStr) {
+		// A NEW column spelled INTERVAL, at any depth (#1713d, the
+		// maintainer's ruling): the spelling resolves to DURATION —
+		// nanoseconds in one integer, not PostgreSQL's months / days /
+		// microseconds — so the table would store something other than the
+		// interval it declares. Refused on every door that creates a column
+		// (SQL, HTTP and gRPC all resolve through here); an existing DURATION
+		// column, however it was declared, is untouched, and DURATION keeps
+		// its meaning. ResolveColumn keeps the alias for the CAST machinery.
+		return Column{}, sqlerr.New("0A000", "a column of type interval is not supported yet: "+
+			"declare DURATION for a nanosecond duration (column %s)", sqlerr.Quote(name))
+	}
 	col, err := ResolveColumn(name, typeStr)
 	if err != nil {
 		return Column{}, err
@@ -475,6 +487,41 @@ func DeclaredColumn(name, typeStr string, nullable bool) (Column, error) {
 	// optional by default; only the TOP-level declaration carries a NOT NULL.
 	col.Nullable = nullable
 	return col, nil
+}
+
+// declaresInterval reports a type declaration that spells INTERVAL at any
+// depth: the type itself, an ARRAY's element, a MAP's key or value, a ROW's
+// field TYPE (never a field NAME).
+func declaresInterval(typeStr string) bool {
+	trimmed := strings.TrimSpace(typeStr)
+	upper := strings.ToUpper(trimmed)
+	idx := strings.Index(upper, "(")
+	if idx < 0 {
+		return upper == "INTERVAL" || strings.HasPrefix(upper, "INTERVAL ")
+	}
+	end := strings.LastIndex(trimmed, ")")
+	if end < idx {
+		return false
+	}
+	inner := strings.TrimSpace(trimmed[idx+1 : end])
+	switch strings.TrimSpace(upper[:idx]) {
+	case "ARRAY":
+		return declaresInterval(inner)
+	case "MAP":
+		for _, p := range splitTopLevel(inner) {
+			if declaresInterval(p) {
+				return true
+			}
+		}
+	case "ROW", "STRUCT":
+		for _, p := range splitTopLevel(inner) {
+			p = strings.TrimSpace(p)
+			if i := strings.IndexByte(p, ' '); i >= 0 && declaresInterval(p[i+1:]) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ResolveColumn parses a type string into a fully-resolved Column with nested types.

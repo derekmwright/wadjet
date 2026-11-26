@@ -2,7 +2,11 @@
 
 package parquet
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
+)
 
 // SchemaNode is a node in the reconstructed Parquet schema tree.
 // Built from the flat SchemaElement list in the file footer.
@@ -241,4 +245,19 @@ func walkSchemaTree(node *SchemaNode, fn func(*SchemaNode) bool) bool {
 		}
 	}
 	return true
+}
+
+// refuseIntervalAnnotation refuses a file whose schema carries Parquet's
+// INTERVAL annotation (ConvertedInterval: FIXED_LEN_BYTE_ARRAY(12), months /
+// days / milliseconds). No decoding arm reads it, so its bytes fell to a
+// plain string or bytes column — a value that is not the interval the file
+// declares (#1713d). Refused at every reader open, so a later file of a
+// table, and a scan without plan-time reader schema, refuse alike.
+func refuseIntervalAnnotation(elements []SchemaElement) error {
+	for _, e := range elements {
+		if e.ConvertedType != nil && *e.ConvertedType == ConvertedInterval {
+			return sqlerr.New("0A000", "parquet column %s has the INTERVAL annotation, which is not supported yet", sqlerr.Quote(e.Name))
+		}
+	}
+	return nil
 }

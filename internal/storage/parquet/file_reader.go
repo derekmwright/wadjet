@@ -81,6 +81,9 @@ func OpenFileReader(r io.ReaderAt, size int64) (*FileReader, error) {
 		return nil, fmt.Errorf("parquet: reading file data: %w", err)
 	}
 
+	if err := refuseIntervalAnnotation(meta.Schema); err != nil {
+		return nil, err
+	}
 	root, leaves := BuildSchemaTree(meta.Schema)
 	schema := readerSchema(root, leaves, meta.KeyValueMetadata)
 
@@ -118,6 +121,9 @@ func OpenFileReaderMetadata(r io.ReaderAt, size int64) (*FileReader, error) {
 	if err := ValidateHeader(r); err != nil {
 		return nil, err
 	}
+	if err := refuseIntervalAnnotation(meta.Schema); err != nil {
+		return nil, err
+	}
 	root, leaves := BuildSchemaTree(meta.Schema)
 	schema := readerSchema(root, leaves, meta.KeyValueMetadata)
 	return &FileReader{
@@ -148,6 +154,9 @@ func OpenFileReaderAt(r io.ReaderAt, size int64) (*FileReader, error) {
 	if err := ValidateHeader(r); err != nil {
 		return nil, err
 	}
+	if err := refuseIntervalAnnotation(meta.Schema); err != nil {
+		return nil, err
+	}
 	root, leaves := BuildSchemaTree(meta.Schema)
 	schema := readerSchema(root, leaves, meta.KeyValueMetadata)
 	return &FileReader{
@@ -170,6 +179,9 @@ func OpenFileReaderFromBytes(data []byte) (*FileReader, error) {
 		return nil, err
 	}
 
+	if err := refuseIntervalAnnotation(meta.Schema); err != nil {
+		return nil, err
+	}
 	root, leaves := BuildSchemaTree(meta.Schema)
 	schema := readerSchema(root, leaves, meta.KeyValueMetadata)
 
