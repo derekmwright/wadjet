@@ -83,8 +83,9 @@ func isNullNode(n plansql.Node) bool {
 // typeIntervalUnknowns is node with every quoted literal PostgreSQL resolves
 // to INTERVAL beside an interval operand compiled as that interval (#1713c):
 // a comparison's two sides, an IN list with its probe, BETWEEN's three
-// operands, a simple CASE's WHEN values against an interval subject, and the
-// arguments of NULLIF, GREATEST and LEAST. A CASE whose SUBJECT is
+// operands, a simple CASE's WHEN values against an interval subject, the
+// results of a CASE that answers an interval (IsIntervalNode), and the
+// arguments of NULLIF, GREATEST, LEAST and COALESCE. A CASE whose SUBJECT is
 // the quoted literal is not here: PostgreSQL resolves that subject to text
 // and refuses `text = interval`. The node is copied, never mutated; one with
 // nothing to type is returned as it is.
@@ -125,26 +126,35 @@ func typeIntervalUnknowns(node plansql.Node) plansql.Node {
 			return &c
 		}
 	case *plansql.CaseNode:
-		if n.Subject == nil || !IsIntervalNode(n.Subject) {
+		subject := n.Subject != nil && IsIntervalNode(n.Subject)
+		results := IsIntervalNode(n)
+		if !subject && !results {
 			return node
 		}
 		changed := false
-		whens := make([]plansql.WhenClause, len(n.Whens))
+		c := *n
+		c.Whens = make([]plansql.WhenClause, len(n.Whens))
 		for i, w := range n.Whens {
-			whens[i] = w
-			if isQuotedNode(w.Cond) {
-				whens[i].Cond = unknownAsInterval(w.Cond)
+			c.Whens[i] = w
+			if subject && isQuotedNode(w.Cond) {
+				c.Whens[i].Cond = unknownAsInterval(w.Cond)
+				changed = true
+			}
+			if results && isQuotedNode(w.Result) {
+				c.Whens[i].Result = unknownAsInterval(w.Result)
 				changed = true
 			}
 		}
+		if results && n.Else != nil && isQuotedNode(n.Else) {
+			c.Else = unknownAsInterval(n.Else)
+			changed = true
+		}
 		if changed {
-			c := *n
-			c.Whens = whens
 			return &c
 		}
 	case *plansql.FuncCallNode:
 		switch strings.ToLower(n.Name) {
-		case "nullif", "greatest", "least":
+		case "nullif", "greatest", "least", "coalesce":
 		default:
 			return node
 		}

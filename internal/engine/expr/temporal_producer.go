@@ -204,6 +204,17 @@ func producesInterval(e Expr) bool {
 		case "/":
 			return l && !r
 		}
+	case *Case:
+		results := make([]Expr, 0, len(x.Whens)+1)
+		for _, w := range x.Whens {
+			results = append(results, w.Result)
+		}
+		if x.Else != nil {
+			results = append(results, x.Else)
+		}
+		return producesIntervalChoice(results)
+	case *Coalesce:
+		return producesIntervalChoice(x.Args)
 	case *FuncCall:
 		switch strings.ToLower(x.Name) {
 		case "nullif":
@@ -217,6 +228,21 @@ func producesInterval(e Expr) bool {
 		}
 	}
 	return false
+}
+
+// producesIntervalChoice is intervalOrNullChoice over the compiled tree.
+func producesIntervalChoice(branches []Expr) bool {
+	saw := false
+	for _, b := range branches {
+		switch {
+		case producesInterval(b):
+			saw = true
+		case isNullLit(b):
+		default:
+			return false
+		}
+	}
+	return saw
 }
 
 // intervalTextOperand is a quoted literal that reads as interval input:

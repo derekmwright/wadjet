@@ -13,9 +13,13 @@ import (
 // literal, a CAST to INTERVAL, and the operators and choice constructs that
 // answer one as PostgreSQL types them (#1713c) — interval ± interval, interval
 // * number, number * interval, interval / number, unary minus of an interval,
-// NULLIF whose first argument is one, and GREATEST / LEAST over one.
-// COALESCE is not here: over an interval it is refused today ("cannot store
-// … into FLOAT64"), a loud answer this line does not change. `date ± interval` is a TIMESTAMP, not an interval, and is not here.
+// NULLIF whose first argument is one, GREATEST / LEAST over one, and a CASE
+// whose every result — or a COALESCE whose every argument — is an interval, a
+// quoted literal or NULL, one at least an interval (round 3: the plan declared
+// those float8, so `COALESCE(INTERVAL '1 day', NULL)` and `CASE … END * 2` met
+// the store guard). A quoted literal there is interval input, as PostgreSQL's
+// select_common_type resolves it (typeIntervalUnknowns compiles it so).
+// `date ± interval` is a TIMESTAMP, not an interval, and is not here.
 //
 // It is one rule for the plan (the declaration, the temporal validators) and
 // the compile (an unknown literal beside an interval reads as an interval).
@@ -39,8 +43,19 @@ func IsIntervalNode(node plansql.Node) bool {
 		case "/":
 			return l && !r
 		}
+	case *plansql.CaseNode:
+		results := make([]plansql.Node, 0, len(n.Whens)+1)
+		for _, w := range n.Whens {
+			results = append(results, w.Result)
+		}
+		if n.Else != nil {
+			results = append(results, n.Else)
+		}
+		return intervalOrNullChoice(results)
 	case *plansql.FuncCallNode:
 		switch strings.ToLower(n.Name) {
+		case "coalesce":
+			return intervalOrNullChoice(n.Args)
 		case "nullif":
 			return len(n.Args) == 2 && IsIntervalNode(n.Args[0])
 		case "greatest", "least":
@@ -52,4 +67,21 @@ func IsIntervalNode(node plansql.Node) bool {
 		}
 	}
 	return false
+}
+
+// intervalOrNullChoice reports a choice's branches that are each an interval,
+// a quoted literal or NULL, at least one an interval: PostgreSQL's
+// select_common_type answers interval for them.
+func intervalOrNullChoice(branches []plansql.Node) bool {
+	saw := false
+	for _, b := range branches {
+		switch {
+		case IsIntervalNode(b):
+			saw = true
+		case isNullNode(b), isQuotedNode(b):
+		default:
+			return false
+		}
+	}
+	return saw
 }
