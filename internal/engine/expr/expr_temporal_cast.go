@@ -234,6 +234,9 @@ func (e *BinOp) infiniteDateArith(ld any, lok bool, rd any, rok bool, lv, rv any
 		if !linf {
 			x = rx
 		}
+		if e.Op == "-" && infiniteDifferenceAnswers(ld, rd) {
+			raiseTimestampDifference()
+		}
 		raiseInfiniteOperand("`"+e.Op+"` between dates or timestamps", x)
 	case linf:
 		if _, isDay := plainDayCount(rv); isDay && lx.date {
@@ -247,6 +250,33 @@ func (e *BinOp) infiniteDateArith(ld any, lok bool, rd any, rok bool, lv, rv any
 		raiseInfiniteOperand("`"+e.Op+"` with this operand", rx)
 	}
 	return nil, false
+}
+
+// infiniteDifferenceAnswers reports a difference with an infinite side that
+// PostgreSQL ANSWERS: a timestamp difference (either side a TIMESTAMP; a
+// date beside one is read as a timestamp) is ±infinity there unless both
+// sides are the same infinity, which is its 22008 (measured on 17.11:
+// `TIMESTAMP 'infinity' - TIMESTAMP '2024-01-01'` is infinity, `TIMESTAMP
+// 'infinity' - TIMESTAMP '-infinity'` infinity, `TIMESTAMP 'infinity' -
+// TIMESTAMP 'infinity'` 22008). Such a difference is the guard's named
+// refusal, never a 22008 PostgreSQL does not raise (the architect's ruling
+// on 1680c r4, rule 4). `date - date` is an integer there and 22008 for
+// any infinite side: false.
+func infiniteDifferenceAnswers(ld, rd any) bool {
+	timestamp := false
+	signs := [2]int{}
+	for i, d := range []any{ld, rd} {
+		switch x := d.(type) {
+		case time.Time:
+			timestamp = true
+		case infiniteInstant:
+			signs[i] = x.sign
+			if !x.date {
+				timestamp = true
+			}
+		}
+	}
+	return timestamp && (signs[0] == 0 || signs[1] == 0 || signs[0] != signs[1])
 }
 
 // plainDayCount reads the non-date side of `date ± n` as a whole number of

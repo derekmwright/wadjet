@@ -4130,7 +4130,7 @@ func (p *selectParser) parseIntervalLiteral() (Node, error) {
 		// takes at runtime (ParseIntervalText).
 		lit, err := ParseIntervalText(valStr)
 		if err != nil {
-			return nil, err
+			return nil, intervalInputFormRefusal(valStr, err)
 		}
 		value, unit = lit.Value, lit.Unit
 	} else if len(parts) == 1 {
@@ -4159,10 +4159,27 @@ func (p *selectParser) parseIntervalLiteral() (Node, error) {
 			unit = "second"
 		}
 	} else {
-		return nil, sqlerr.New("22007", "invalid input syntax for type interval: %s", sqlerr.Quote(valStr))
+		return nil, intervalInputFormRefusal(valStr,
+			sqlerr.New("22007", "invalid input syntax for type interval: %s", sqlerr.Quote(valStr)))
 	}
 
 	return &IntervalLit{Value: value, Unit: unit}, nil
+}
+
+// intervalInputFormRefusal is the literal reader's error for text it cannot
+// read: where the reader would raise 22007 for text PostgreSQL accepts as
+// interval input (IntervalInputAccepted), "invalid input syntax" is untrue,
+// so the same raise point names the capability refusal instead (0A000
+// interval-input-form; ADR-0052 §8, the architect's rule 4 on 1680c: a
+// change of message and code, never a lifted check). Every other error —
+// text PostgreSQL refuses too, or its 22015 — stands.
+func intervalInputFormRefusal(text string, err error) error {
+	if sqlerr.StateOf(err) != "22007" || IntervalInputAccepted == nil || !IntervalInputAccepted(text) {
+		return err
+	}
+	return sqlerr.Refuse("interval-input-form",
+		"interval literal %s is not supported: this engine reads an interval literal only as a whole number "+
+			"with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)", sqlerr.Quote(text))
 }
 
 // ParseIntervalText reads an INTERVAL's TEXT the one way this engine reads

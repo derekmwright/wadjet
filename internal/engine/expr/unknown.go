@@ -81,6 +81,18 @@ var unimplementedAggregates = map[string]bool{
 	"entropy_agg":       true,
 }
 
+// unimplementedPostgresFunctions are functions PostgreSQL HAS and this engine
+// does not, each with its refusal identity: "unknown function" is untrue of
+// them, so the same raise point names a capability refusal instead (0A000;
+// ADR-0052 §8, the architect's rule 4 on 1680c: a change of message and code
+// at an existing refusal, never a lifted check). age is PostgreSQL's interval
+// producer (age(timestamp[, timestamp])); this engine computes no interval
+// from it and does not declare it one.
+var unimplementedPostgresFunctions = map[string]string{
+	"age":            "function-age",
+	"pg_catalog.age": "function-age",
+}
+
 // checkKnown reports an unresolvable function name as an error. It is the
 // plan-time counterpart of FuncCall.Eval's `if e.fn == nil { return nil }`,
 // which is what turned every unimplemented function into a column of NULLs:
@@ -110,6 +122,9 @@ func checkKnown(name string) error {
 	if !strictFunctions {
 		return nil
 	}
+	if r, ok := unimplementedPostgresFunctions[name]; ok {
+		return &UnknownFuncError{Name: name, Refusal: r}
+	}
 	return &UnknownFuncError{Name: name, Aggregate: unimplementedAggregates[name],
 		SetReturning: name == "unnest" || name == "generate_subscripts" || name == "_pg_expandarray" ||
 			name == "pg_catalog.unnest" || name == "pg_catalog.generate_subscripts"}
@@ -129,7 +144,10 @@ func ResolveFuncName(name string) error { return checkKnown(strings.ToLower(name
 
 // The parser refuses FILTER on a name that is not an aggregate, and asks this
 // first so an unknown name keeps its 42883 (plansql.ResolveFunction, #1690).
-func init() { plansql.ResolveFunction = ResolveFuncName }
+func init() {
+	plansql.ResolveFunction = ResolveFuncName
+	plansql.IntervalInputAccepted = pgIntervalLiteralAccepted
+}
 
 // UnknownFuncError names a function the registry cannot resolve.
 //
@@ -155,9 +173,21 @@ type UnknownFuncError struct {
 	// a feature this engine does not implement (0A000), not a name it does
 	// not know.
 	SetReturning bool
+	// Refusal is the refusal identity of a function PostgreSQL has and this
+	// engine does not implement (unimplementedPostgresFunctions): 0A000
+	// with that identity, not 42883.
+	Refusal string
 }
 
+// RefusalReason is the refusal identity (sqlerr.ReasonOf), "" for a name
+// that is truly unknown.
+func (e *UnknownFuncError) RefusalReason() string { return e.Refusal }
+
 func (e *UnknownFuncError) Error() string {
+	if e.Refusal != "" {
+		return fmt.Sprintf("%s is not supported: PostgreSQL's %s answers an interval, which this engine does not "+
+			"compute from timestamps", e.Name, e.Name)
+	}
 	if e.SetReturning {
 		return fmt.Sprintf("set-returning function %s is supported only as a whole item of a SELECT list "+
 			"without aggregates, window functions or DISTINCT", e.Name)
@@ -175,7 +205,7 @@ func (e *UnknownFuncError) Error() string {
 // it up through the Coder interface so the wire reports 42883 rather than the
 // blanket 42000 (#366).
 func (e *UnknownFuncError) SQLState() string {
-	if e.SetReturning {
+	if e.SetReturning || e.Refusal != "" {
 		return "0A000"
 	}
 	return "42883"

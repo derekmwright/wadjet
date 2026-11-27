@@ -1,0 +1,191 @@
+# PostgreSQL 17.11 (postgres:17-alpine, initdb --locale=C --encoding=UTF8, IntervalStyle postgres, TimeZone UTC): SELECT INTERVAL '<text>' per line. text<TAB>ok | ERR <SQLSTATE>. Measured for 1680c r5 (TestIntervalLiteralAcceptedAgreesWithPostgres).
++1 day +01:00:00	ok
+- 1 day	ok
+-0.000001 seconds	ok
+-0.125 years	ok
+-0.5 weeks	ok
+-1 day +02:00:00 ago	ok
+-1 day +02:03:04.5	ok
+-1 day +25:00:00	ok
+-1 day -01:00:00	ok
+-1 day -02:03:04	ok
+-1 day 02:00:00	ok
+-1 day 25:00:00	ok
+-1 day ago	ok
+-1 mon +30 days	ok
+-1 mon -35 days -27:00:00	ok
+-1 mon 1 day	ok
+-1 mon 25 hours	ok
+-1 mon 31 days	ok
+-1 mon 35 days	ok
+-1 year -2 mons +3 days	ok
+-1 year -2 mons +3 days -04:05:06	ok
+-1.5 days	ok
+-1.5 months	ok
+-178956970 years -8 mons	ok
+-178956970 years -8 months	ok
+-178956970 years -9 months	ERR 22008
+-213503982 days -08:01:49.551616	ok
+-2147483648 days -24 hours	ok
+-2147483648 days 1 hour	ok
+-2147483648 days 1 hour ago	ERR 22015
+-2147483648 days ago	ERR 22015
+-2147483648 months -2147483647 days -9223372036854775807 microseconds	ok
+-2147483648 months -2147483648 days	ok
+-2147483648 months -2147483648 days -2562047788:00:54.775808	ERR 22007
+-2147483648 months -2147483648 days -9223372036854775807 microseconds	ok
+-2147483648 months -2147483648 days -9223372036854775808 microseconds	ok
+-2147483648 months ago	ERR 22015
+-infinity ago	ERR 22007
+.5 days 1 hour	ok
+0.0000000125 minutes	ok
+0.0000005 seconds	ok
+0.0000015 seconds	ok
+0.0000025 seconds	ok
+0.0125 decades	ok
+0.1 months	ok
+0.125 years	ok
+0.5 months	ok
+0.5 months 0.5 days	ok
+0.5 weeks	ok
+01:30 1 hour	ERR 22007
+1 2 3	ERR 22007
+1 2:00:00	ok
+1 cent 1 mil	ok
+1 century 1 year	ok
+1 day +-2 hours	ERR 22007
+1 day - 2 hours	ok
+1 day -1 second	ok
+1 day -2562047788:00:54.775808	ERR 22007
+1 day -25:00:00	ok
+1 day . 	ok
+1 day 01:00:00	ok
+1 day 01:00:60	ok
+1 day 01:61:00	ERR 22015
+1 day 02:00:00	ok
+1 day 02:00:00 ago	ok
+1 day 02:30:45	ok
+1 day 1 d	ERR 22007
+1 day 1 day	ERR 22007
+1 day 1 hour	ok
+1 day 1 mon 00:00:01	ok
+1 day 1.2.3 hours	ERR 22007
+1 day 12:00:00	ok
+1 day 2	ok
+1 day 2 hours	ok
+1 day 2 hours 3 minutes	ok
+1 day 24:00:00	ok
+1 day 25:00:00	ok
+1 day 2:00:00 3	ERR 22007
+1 day 5	ok
+1 day ago	ok
+1 day ago ago	ERR 22007
+1 days 2 days	ERR 22007
+1 dayz 2	ERR 22007
+1 hour 01:00:00	ERR 22007
+1 hour 01:30	ERR 22007
+1 hour 1 h	ERR 22007
+1 hour 30 minutes	ok
+1 millennium 3 months	ok
+1 min 1 m	ERR 22007
+1 minute 30 seconds	ok
+1 mon -1 day	ok
+1 mon -1 day 02:00:00	ok
+1 mon -25 hours	ok
+1 mon -30 days	ok
+1 mon -31 days	ok
+1 mon 1 day	ok
+1 mon 1 day 01:00:00	ok
+1 mon 1 mons	ERR 22007
+1 mon 2 days	ok
+1 mon 2 days 03:00:00	ok
+1 mon 35 days 27:00:00	ok
+1 ms 1 us	ok
+1 s 1 sec	ERR 22007
+1 second 500 milliseconds	ok
+1 week 1 week	ERR 22007
+1 week 2 days	ok
+1 year -1 day	ok
+1 year -1 second	ok
+1 year -2 mons 3 days -04:05:06	ok
+1 year 1 year	ERR 22007
+1 year 14 mons 40 days 26:07:08.5	ok
+1 year 2 decades	ok
+1 year 2 mons 3 days	ok
+1 year 2 mons 3 days 04:05:06	ok
+1 year 2 mons 3 days 04:05:06.789	ok
+1 year 2 months	ok
+1 year 2 months 3 days	ok
+1 year 2 months 3 days 4 hours 5 minutes 6 seconds	ok
+1 yr 2 mon	ok
+1-12 1 day	ERR 22015
+1-13 1 day	ERR 22015
+1-2 1 year	ok
+1-2 3 4:05:06	ok
+1-2 ago	ok
+1.000001 seconds	ok
+1.0333333 months	ok
+1.123456 seconds	ok
+1.1234567 seconds	ok
+1.5 2:00:00	ok
+1.5 centuries	ok
+1.5 days	ok
+1.5 hours	ok
+1.5 microseconds	ok
+1.5 minutes	ok
+1.5 months	ok
+1.5 seconds	ok
+1.5 weeks	ok
+1.5 weeks 2 days	ok
+1.5 years	ok
+1.5 years 1 day	ok
+106751991 days 04:00:54.775807	ok
+106751991 days 04:00:54.775808	ok
+14 months 3 days	ok
+15 hours 2 minutes 12 seconds	ok
+178956970 years 7 mons	ok
+178956970 years 7 mons 2147483647 days 2562047788:00:54.775807	ok
+178956970 years 7 mons 30 days	ok
+178956970 years 7 months	ok
+178956970 years 8 months	ERR 22008
+178956971 years 1 day	ERR 22008
+1d 2h	ok
+1day 2hours	ok
+1e3 days 1 hour	ERR 22007
+2 days 12:00:00	ok
+2 weeks 3 days 04:00:00	ok
+213503982 days 08:01:49.551616	ok
+2147483647 days 1 day	ERR 22015
+2147483647 days 24 hours	ok
+2147483647 days 24:00:00	ok
+2147483647 days 2562047788:00:54.775807	ok
+2147483647 days ago	ok
+2147483647 months 1 day	ok
+2147483647 months 2147483647 days 2562047788:00:54.775806	ok
+2147483647 months 2147483647 days 2562047788:00:54.775807	ok
+2147483647 months 2147483647 days 9223372036854775806 microseconds	ok
+2147483647 months 2147483647 days 9223372036854775807 microseconds	ok
+2147483648 days 1 hour	ERR 22015
+2562047788 hours 1 day	ok
+2562047788:00:54.775807 1 day	ok
+2562047788:00:54.775808 1 day	ERR 22015
+2562047789 hours 1 day	ERR 22015
+29 days 24:00:00.000001	ok
+3 4:05:06 ago	ok
+3 days 04:05:06 ago	ok
+30 days -00:00:00.000001	ok
+5 decades 1 year	ok
+5. days 1 hour	ok
+9223372036854775807 microseconds 1 day	ok
+9223372036854775807 microseconds 1 microsecond	ERR 22015
+9223372036854775807 microseconds ago	ok
+@ 1 day	ok
+@ 1 day 2 hours ago	ok
+@ 1 mon ago	ok
+@ 1 year 2 mons	ok
+@ 1 year 2 mons ago	ok
+@ 3 days 4 hours 5 mins 6 secs	ok
+P1D ago	ERR 22007
+P1Y2M ago	ERR 22007
+abc	ERR 22007
+infinity ago	ERR 22007

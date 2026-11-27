@@ -82,9 +82,26 @@ func TestArcTIInfiniteValueOwners(t *testing.T) {
 		{"SELECT d - '2024-01-01'", [3]string{"ERR 22008", "ERR 22008", "14"}},
 		// A timestamp difference is refused (the timestamp-difference guard,
 		// #1713d round 8): its finite row answered the milliseconds
-		// 1.2474e+09 through round 7. An infinite operand keeps its 22008.
-		{"SELECT ts - TIMESTAMP '2024-01-01 00:00:00'", [3]string{"ERR 22008", "ERR 22008", "ERR 0A000"}},
-		{"SELECT ts - '2024-01-01 00:00:00'", [3]string{"ERR 22008", "ERR 22008", "ERR 0A000"}},
+		// 1.2474e+09 through round 7. An infinite operand keeps 22008 only
+		// where PostgreSQL raises it, the same infinity on both sides
+		// (17.11: infinity - infinity and -infinity - -infinity are 22008);
+		// where PostgreSQL answers ±infinity (one side finite, or opposite
+		// infinities) it is the guard's named refusal, as for a finite row
+		// (the architect's ruling on 1680c r4, rule 4).
+		{"SELECT ts - TIMESTAMP '2024-01-01 00:00:00'", [3]string{"ERR 0A000", "ERR 0A000", "ERR 0A000"}},
+		{"SELECT ts - '2024-01-01 00:00:00'", [3]string{"ERR 0A000", "ERR 0A000", "ERR 0A000"}},
+		{"SELECT ts - TIMESTAMP 'infinity'", [3]string{"ERR 22008", "ERR 0A000", "ERR 0A000"}},
+		{"SELECT ts - '-infinity'", [3]string{"ERR 0A000", "ERR 22008", "ERR 0A000"}},
+		{"SELECT TIMESTAMP '-infinity' - ts", [3]string{"ERR 0A000", "ERR 22008", "ERR 0A000"}},
+		// Two column operands: the guard refuses when the node resolves its
+		// mode, before any row is read (BinOpNumeric.resolveModeSlow), so a
+		// row of the same infinity is the named refusal too where PostgreSQL
+		// raises 22008. Unchanged by the ruling (it was so at the base); a
+		// loud refusal either way, listed in 1680c_r5.md as an open line.
+		{"SELECT ts - ts", [3]string{"ERR 0A000", "ERR 0A000", "ERR 0A000"}},
+		// date - date is an integer in PostgreSQL: 22008 for any infinite
+		// side.
+		{"SELECT d - DATE '2024-01-01'", [3]string{"ERR 22008", "ERR 22008", "14"}},
 		// EXTRACT: year / epoch ±Infinity, every other field NULL
 		{"SELECT extract(year FROM ts)", [3]string{"+Inf", "-Inf", "2024"}},
 		{"SELECT extract(epoch FROM d)", [3]string{"+Inf", "-Inf", "1.7052768e+09"}},

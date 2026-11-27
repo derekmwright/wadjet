@@ -850,6 +850,15 @@ var aggFilterRefused = map[string]bool{"grouping": true}
 // unimplemented name answers the same 42883 with FILTER as without it.
 var ResolveFunction func(name string) error
 
+// IntervalInputAccepted, when set, reports text PostgreSQL ACCEPTS as
+// interval input (never wider than PostgreSQL: expr.pgIntervalLiteralAccepted,
+// measured against 17.11). internal/engine/expr installs it. The INTERVAL
+// literal reader asks it
+// before raising 22007: a literal PostgreSQL accepts in a form this reader
+// cannot read is the named capability refusal interval-input-form, never
+// "invalid input syntax" (ADR-0052 §8, the architect's rule 4 on 1680c).
+var IntervalInputAccepted func(text string) bool
+
 // IsAggregate returns true if the function name is a known aggregate.
 func IsAggregate(name string) bool {
 	return knownAggregates[strings.ToLower(name)]

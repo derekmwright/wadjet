@@ -28,18 +28,29 @@ func TestIntervalR4EarliestTruthfulRule(t *testing.T) {
 		{"timestamptz + a timestamptz difference", "SELECT TIMESTAMPTZ '2024-03-09 12:00:00-05' + (TIMESTAMPTZ '2024-03-10 12:00:00-04' - TIMESTAMPTZ '2024-03-09 12:00:00-05') AS a", "0A000", "timestamptz"},
 		{"date_add with a zone", "SELECT date_add(TIMESTAMPTZ '2024-03-09 12:00:00-05', INTERVAL '1 day', 'UTC') AS a", "0A000", "timestamptz"},
 		{"date_subtract over a timestamptz", "SELECT date_subtract(TIMESTAMPTZ '2024-03-09 12:00:00-05', INTERVAL '1 day') AS a", "0A000", "timestamptz"},
-		// age: a bare age(...) is an interval result column, named first in
-		// column order (before a sub-millisecond literal in a later column).
-		{"a bare age", "SELECT age(TIMESTAMP '2024-03-31', TIMESTAMP '2024-01-31') AS a", "0A000", "bare-interval-result"},
-		{"a bare age before a sub-millisecond one", "SELECT age(TIMESTAMP '2024-03-31', TIMESTAMP '2024-01-31') AS a, age(TIMESTAMP '2024-01-01 00:00:00.000001', TIMESTAMP '2024-01-01') AS b", "0A000", "bare-interval-result"},
+		// age (the architect's ruling on 1680c r4): every call is the named
+		// capability refusal function-age, raised where "unknown function"
+		// was (expr.checkKnown; the statement-level cells are
+		// wadjet.TestAgeIsTheNamedRefusal). age is NOT declared an interval
+		// producer, so the binder does not refuse a bare age(...) as a result
+		// column (the compiler's function-age does). Where the binder spoke
+		// first with an untrue 42883 (an operator beside an interval, the
+		// call untyped), the call's refusal comes first. A permanent rule
+		// over its arguments (a sub-millisecond literal) is judged first, as
+		// before.
+		{"a bare age binds (the compiler refuses it)", "SELECT age(TIMESTAMP '2024-03-31', TIMESTAMP '2024-01-31') AS a", "", ""},
+		{"age compared with an interval", "SELECT 1 AS a WHERE age(TIMESTAMP '2024-03-31', TIMESTAMP '2024-01-31') > INTERVAL '1 day'", "0A000", "function-age"},
+		// interval - <untyped call> binds (shiftOperand admits an operand the
+		// plan cannot type); the compiler's function-age refuses it.
+		{"age subtracted from an interval binds", "SELECT CAST(INTERVAL '1 year' - age(TIMESTAMP '2024-03-31', TIMESTAMP '2024-01-31') AS TEXT) AS a", "", ""},
+		{"a bare age before a sub-millisecond one", "SELECT age(TIMESTAMP '2024-03-31', TIMESTAMP '2024-01-31') AS a, age(TIMESTAMP '2024-01-01 00:00:00.000001', TIMESTAMP '2024-01-01') AS b", "0A000", "timestamp-millisecond-carrier"},
 		{"a sub-millisecond age under the display cast", "SELECT CAST(age(TIMESTAMP '2024-01-01 00:00:00.000001', TIMESTAMP '2024-01-01') AS TEXT) AS a", "0A000", "timestamp-millisecond-carrier"},
+		// Control: an unknown name beside an interval keeps the operator's
+		// 42883 (no refusal names it).
+		{"control: an unknown function beside an interval", "SELECT 1 AS a WHERE agez(TIMESTAMP '2024-03-31') > INTERVAL '1 day'", "42883", ""},
 		// Controls: PostgreSQL's own 42883, which the binder keeps.
 		{"control: date + timestamp is PostgreSQL's 42883", "SELECT DATE '2024-01-01' + TIMESTAMP '2024-01-02' AS a", "42883", ""},
 		{"control: timestamptz + (date - date) is PostgreSQL's 42883", "SELECT TIMESTAMPTZ '2024-03-09 12:00:00-05' + (DATE '2024-03-10' - DATE '2024-03-09') AS a", "42883", ""},
-		// Control: the display cast of age is stage C's cell; binding does
-		// not refuse it (the engine has no age: execution's unknown-function
-		// error stands, unchanged).
-		{"control: age under the display cast", "SELECT CAST(age(TIMESTAMP '2024-03-31', TIMESTAMP '2024-01-31') AS TEXT) AS a", "", ""},
 		// Control: the comparison the refusal suggests binds.
 		{"control: the comparison the refusal suggests", "SELECT TIMESTAMP '2024-01-02 01:00:00' > CAST(DATE '2024-01-01' AS TIMESTAMP) + INTERVAL '1 day' AS a", "", ""},
 	}

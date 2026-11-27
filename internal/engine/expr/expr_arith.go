@@ -57,6 +57,7 @@ func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
 	// before the date arms, which read a quoted operand as a date; date ±
 	// interval is theirs (intervalArith declines it).
 	if eitherInterval(lv, rv) {
+		refuseIntervalDecimalFactor(e.Op, e.Left, e.Right, lv, rv, b)
 		if v, ok := intervalArithFirst(e.Op, lv, rv, isUnknownLit(e.Left) || isUnknownLit(e.Right)); ok {
 			return v
 		}

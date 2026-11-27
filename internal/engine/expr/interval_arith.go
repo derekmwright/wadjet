@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
@@ -44,6 +45,43 @@ func raiseIntervalOperator(op string, l, r string) {
 		panic(fatalEval{sqlerr.New("42883", "operator does not exist: %s %s", op, r)})
 	}
 	panic(fatalEval{sqlerr.New("42883", "operator does not exist: %s %s %s", l, op, r)})
+}
+
+// refuseIntervalDecimalFactor raises the named refusal for `interval *
+// numeric` / `numeric * interval` / `interval / numeric` where the factor is
+// a DECIMAL (NUMERIC) value, which boxes as its text and so reached
+// intervalArith's `interval * text` 42883. PostgreSQL HAS these operators
+// (17.11: `INTERVAL '1 day' * CAST(1.25 AS NUMERIC)` is 1 day 06:00:00), so
+// "operator does not exist" is untrue of it: the same raise point names the
+// capability refusal (ADR-0052 §8, the architect's rule 4 on 1680c r4,
+// cell 05_arith:mul/numeric). Nothing reaches the arithmetic that did not
+// before. A no-op for any other operand pair.
+func refuseIntervalDecimalFactor(op string, l, r Expr, lv, rv any, b *batch.RecordBatch) {
+	if op != "*" && op != "/" {
+		return
+	}
+	factor, fv := r, rv
+	if _, ok := rv.(IntervalValue); ok {
+		if op == "/" {
+			return // number / interval: no such operator in PostgreSQL either
+		}
+		factor, fv = l, lv
+	} else if _, ok := lv.(IntervalValue); !ok {
+		return
+	}
+	if _, text := fv.(string); !text {
+		return
+	}
+	o, ok := factor.(decimalOperand)
+	if !ok {
+		return
+	}
+	if _, typed := o.decimalType(b); !typed {
+		return
+	}
+	panic(fatalEval{sqlerr.Refuse("interval-numeric-factor",
+		"an interval %s a NUMERIC value is not supported: cast the factor to double precision, "+
+			"for example INTERVAL '1 day' * CAST(x AS DOUBLE PRECISION)", map[string]string{"*": "multiplied by", "/": "divided by"}[op])})
 }
 
 // pgParts is the value as PostgreSQL stores it: months, days, and the clock

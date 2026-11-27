@@ -183,15 +183,14 @@ var intervalValueArg = map[string]int{
 // where it is consumed, never left to an unknown-function error that hides
 // the interval).
 //
-// age is one although this engine has no age: "unknown function" is not
-// true of a function PostgreSQL has, and a bare age(...) is a query result
-// column PostgreSQL declares interval, refused as one (the architect's ruling
-// on 1680c r3: stage A may move the two C cells whose PostgreSQL answer is
-// its own run-time 22008, 10_definitions:age/infInf and age/negInfNegInf).
+// age is NOT one although PostgreSQL declares it interval: this engine has
+// no age, and every call of it is the named capability refusal function-age,
+// raised where the unknown-function error was (expr.checkKnown; the
+// architect's ruling on 1680c r4: rule 4, without declaring age an interval
+// producer).
 var intervalReturningFunctions = map[string]bool{
 	"make_interval": true,
 	"justify_days":  true, "justify_hours": true, "justify_interval": true,
-	"age": true,
 }
 
 // --- The wrong-today intersections (ADR-0052 §5; the record §11) ---------

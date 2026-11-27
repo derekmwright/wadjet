@@ -174,6 +174,19 @@ func (e *BinOp) unknownTemporalArith(b *batch.RecordBatch, row int, lv, rv any) 
 			panic(fatalEval{UnknownTemporalAmbiguous(e.Op, litLeft)})
 		case UnknownAsInterval:
 			return intervalShift(inf, castToIntervalText(lit), false), true
+		case UnknownAsTimestamp:
+			// A timestamp difference: PostgreSQL's 22008 only where both
+			// sides are the same infinity, else its answer, which is the
+			// guard's named refusal here (infiniteDifferenceAnswers). The
+			// literal is read first, so text that names no instant keeps
+			// its 22007.
+			if e.Op == "-" {
+				ms, _ := castTemporalText(lit, castToTimestampKind)
+				other, _ := timestampInfinity(ms.(int64))
+				if infiniteDifferenceAnswers(inf, other) {
+					raiseTimestampDifference()
+				}
+			}
 		}
 		raiseInfiniteOperand("`"+e.Op+"` between dates or timestamps", inf)
 	}
@@ -197,7 +210,7 @@ func (e *BinOp) unknownTemporalArith(b *batch.RecordBatch, row int, lv, rv any) 
 		// were answered until #1713d round 8: the guard,
 		// timestamp_difference_guard.go).
 		ms, _ := castTemporalText(lit, castToTimestampKind)
-		if x, inf := timestampInfinity(ms.(int64)); inf {
+		if x, inf := timestampInfinity(ms.(int64)); inf && !(e.Op == "-" && infiniteDifferenceAnswers(t, x)) {
 			raiseInfiniteOperand("`"+e.Op+"` between dates or timestamps", x)
 		}
 		raiseTimestampDifference()

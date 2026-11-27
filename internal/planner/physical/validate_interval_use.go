@@ -674,6 +674,9 @@ func (t intervalTyper) comparison(op string, left plansql.Node, rights []plansql
 				return err
 			}
 		default:
+			if err := unimplementedCallRefusal(all...); err != nil {
+				return err
+			}
 			l, r := "interval", t.typeName(k)
 			if !t.isInterval(left) {
 				l, r = t.typeName(left), "interval"
@@ -686,6 +689,25 @@ func (t intervalTyper) comparison(op string, left plansql.Node, rights []plansql
 		// difference is a millisecond number and the comparison would compare
 		// that number with an interval.
 		return tsDiffRefusal("an operand of a comparison (" + strings.ToLower(op) + ")")
+	}
+	return nil
+}
+
+// unimplementedCallRefusal is the refusal of an operand that calls a
+// function PostgreSQL HAS and this engine does not (age: expr.ResolveFuncName
+// names it, function-age), nil for any other operand. Such a call has no
+// declared type here, so an operator beside an interval would otherwise be
+// "operator does not exist: unknown > interval", which is untrue of
+// PostgreSQL (it types the call); the call's own named refusal comes first
+// (ADR-0052 §8, the architect's rule 4 on 1680c: a change of message and
+// code at an existing refusal, never a lifted check).
+func unimplementedCallRefusal(ns ...plansql.Node) error {
+	for _, n := range ns {
+		if fc, ok := plansql.Unparen(n).(*plansql.FuncCallNode); ok {
+			if err := expr.ResolveFuncName(fc.Name); err != nil && sqlerr.ReasonOf(err) != "" {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -731,6 +753,9 @@ func (t intervalTyper) binaryOp(n *plansql.BinaryOp) error {
 		other, otherIsLeft = n.Left, true
 	}
 	opName := func() error {
+		if err := unimplementedCallRefusal(other); err != nil {
+			return err
+		}
 		l, r := "interval", t.typeName(other)
 		if otherIsLeft {
 			l, r = r, "interval"
