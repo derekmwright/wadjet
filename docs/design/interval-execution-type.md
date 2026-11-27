@@ -518,6 +518,10 @@ stage, §9), **if forgotten** [inferred].
 | `worker/avg_fold.go` `writeAvgColumn`; `coordinator/coordinator.go` `reAggregatePartials`; the DAG partial / final merge | no interval partials | the partial is (sum triple, count, +∞ count, −∞ count); the final applies `interval_div` once | E | a re-aggregated average or sum differing from the single path |
 | `worker/shuffle_partial_agg.go` `(*cappedPartialAgg).resolveAgainst`; `shuffle_local_accum.go` `(*partitionedShuffleSink).consumeLocalAccum` | sender precombine and local accumulation | key-only precombine (D), aggregate precombine (E), eligibility kept | D, E | wrong aggregates or lost eligibility despite a correct final merge |
 | `engine/exec/window.go` `WindowMinMaxType`, `resolveWindowNumeric`; `exec/window_external.go` `windowDiskPass` | refused | window aggregates, the sliding inverse (`do_interval_discard`), window keys by N | E | wrong frames; inverse transitions out of step |
+| `planner/physical/aggregate_declared_output.go` `minMaxDeclaredType`; `engine/exec/agg_output.go` `minMaxOutputType` (added in 1680c, the third judge) | the planner's mirror of the executor's MIN / MAX output table; an input type it does not list falls to its default, **FLOAT64** (the executor answers "keep the planner's declaration" for it) | an interval input declares the interval, never the FLOAT64 fallback; until E admits the family the argument is refused before either table is read (stage A's lineage declares MIN / MAX over an interval as an interval, §9.1) | A (declares), E (evaluates) | a MIN / MAX over an interval declared and printed as a double |
+| `planner/physical/validate_aggregate_args.go` `aggArgPositions`, `aggArgFits` (1680c) | the aggregate argument classes per function; no interval class, so an interval argument fits no class or the class of its carrier | an interval argument fits only the families E admits, each named; the rest are refused under their identities | A (refuses), E (admits) | an aggregate admitted over an interval by its carrier's class |
+| `planner/physical/validate_comparison_types.go` `comparisonClass` (1680c) | DURATION sits in the number class; no interval class | interval its own class: comparable only with an interval, an unknown literal or NULL (PostgreSQL's 42883 otherwise) | A (declares), C (evaluates) | an interval compared with a number through DURATION's class |
+| `planner/physical/validate_boolean.go` `provableNonBooleanType`, `checkBooleanContext` (1680c) | a clause's operand typed by the scope's declarations; no interval type to name | an interval operand in a boolean context is PostgreSQL's 42804 `... not type interval`, read from the slot's lineage, not from the carrier | A | a boolean-context message naming the carrier (text, bigint) where PostgreSQL names interval |
 
 ### 6.5 Spill, shuffle, gather and the caches
 
@@ -529,8 +533,8 @@ stage, §9), **if forgotten** [inferred].
 | `worker/partitioned_shuffle_sink.go` `hashRowsIntoPartitions`, `hashVectorValue` | no INTERVAL | partition hash of N, so SQL-equal intervals land in one partition | D | duplicate groups and missed joins across partitions |
 | `coordinator/skew_split.go` `planSkewSplitTasks` | skew sub-tasks split probe files, replicate build files | partitions by N, the split engaged and asserted | D | lost or duplicated matches |
 | `worker/gather_reply_sink.go` `(*gatherReplySink).Consume`; `coordinator/gather_receiver.go` `admitLocked`; `gather_replay.go` `(*gatherReplayStream).Next`; `dag_merge.go` `(*batchRenamer).apply`; `exec/batch_collector.go`; `coordinator/coordinator.go` `copyVectorValue`, `extractValue`, `setValueFromAny` | gather's WSHF payload, replay, renaming, identity; no INTERVAL | a case each; replay engaged and asserted | B (codec), D (admission) | an explicit gather refusal, or duplicate / incomplete results |
-| `worker/executor.go` `getFileData` with `worker/cache.go` `(*LRUCache).Put` / `Get` | shuffle input read through tiers (local stage cache, NATS KV, the LRU, S3); the LRU caches bytes by `bucket/path`, evicts by capacity, has **no per-query cleanup** | nothing to change for the type; the lifetime account must include it (§10) | — (§10) | a claim that no cached byte outlives its query |
-| `worker/resultstore.go` `ResultStore` (TTL 30 min, `CleanupQuery`); the `wadjet_results_data` NATS KV bucket (`coordinator.go`: TTL 5 min, purged at query end by `cleanupQuery`, best effort); `worker/local_stage_cache.go` `LocalStageCache` (`CleanupQuery`, wiped at construction); `worker/upload_manager.go` `Flush`, `releasePending`; `coordinator/cleanup.go` `CleanStale`, `StartPeriodicCleanup` | per-query transient copies with best-effort cleanup | nothing for the type; the lifetime account (§10) | — (§10) | as above |
+| `worker/executor.go` `getFileData` with `worker/cache.go` `(*LRUCache).Put` / `Get` | shuffle input read through tiers (local stage cache, NATS KV, the LRU, S3); the LRU caches bytes by `bucket/path`, evicts by capacity, has **no per-query cleanup** | nothing to change for the type; the lifetime account must include it (§10) | B (owner from 1680c: the carrier's lifetime account) | a claim that no cached byte outlives its query |
+| `worker/resultstore.go` `ResultStore` (a 30-minute TTL, `CleanupQuery`); the `wadjet_results_data` NATS KV bucket (`coordinator.go`: a 5-minute TTL, purged at query end by `cleanupQuery`, best effort); `worker/local_stage_cache.go` `LocalStageCache` (`CleanupQuery`, wiped at construction); `worker/upload_manager.go` `Flush`, `releasePending`; `coordinator/cleanup.go` `CleanStale`, `StartPeriodicCleanup` | per-query transient copies with best-effort cleanup. A TTL here is a retention bound the store applies when it next expires or sweeps, not a deletion time: an entry can outlive its TTL until that sweep runs, and a process that exits first takes the in-memory copies with it [inferred from the cited code; not measured] | nothing for the type; the lifetime account (§10) | B (owner from 1680c: the carrier's lifetime account) | as above |
 
 ### 6.6 Doors, writes, containers and the planner
 
@@ -544,6 +548,7 @@ stage, §9), **if forgotten** [inferred].
 | containers: `physical.arrayLitDeclaredType`, `batch/vector.go` `SetValue`'s `DurationNanoser` arm, ROW and MAP elements, `array_agg` | an interval element is refused by the interval rule | stays refused (`11_relational:neg/*/arrayAgg`, `arrayCtor`) | A | fields collapsed into a DURATION element |
 | DURATION (`TypeDuration`, `parquet.ParseDurationNanos`) | a separate nanosecond type | unchanged; no implicit conversion | A | DURATION data reinterpreted |
 | `planner/physical/validate_interval_use.go` (the interval rule) and `declared_output.go` (`colDecl`, `boundPos` in `declared_output_positions.go`, `logical/output_ids.go` `OutputColumnsWith`) | the A+ interim; declarations by bound position where the output list is enumerable | relaxed stage by stage over typed lineage (§9.1) | A, then each stage | an unsupported consumer reached by a column the rule cannot see |
+| `storage/parquet/file_writer.go` `validateWriteColumn` (1680c, the third judge) | checks the container shapes (MAP, ARRAY, ROW) and returns nil for every scalar type id it does not list, so an id the writer has no physical encoding for is not refused there | an explicit refusal of the execution-only interval id, nested declarations included, before any page is written (ADR-0052 §6 condition 1) | B (with the id) | a file finalized with a column the reader cannot read, or an interval stored under another id |
 | `storage/parquet/schema_tree.go` `refuseIntervalAnnotation`; Iceberg's interval refusal | readers refuse an interval annotation | unchanged; plus a whole encoded-Parquet refusal integration test | B (before the new id can reach storage) | a file with an interval column read as something else |
 | `server/pgwire/server.go` `handleDescribe`, `describeSQL`, `TypeMod` | Describe and typmods | false metadata on empty and prepared statements (§7) | A | NoData where a client expects a refusal |
 | `internal/oracle/typematrix/typematrix.go` `Columns` | the type matrix's catalog | an execution-derived interval fixture, not a stored column | D | the oracle stays green because INTERVAL is absent |
@@ -568,12 +573,16 @@ stage, §9), **if forgotten** [inferred].
   timestamp exists today); the derived form (`lag/tsDiffCompare`) needs D.
 - **The opaque `IntervalValue`**: replaced by the triple in C, every producer
   and consumer together.
-- **Today's derived interval column is declared TEXT.** [measured on the
-  engine] `11_relational:neg/derived/distinctSum` (and the CTE, set-operation
-  and join forms) fail 42883 `function sum(text) does not exist`: the column
-  `v` of `(SELECT CAST(s AS INTERVAL) AS v …)` reaches the outer block typed
-  by the STRING fallback. Loud today; the lineage contract (§9.1) forbids that
-  fallback for an interval producer.
+- **A derived interval column was declared TEXT until stage A.** [measured on
+  the engine at d489da4f] `11_relational:neg/derived/distinctSum` (and the
+  CTE, set-operation and join forms) failed 42883 `function sum(text) does not
+  exist`: the column `v` of `(SELECT CAST(s AS INTERVAL) AS v …)` reached the
+  outer block typed by the STRING fallback. Since 1680c the slot is declared
+  interval by lineage (`binder.intervalOut`, forwarded to every reading
+  scope) and the aggregate-argument check does not read its carrier: the
+  cells are refused `distinct-aggregate`. The carrier declaration itself
+  (`DeclaredOutputSchema`, the plan's) still says TEXT; nothing reads it as
+  an interval's type before stage D, because nothing is admitted.
 
 ## 7. What crosses a door
 
@@ -652,22 +661,28 @@ all six arms.
 **The four outcomes** (`<stem>_manifest.tsv`, `TestArc1680bStageManifest`),
 checked by `iv80Meets` (round 3):
 
-- **The internal-failure exclusion comes first.** A panic, an error without a
-  SQLSTATE or with XX000, the batch store's two guards, or an error whose
-  sentence is a runtime failure meets **no** outcome, PostgreSQL's own error
-  included (`ERR 22008: … (#361 silent-write guard)` does not meet `pg-error
-  22008`).
+- **The internal-failure exclusion comes first**, decided by PROVENANCE
+  (corrected in 1680c; round 3 decided it by a word blacklist over the
+  sentence): a panic, an error without a SQLSTATE (the batch store's guards
+  are such errors), XX000, or a code attached by a layer that did not raise
+  it (`sqlerr.Attached`: `unsupported shuffle type: 255` under 0A000) meets
+  **no** outcome, PostgreSQL's own error included. The recorder reads the
+  provenance off the error's type chain, and a worker's failure carries it
+  across the DAG (`ResultNotification.SQLAttached`).
 - `supported`: the column names, the declared types and the rows equal
   PostgreSQL's, **in order when the statement's top level orders, as a
-  multiset otherwise** (one ROLLUP whose ORDER BY ties is listed and compared
-  as a multiset).
+  multiset otherwise**; a ROLLUP whose ORDER BY leaves ties compares ordered
+  between distinct values of its visible leading key and as a multiset
+  within a tie (corrected in 1680c; round 3 compared it wholly unordered).
 - `pg-error <SQLSTATE>`: PostgreSQL's own error, the same SQLSTATE.
-- `refusal <reason>`: 0A000 **with the named reason's sentence**
-  (`iv80Reasons`: one pattern per reason, matching the sentences the interim
-  guards already use where they name the reason exactly). An unrelated 0A000
-  earns nothing (today's `interval values cannot yet be used as a query
-  result column` meets only `bare-interval-result`). Where PostgreSQL itself
-  answers 0A000 (`07_functions:trunc/week`), the named refusal is still met.
+- `refusal <reason>`: 0A000 **with the named reason's identity**, which the
+  engine emits beside the sentence (`sqlerr.Refuse`, read by
+  `sqlerr.ReasonOf`; recorded as `ERR 0A000 {<reason>}: …`; corrected in
+  1680c: round 3 matched a word pattern over the sentence, so `time-type`
+  matched a timestamptz sentence and `function-date_trunc` any sentence
+  naming date_trunc). An unrelated 0A000 earns nothing. Where PostgreSQL
+  itself answers 0A000 (`07_functions:trunc/week`), the named refusal is
+  still met.
 - `rep-divergence`: the cell's explicit rule-3 answer (§3), PostgreSQL's
   types, and every column outside the spec's units exactly PostgreSQL's. A
   GROUP BY beside SUM / AVG with no interval key is `supported`
@@ -689,6 +704,17 @@ fabricated from two rows, PostgreSQL's non-winning representative, the wrong
 direction, SUM / AVG changed beside MIN / MAX, the rule-3 value under the
 wrong type, unordered and ordered permutations, a doubled row, the ruling-11
 alternative and a wrong finite sum).
+
+**The architect's rulings on 1680c's conflicts (r3)** amend the manifest
+(`iv80Ruled`), for a cell the rules gave an A refusal that the baseline did
+not meet: (1) a cell right on main on every arm is `supported`, owned by A
+(8 cells: the typmod display casts `INTERVAL '5' YEAR … ~text`); (2) a cell
+this engine's parser rejects (`plansql.Parse`: the SQL grammar, 42601, and
+the interval literal reader, 22007) is **outside the program**: outcome
+`not-parsed <SQLSTATE>`, no owning stage, held only to the parser's
+refusal (325 cells); (3) the six TIME cells (`TIME - TIME`, `DATE ± TIME`)
+stay A refusals `time-type`. A owned 645 cells before the rulings and 320
+after.
 
 **Ownership: the earliest stage that admits what the cell needs**
 (`iv80EarliestStage`, `TestArc1680bStageRules`). Every refusal is owned by

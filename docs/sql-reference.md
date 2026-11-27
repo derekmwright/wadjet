@@ -5163,6 +5163,23 @@ and never leaves it (#1713d):
 - Interval text a single unit cannot hold (`CAST('1 day 02:00:00' AS
   INTERVAL)` over a row) is refused `0A000` where it is compared, applied or
   rendered.
+- An interval column handed on by a derived table, a CTE, a subquery, a set
+  operation or a join keeps its type: an unsupported use of it in the outer
+  query is refused under that use's own reason (`to_char`, `date_trunc`, an
+  array, `sum(DISTINCT …)`, a TIME cast), not as a published column.
+- Refused `0A000` because the engine's answer was wrong (#1680, stage A):
+  interval arithmetic with a `TIME` operand (`TIME ± INTERVAL`,
+  `INTERVAL + TIME`) and `TIME - TIME` / `DATE ± TIME`, which answered NULL,
+  a number of hours or a day count (there is no TIME type); a cast between
+  TIME and INTERVAL; `TIMESTAMPTZ ± INTERVAL`, a `TIMESTAMPTZ` difference,
+  `age` over a date or a timestamptz and `date_add` / `date_subtract` with a
+  time zone, which dropped the zone and ignored daylight saving time; an
+  interval precision (`INTERVAL(3)`); an interval cast to `CHAR(n)` (cast to
+  `TEXT` or `VARCHAR` instead); an interval operation over a TIMESTAMP literal
+  with sub-millisecond digits (TIMESTAMP holds milliseconds). Writing an
+  interval through `INSERT … SELECT` or `CREATE TABLE AS` is refused as a
+  written value. On the PostgreSQL wire, `SET IntervalStyle` to anything but
+  `postgres` is refused `0A000`: intervals display in the postgres style only.
 
 A TIMESTAMP result reaches the embedded API (`wadjet.QueryResult` rows), the
 HTTP and async query APIs and gRPC as epoch milliseconds, as a TIMESTAMP
