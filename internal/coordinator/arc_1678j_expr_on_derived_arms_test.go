@@ -108,7 +108,13 @@ type ejArm struct {
 // submit door with and without its probe split.
 func ejArms(t *testing.T, ctx context.Context) []ejArm {
 	t.Helper()
-	tables := ejTables()
+	return ejArmsOver(t, ctx, ejTables())
+}
+
+// ejArmsOver is ejArms over any fixture (#1678 line m's quoted-identifier
+// matrix adds tables whose names and columns need quotes).
+func ejArmsOver(t *testing.T, ctx context.Context, tables []tmdTable) []ejArm {
+	t.Helper()
 	stand := func(wcfg func(*worker.Config), opts ...func(*Config)) *Coordinator {
 		infra := tmdInfra(t, ctx)
 		tmdWriteTableList(t, ctx, infra, nil, tables)
@@ -272,10 +278,12 @@ var ejKnown = func() map[string]map[string]string {
 // the round-3 note). A pin is the arm's exact answer, so it fails when the
 // answer moves at all — to PostgreSQL's (unpin it) or to another wrong one.
 //   - sl/*: the stage DAG's SELECT list or aggregate input reads a build-side
-//     column of a derived table (or a quoted alias) by a name its join's
+//     column of a derived table by a name its join's
 //     stream does not carry — the gather's OutputRename asks for
 //     `n2.n_nationkey` where the stream carries `x.n_nationkey` — and the
-//     qualifier strip hands it the PROBE's column of that name.
+//     qualifier strip hands it the PROBE's column of that name. (sl/quotedAlias
+//     answers PostgreSQL's rows since #1678 line m: the gather compares the
+//     parsed identifiers, not the lowercased text `"bq".id`.)
 //   - cx/cteJoinTwice: a CTE over a join read on both sides; the probe arm's
 //     definitions are qualified by the CTE body's inner alias, which the
 //     build's columns also carry on the stream.
@@ -304,7 +312,6 @@ var ejKnownWrong = func() map[string]map[string]string {
 		{"sl/inlNestedIds", dagArms, "rows=4 1,1 | 2,2 | 3,3 | 7,7"},
 		{"sl/inlNestedIdsExpr", dagArms, "rows=9 1,1 | 1,1 | 2,2 | 2,2 | 3,3 | 5,5 | 6,6 | 7,7 | 7,7"},
 		{"sl/innerAliasIds", dagArms, "rows=4 1,1 | 2,2 | 3,3 | 7,7"},
-		{"sl/quotedAlias", dagArms, "rows=4 1,1 | 2,2 | 3,3 | 7,7"},
 		{"sl/r0Shape", dagArms, "rows=1 8"},
 	} {
 		if out[p.cell] == nil {

@@ -1,0 +1,82 @@
+# epic #1678 line m: PostgreSQL answers for TestArc1678mQuotedIdentifierEveryArm over ej_t / ej_u / qm_t / "Qm" / qm.
+# PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit; datcollate/datctype/encoding C C UTF8 (postgres:17-alpine, initdb --locale=C --encoding=UTF8), measured 2026-11-27.
+# CREATE TABLE ej_t(id BIGINT, s TEXT, n BIGINT); CREATE TABLE ej_u(id BIGINT, s TEXT, n BIGINT); CREATE TABLE ej_w(wid BIGINT, w TEXT);
+# INSERT INTO ej_t VALUES (1,'a',2),(2,'A',3),(3,'b',1),(4,NULL,NULL),(5,'c',6),(6,'B',2),(7,'a',8),(8,'d',5);
+# INSERT INTO ej_u VALUES (1,'A',3),(2,'b',1),(3,'x',9),(4,NULL,4),(5,'C',NULL),(6,'a',7);
+# INSERT INTO ej_w VALUES (1,'A'),(2,'b'),(3,'x'),(4,NULL),(5,'C'),(6,'a');
+# CREATE TABLE qm_t(id BIGINT, "Val" BIGINT, "my col" TEXT, "a.b" BIGINT, "a""b" BIGINT, "order" BIGINT, k TEXT);
+# INSERT INTO qm_t VALUES (1,10,'x',100,1000,7,'p'),(2,20,'y',200,2000,6,'q'),(3,30,NULL,300,3000,5,'p'),(4,NULL,'x',NULL,4000,4,'r'),(5,50,'z',500,NULL,3,NULL);
+# CREATE TABLE "Qm"(id BIGINT, "Val" BIGINT, k TEXT);
+# INSERT INTO "Qm" VALUES (1,11,'p'),(2,22,'q'),(3,33,'s'),(6,66,'p');
+# CREATE TABLE qm(id BIGINT, val BIGINT);
+# INSERT INTO qm VALUES (1,100),(2,200),(7,700);
+# This engine's catalog refuses two columns of one table differing only by case ("Val" beside val), so "Qm" carries "Val" alone and qm the lower-case val.
+# name<TAB>sql<TAB>rows=N <rows sorted, cells joined by ',', NULL spelled NULL, rows joined by ' | '> (psql -At -F , -P null=NULL), or ERROR <SQLSTATE>: <message> (VERBOSITY=verbose).
+ra/selCase	SELECT a.id, "Bq".id FROM ej_t a JOIN ej_u "Bq" ON a.s = "Bq".s	rows=4 1,6 | 2,1 | 3,2 | 7,6
+ra/selCaseCtl	SELECT a.id, bq.id FROM ej_t a JOIN ej_u bq ON a.s = bq.s	rows=4 1,6 | 2,1 | 3,2 | 7,6
+ra/selCaseExpr	SELECT a.id, "Bq".id + 0 FROM ej_t a JOIN ej_u "Bq" ON a.s = "Bq".s	rows=4 1,6 | 2,1 | 3,2 | 7,6
+ra/selCaseTwoCols	SELECT a.id, a.n, "Bq".id, "Bq".n FROM ej_t a JOIN ej_u "Bq" ON a.s = "Bq".s	rows=4 1,2,6,7 | 2,3,1,3 | 3,1,2,1 | 7,8,6,7
+ra/selCaseAs	SELECT a.id, "Bq".id AS bid FROM ej_t a JOIN ej_u "Bq" ON a.s = "Bq".s	rows=4 1,6 | 2,1 | 3,2 | 7,6
+ra/selCaseProbe	SELECT "Aq".id, b.id FROM ej_t "Aq" JOIN ej_u b ON "Aq".s = b.s	rows=4 1,6 | 2,1 | 3,2 | 7,6
+ra/selCaseBoth	SELECT "Aq".id, "Bq".id FROM ej_t "Aq" JOIN ej_u "Bq" ON "Aq".s = "Bq".s	rows=4 1,6 | 2,1 | 3,2 | 7,6
+ra/selSpace	SELECT a.id, "my b".id FROM ej_t a JOIN ej_u "my b" ON a.s = "my b".s	rows=4 1,6 | 2,1 | 3,2 | 7,6
+ra/selDot	SELECT a.id, "x.y".id FROM ej_t a JOIN ej_u "x.y" ON a.s = "x.y".s	rows=4 1,6 | 2,1 | 3,2 | 7,6
+ra/selQuote	SELECT a.id, "b""q".id FROM ej_t a JOIN ej_u "b""q" ON a.s = "b""q".s	rows=4 1,6 | 2,1 | 3,2 | 7,6
+ra/selReserved	SELECT a.id, "select".id FROM ej_t a JOIN ej_u "select" ON a.s = "select".s	rows=4 1,6 | 2,1 | 3,2 | 7,6
+ra/caseTwo	SELECT a.id, "Bq".id, "bq".id FROM ej_t a JOIN ej_u "Bq" ON a.s = "Bq".s JOIN ej_u "bq" ON a.n = "bq".n	rows=2 2,1,1 | 3,2,2
+ra/caseTwoRev	SELECT a.id, "bq".id, "Bq".id FROM ej_t a JOIN ej_u "bq" ON a.s = "bq".s JOIN ej_u "Bq" ON a.n = "Bq".n	rows=2 2,1,1 | 3,2,2
+ra/caseTwoCtl	SELECT a.id, b1.id, b2.id FROM ej_t a JOIN ej_u b1 ON a.s = b1.s JOIN ej_u b2 ON a.n = b2.n	rows=2 2,1,1 | 3,2,2
+ra/foldSame	SELECT a.id, "bq".id FROM ej_t a JOIN ej_u bq ON a.s = bq.s	rows=4 1,6 | 2,1 | 3,2 | 7,6
+ra/foldSameUpper	SELECT a.id, BQ.id FROM ej_t a JOIN ej_u "bq" ON a.s = "bq".s	rows=4 1,6 | 2,1 | 3,2 | 7,6
+ra/foldMismatch	SELECT a.id, Bq.id FROM ej_t a JOIN ej_u "Bq" ON a.s = "Bq".s	ERROR 42P01: missing FROM-clause entry for table "bq"
+ra/where	SELECT a.id, "Bq".id FROM ej_t a JOIN ej_u "Bq" ON a.s = "Bq".s WHERE "Bq".id > 1	rows=3 1,6 | 3,2 | 7,6
+ra/whereCtl	SELECT a.id, b.id FROM ej_t a JOIN ej_u b ON a.s = b.s WHERE b.id > 1	rows=3 1,6 | 3,2 | 7,6
+ra/onExpr	SELECT a.id, "Bq".id FROM ej_t a JOIN ej_u "Bq" ON upper(a.s) = upper("Bq".s)	rows=9 1,1 | 1,6 | 2,1 | 2,6 | 3,2 | 5,5 | 6,2 | 7,1 | 7,6
+ra/groupBy	SELECT "Bq".id, count(*) FROM ej_t a JOIN ej_u "Bq" ON a.s = "Bq".s GROUP BY "Bq".id	rows=3 1,1 | 2,1 | 6,2
+ra/groupByCtl	SELECT b.id, count(*) FROM ej_t a JOIN ej_u b ON a.s = b.s GROUP BY b.id	rows=3 1,1 | 2,1 | 6,2
+ra/groupByProbe	SELECT a.n, count("Bq".id) FROM ej_t a JOIN ej_u "Bq" ON a.s = "Bq".s GROUP BY a.n	rows=4 1,1 | 2,1 | 3,1 | 8,1
+ra/orderBy	SELECT a.id, "Bq".id FROM ej_t a JOIN ej_u "Bq" ON a.s = "Bq".s ORDER BY "Bq".id DESC, a.id LIMIT 2	rows=2 1,6 | 7,6
+ra/orderByCtl	SELECT a.id, b.id FROM ej_t a JOIN ej_u b ON a.s = b.s ORDER BY b.id DESC, a.id LIMIT 2	rows=2 1,6 | 7,6
+ra/aggArg	SELECT sum("Bq".id), max("Bq".id) FROM ej_t a JOIN ej_u "Bq" ON a.s = "Bq".s	rows=1 15,6
+ra/aggArgCtl	SELECT sum(b.id), max(b.id) FROM ej_t a JOIN ej_u b ON a.s = b.s	rows=1 15,6
+ra/window	SELECT a.id, sum("Bq".id) OVER (PARTITION BY a.s) FROM ej_t a JOIN ej_u "Bq" ON a.s = "Bq".s	rows=4 1,12 | 2,1 | 3,2 | 7,12
+ra/windowKey	SELECT a.id, row_number() OVER (PARTITION BY "Bq".id ORDER BY a.id) FROM ej_t a JOIN ej_u "Bq" ON a.s = "Bq".s	rows=4 1,1 | 2,1 | 3,1 | 7,2
+ra/windowCtl	SELECT a.id, sum(b.id) OVER (PARTITION BY a.s) FROM ej_t a JOIN ej_u b ON a.s = b.s	rows=4 1,12 | 2,1 | 3,2 | 7,12
+ra/setop	SELECT "Bq".id FROM ej_t a JOIN ej_u "Bq" ON a.s = "Bq".s UNION ALL SELECT a.id FROM ej_t a WHERE a.id > 7	rows=5 1 | 2 | 6 | 6 | 8
+ra/setopCtl	SELECT b.id FROM ej_t a JOIN ej_u b ON a.s = b.s UNION ALL SELECT a.id FROM ej_t a WHERE a.id > 7	rows=5 1 | 2 | 6 | 6 | 8
+ra/distinct	SELECT DISTINCT "Bq".id FROM ej_t a JOIN ej_u "Bq" ON a.s = "Bq".s	rows=3 1 | 2 | 6
+ra/left	SELECT a.id, "Bq".id FROM ej_t a LEFT JOIN ej_u "Bq" ON a.s = "Bq".s	rows=8 1,6 | 2,1 | 3,2 | 4,NULL | 5,NULL | 6,NULL | 7,6 | 8,NULL
+ra/selfJoin	SELECT "Bq".id, "bq".id FROM ej_u "Bq" JOIN ej_u "bq" ON "Bq".s = "bq".s	rows=5 1,1 | 2,2 | 3,3 | 5,5 | 6,6
+tn/plain	SELECT "Qm".id, "Qm"."Val" FROM "Qm"	rows=4 1,11 | 2,22 | 3,33 | 6,66
+tn/joinProbe	SELECT "Qm".id, qm_t.id FROM "Qm" JOIN qm_t ON "Qm".k = qm_t.k	rows=5 1,1 | 1,3 | 2,2 | 6,1 | 6,3
+tn/joinBuild	SELECT qm_t.id, "Qm".id FROM qm_t JOIN "Qm" ON qm_t.k = "Qm".k	rows=5 1,1 | 1,6 | 2,2 | 3,1 | 3,6
+tn/caseTables	SELECT qm.id, "Qm".id FROM qm JOIN "Qm" ON qm.id = "Qm".id	rows=2 1,1 | 2,2
+tn/caseTablesVal	SELECT qm.val, "Qm"."Val" FROM qm JOIN "Qm" ON qm.id = "Qm".id	rows=2 100,11 | 200,22
+tn/unquotedFolds	SELECT id, val FROM QM	rows=3 1,100 | 2,200 | 7,700
+cn/plain	SELECT id, "Val", "my col", "a.b", "a""b", "order" FROM qm_t	rows=5 1,10,x,100,1000,7 | 2,20,y,200,2000,6 | 3,30,NULL,300,3000,5 | 4,NULL,x,NULL,4000,4 | 5,50,z,500,NULL,3
+cn/where	SELECT id FROM qm_t WHERE "my col" = 'x' AND "a.b" > 50 AND "order" < 9	rows=1 1
+cn/caseCols	SELECT q.id, q."Val", m."Val" FROM qm_t q JOIN qm m ON q.id = m.id	ERROR 42703: column m.Val does not exist
+cn/caseColsWhere	SELECT id FROM "Qm" WHERE "Val" > 20 AND "Val" < 60	rows=2 2 | 3
+cn/foldMismatch	SELECT VAL FROM qm_t	ERROR 42703: column "val" does not exist
+cn/joinBuild	SELECT q.id, m."Val" FROM qm_t q JOIN "Qm" m ON q.k = m.k	rows=5 1,11 | 1,66 | 2,22 | 3,11 | 3,66
+cn/joinBuildBoth	SELECT q."Val", m."Val" FROM qm_t q JOIN "Qm" m ON q.id = m.id	rows=3 10,11 | 20,22 | 30,33
+cn/joinOnQuoted	SELECT q.id, m.id FROM qm_t q JOIN "Qm" m ON q."Val" + 1 = m."Val"	rows=1 1,1
+cn/joinDot	SELECT q."a.b", m.id FROM qm_t q JOIN "Qm" m ON q.id = m.id	rows=3 100,1 | 200,2 | 300,3
+cn/joinSpace	SELECT q."my col", m.id FROM qm_t q JOIN "Qm" m ON q.id = m.id	rows=3 NULL,3 | x,1 | y,2
+cn/joinQuote	SELECT q."a""b", m.id FROM qm_t q JOIN "Qm" m ON q.id = m.id	rows=3 1000,1 | 2000,2 | 3000,3
+cn/joinReserved	SELECT q."order", m.id FROM qm_t q JOIN "Qm" m ON q.id = m.id	rows=3 5,3 | 6,2 | 7,1
+cn/groupBy	SELECT "my col", count(*), sum("a.b") FROM qm_t GROUP BY "my col"	rows=4 NULL,1,300 | x,2,100 | y,1,200 | z,1,500
+cn/groupByJoin	SELECT m."Val", count(*) FROM qm_t q JOIN "Qm" m ON q.k = m.k GROUP BY m."Val"	rows=3 11,2 | 22,1 | 66,2
+cn/groupByCase	SELECT "Val", count(*) FROM "Qm" GROUP BY "Val"	rows=4 11,1 | 22,1 | 33,1 | 66,1
+cn/orderBy	SELECT id FROM qm_t ORDER BY "order" LIMIT 2	rows=2 4 | 5
+cn/orderByCase	SELECT id FROM "Qm" ORDER BY "Val" DESC LIMIT 2	rows=2 3 | 6
+cn/aggArg	SELECT sum("Val"), sum("a""b") FROM qm_t q JOIN "Qm" m ON q.id = m.id	ERROR 42702: column reference "Val" is ambiguous
+cn/aggArgJoin	SELECT sum(m."Val"), sum(q."Val") FROM qm_t q JOIN "Qm" m ON q.id = m.id	rows=1 66,60
+cn/window	SELECT id, sum("a.b") OVER (PARTITION BY k) FROM qm_t	rows=5 1,400 | 2,200 | 3,400 | 4,NULL | 5,500
+cn/windowJoin	SELECT q.id, sum(m."Val") OVER (PARTITION BY q.k) FROM qm_t q JOIN "Qm" m ON q.id = m.id	rows=3 1,44 | 2,22 | 3,44
+cn/setop	SELECT "Val" FROM "Qm" UNION ALL SELECT "Val" FROM qm_t	rows=9 10 | 11 | 20 | 22 | 30 | 33 | 50 | 66 | NULL
+cal/orderBy	SELECT a.id AS "X", "Bq".id AS "x" FROM ej_t a JOIN ej_u "Bq" ON a.s = "Bq".s ORDER BY "x" DESC, "X" LIMIT 2	rows=2 1,6 | 7,6
+cal/orderByRev	SELECT a.id AS "X", "Bq".id AS "x" FROM ej_t a JOIN ej_u "Bq" ON a.s = "Bq".s ORDER BY "X" DESC, "x" LIMIT 2	rows=2 3,2 | 7,6
+cal/groupBy	SELECT "Bq".id AS "B", count(*) FROM ej_t a JOIN ej_u "Bq" ON a.s = "Bq".s GROUP BY "B"	rows=3 1,1 | 2,1 | 6,2
+cal/derived	SELECT d."X", d."x" FROM (SELECT a.id AS "X", b.id AS "x" FROM ej_t a JOIN ej_u b ON a.s = b.s) d	rows=4 1,6 | 2,1 | 3,2 | 7,6
+cal/space	SELECT "my id" FROM (SELECT id AS "my id" FROM ej_u) d WHERE "my id" > 4	rows=2 5 | 6
