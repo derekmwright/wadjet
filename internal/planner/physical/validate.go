@@ -194,6 +194,13 @@ type colScope struct {
 	// quoted one: `SELECT "G"` over a column `g` is 42703 in PostgreSQL, not
 	// a read of `g`.
 	exact map[string]bool
+	// qualExact is exact per relation: the spellings each FOLDED qualifier's
+	// sources published. A QUALIFIED delimited reference asks its own
+	// relation for the bytes, never the block: `m."Val"` over `qm_t q
+	// JOIN qm m`, where q publishes "Val" and m publishes only val, is 42703
+	// in PostgreSQL (`column m.Val does not exist`), and the block-wide exact
+	// set let q's spelling vouch for m and read m's val (#1678, cn/caseCols).
+	qualExact map[string]map[string]bool
 	// relations is this block's relation CENSUS — every relation its FROM
 	// declares, in parse order — and parsedThrough is how much of that census
 	// had been read at the point this scope describes. Together they decide
@@ -249,7 +256,7 @@ func newColScope() *colScope {
 		dupQualified: map[string]map[string]bool{},
 		colTypes:     map[string]parquet.TypeID{}, qualColTypes: map[string]map[string]parquet.TypeID{},
 		rowFields: map[string][]parquet.Column{}, elemTypes: map[string]parquet.TypeID{},
-		exact:      map[string]bool{},
+		exact: map[string]bool{}, qualExact: map[string]map[string]bool{},
 		exactQuals: map[string]bool{}}
 }
 
@@ -283,6 +290,10 @@ func (s *colScope) addQualified(qual, col string) {
 	}
 	q := strings.ToLower(qual)
 	s.exactQuals[qual] = true
+	if s.qualExact[q] == nil {
+		s.qualExact[q] = map[string]bool{}
+	}
+	s.qualExact[q][col] = true
 	if s.quals[q] == nil {
 		s.quals[q] = map[string]bool{}
 	}
@@ -394,6 +405,14 @@ func (s *colScope) merge(o *colScope) {
 	for q := range o.exactQuals {
 		s.exactQuals[q] = true
 	}
+	for q, cs := range o.qualExact {
+		if s.qualExact[q] == nil {
+			s.qualExact[q] = map[string]bool{}
+		}
+		for c := range cs {
+			s.qualExact[q][c] = true
+		}
+	}
 	for q, cs := range o.quals {
 		if s.quals[q] == nil {
 			s.quals[q] = map[string]bool{}
@@ -487,18 +506,33 @@ func (s *colScope) clone() *colScope {
 // counted as the declaration the spelling missed — for a relation the
 // qualifier does not name (arc JP measurement, N5; PostgreSQL answers,
 // and a plain join over the same derived table was refused too).
+//
+// The SPELLING a qualified reference is held to is its own relation's too
+// (qualExact): another source publishing those bytes does not vouch for
+// this one (#1678, cn/caseCols).
 func (s *colScope) refuseDelimitedMiss(ref *plansql.ColRef) error {
-	if plansql.FoldIdent(ref.Column) == ref.Column || s.exact[ref.Column] {
+	if plansql.FoldIdent(ref.Column) == ref.Column {
 		return nil
 	}
-	decls := s.colTypes
-	if ref.Table != "" {
-		decls = s.qualColTypes[strings.ToLower(ref.Table)]
+	if ref.Table == "" {
+		if s.exact[ref.Column] {
+			return nil
+		}
+		if _, fromBaseTable := s.colTypes[strings.ToLower(ref.Column)]; !fromBaseTable {
+			return nil
+		}
+		return sqlerr.New("42703", "column %q does not exist", ref.Column)
 	}
-	if _, fromBaseTable := decls[strings.ToLower(ref.Column)]; !fromBaseTable {
+	q := strings.ToLower(ref.Table)
+	if s.qualExact[q][ref.Column] {
 		return nil
 	}
-	return sqlerr.New("42703", "column %q does not exist", ref.Column)
+	if _, fromBaseTable := s.qualColTypes[q][strings.ToLower(ref.Column)]; !fromBaseTable {
+		return nil
+	}
+	// PostgreSQL's sentence for a qualified miss names the reference as
+	// written, without delimiters: `column m.Val does not exist`.
+	return sqlerr.New("42703", "column %s.%s does not exist", ref.Table, ref.Column)
 }
 
 func (s *colScope) resolveRef(ref *plansql.ColRef) error {
