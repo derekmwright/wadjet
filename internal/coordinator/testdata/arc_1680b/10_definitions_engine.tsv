@@ -100,15 +100,15 @@ sentinel/negOfNearMax	*	error	ERR 22007: invalid input syntax for type interval:
 sentinel/negOfNearMin	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "-2147483648 months -2147483647 days -9223372036854775807 microseconds"
 sentinel/negOfInfinityTriple	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 months 2147483647 days 9223372036854775807 microseconds"
 sentinel/mulNegInfinityTriple	*	error	ERR 22007: invalid input syntax for type interval: "-2147483648 months -2147483648 days -9223372036854775808 microseconds"
-age/borrow	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/timeBorrow	*	refusal	ERR 0A000 {timestamp-millisecond-carrier}: age over a sub-millisecond TIMESTAMP literal is not supported: a TIMESTAMP here holds milliseconds, and the literal has finer digits
-age/null	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/infLeft	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/infRight	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/infOpposed	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/infInf	*	wrong-sqlstate	ERR 42883: unknown function: age (did you mean abs?)
-age/negInfNegInf	*	wrong-sqlstate	ERR 42883: unknown function: age (did you mean abs?)
-age/bc	*	error	ERR 42883: unknown function: age (did you mean abs?)
+age/borrow	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+age/timeBorrow	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+age/null	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+age/infLeft	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+age/infRight	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+age/infOpposed	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+age/infInf	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+age/negInfNegInf	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+age/bc	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 age/date	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 age/dateNY	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 age/dateUTC	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
@@ -129,8 +129,8 @@ types/intervalMinusDate	*	pg-error	ERR 42883: operator does not exist: interval 
 types/datePlusTime	*	refusal	ERR 0A000 {time-type}: TIME arithmetic (+) is not supported: this engine has no TIME type, and a TIME operand is not read as a time of day (ADR-0012 temporal r23)
 types/dateMinusTime	*	refusal	ERR 0A000 {time-type}: TIME arithmetic (-) is not supported: this engine has no TIME type, and a TIME operand is not read as a time of day (ADR-0012 temporal r23)
 types/tsMinusTs	*	refusal	ERR 0A000 {bare-interval-result}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
-types/tsMinusDate	*	error	ERR 42883: operator does not exist: timestamp without time zone - date
-types/dateMinusTs	*	error	ERR 42883: operator does not exist: date - timestamp without time zone
+types/tsMinusDate	*	refusal	ERR 0A000 {timestamp-date-difference}: timestamp without time zone - date is not supported: PostgreSQL answers an interval, which this engine does not compute from a date and a timestamp; compare the values themselves instead, for example ts > CAST(d AS TIMESTAMP) + INTERVAL '30…
+types/dateMinusTs	*	refusal	ERR 0A000 {timestamp-date-difference}: date - timestamp without time zone is not supported: PostgreSQL answers an interval, which this engine does not compute from a date and a timestamp; compare the values themselves instead, for example ts > CAST(d AS TIMESTAMP) + INTERVAL '30…
 types/tsPlusInterval	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 types/intervalPlusTs	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 types/tsMinusInterval	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
@@ -150,8 +150,8 @@ types/intervalTimesInt	*	refusal	ERR 0A000 {bare-interval-result}: interval valu
 types/intTimesInterval	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 types/intervalDivInt	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 types/negInterval	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-closure/tsMinusDate	*	error	ERR 42883: operator does not exist: timestamp without time zone - date
-closure/dateMinusTs	*	error	ERR 42883: operator does not exist: date - timestamp without time zone
+closure/tsMinusDate	*	refusal	ERR 0A000 {timestamp-date-difference}: timestamp without time zone - date is not supported: PostgreSQL answers an interval, which this engine does not compute from a date and a timestamp; compare the values themselves instead, for example ts > CAST(d AS TIMESTAMP) + INTERVAL '30…
+closure/dateMinusTs	*	refusal	ERR 0A000 {timestamp-date-difference}: date - timestamp without time zone is not supported: PostgreSQL answers an interval, which this engine does not compute from a date and a timestamp; compare the values themselves instead, for example ts > CAST(d AS TIMESTAMP) + INTERVAL '30…
 closure/coalesceText	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
 closure/coalesce	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 closure/caseText	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
@@ -173,7 +173,7 @@ dst/foldMinus	*	refusal	ERR 0A000 {timestamptz}: timestamptz - interval or a tim
 dst/gapInput	*	differs	a:TIMESTAMP | 2024-03-10 02:30:00
 dst/monthIntoGap	*	refusal	ERR 0A000 {timestamptz}: timestamptz + interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 dst/hoursAcrossFold	*	refusal	ERR 0A000 {timestamptz}: timestamptz + interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
-dst/dateAddZone	*	error	ERR 42883: function date_add(timestamp, unknown, unknown) does not exist
+dst/dateAddZone	*	refusal	ERR 0A000 {timestamptz}: date_add with a time zone or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 dst/seriesZone	*	refusal	ERR 0A000 {timestamptz}: generate_series over timestamptz bounds with an interval step is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 dst/seriesNoZone	*	refusal	ERR 0A000 {timestamptz}: generate_series over timestamptz bounds with an interval step is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 fn/binInfStride	*	wrong-sqlstate	ERR 42601: syntax error at or near ","

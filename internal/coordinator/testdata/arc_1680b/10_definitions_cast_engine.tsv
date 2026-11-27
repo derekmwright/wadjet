@@ -82,8 +82,8 @@ age/dateGapHavana~text	*	refusal	ERR 0A000 {timestamptz}: age over a date or a t
 age/tz/UTC/fallBack~text	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 age/tz/America/New_York/fallBack~text	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 types/tsMinusTs~text	*	refusal	ERR 0A000 {timestamp-difference-to-number}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as the operand of a cast to text: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts …
-types/tsMinusDate~text	*	error	ERR 42883: operator does not exist: timestamp without time zone - date
-types/dateMinusTs~text	*	error	ERR 42883: operator does not exist: date - timestamp without time zone
+types/tsMinusDate~text	*	refusal	ERR 0A000 {timestamp-date-difference}: timestamp without time zone - date is not supported: PostgreSQL answers an interval, which this engine does not compute from a date and a timestamp; compare the values themselves instead, for example ts > CAST(d AS TIMESTAMP) + INTERVAL '30…
+types/dateMinusTs~text	*	refusal	ERR 0A000 {timestamp-date-difference}: date - timestamp without time zone is not supported: PostgreSQL answers an interval, which this engine does not compute from a date and a timestamp; compare the values themselves instead, for example ts > CAST(d AS TIMESTAMP) + INTERVAL '30…
 types/timeMinusTime~text	*	refusal	ERR 0A000 {time-type}: TIME arithmetic (-) is not supported: this engine has no TIME type, and a TIME operand is not read as a time of day (ADR-0012 temporal r23)
 types/tstzMinusTstz~text	*	refusal	ERR 0A000 {timestamptz}: timestamptz - interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 types/tstzMinusTs~text	*	refusal	ERR 0A000 {timestamptz}: timestamptz - interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
@@ -91,8 +91,8 @@ types/intervalTimesInt~text	*	agree	a:text | 2 days
 types/intTimesInterval~text	*	agree	a:text | 2 days
 types/intervalDivInt~text	*	agree	a:text | 12:00:00
 types/negInterval~text	*	agree	a:text | -1 days
-closure/tsMinusDate~text	*	error	ERR 42883: operator does not exist: timestamp without time zone - date
-closure/dateMinusTs~text	*	error	ERR 42883: operator does not exist: date - timestamp without time zone
+closure/tsMinusDate~text	*	refusal	ERR 0A000 {timestamp-date-difference}: timestamp without time zone - date is not supported: PostgreSQL answers an interval, which this engine does not compute from a date and a timestamp; compare the values themselves instead, for example ts > CAST(d AS TIMESTAMP) + INTERVAL '30…
+closure/dateMinusTs~text	*	refusal	ERR 0A000 {timestamp-date-difference}: date - timestamp without time zone is not supported: PostgreSQL answers an interval, which this engine does not compute from a date and a timestamp; compare the values themselves instead, for example ts > CAST(d AS TIMESTAMP) + INTERVAL '30…
 closure/coalesce~text	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
 closure/case~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 closure/nullif~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND

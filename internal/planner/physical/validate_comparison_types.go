@@ -507,7 +507,46 @@ func (c *comparisonTyper) temporalArithmetic(n *plansql.BinaryOp) error {
 	if !refuse {
 		return nil
 	}
+	// PostgreSQL HAS these two pairs, so its 42883 would be untrue here: the
+	// refusal is this engine's, named (the architect's ruling on 1680c r3;
+	// ADR-0052 §8, the earliest truthful rule). `timestamp - date` and
+	// `date - timestamp` are intervals there; a timestamptz operand of a
+	// timestamp difference or an interval shift is timestamptz arithmetic
+	// (which the engine reads as TIMESTAMP and refuses by name).
+	if isTimestamptzOperand(n.Left) && isTemporalDifference(n.Right) || isTimestamptzOperand(n.Right) && isTemporalDifference(n.Left) {
+		return timestamptzRefusal("timestamptz " + n.Op + " interval or a timestamptz difference")
+	}
+	if lTemp && rTemp && n.Op == "-" && lt != rt {
+		return sqlerr.Refuse("timestamp-date-difference", "%s - %s is not supported: PostgreSQL answers an interval, "+
+			"which this engine does not compute from a date and a timestamp; compare the values themselves "+
+			"instead, for example ts > CAST(d AS TIMESTAMP) + INTERVAL '30 days'", pgTypeName(lt), pgTypeName(rt))
+	}
 	return sqlerr.New("42883", "operator does not exist: %s %s %s", pgTypeName(lt), n.Op, pgTypeName(rt))
+}
+
+// isTemporalDifference reports `a - b` over two operands typed by their
+// spelling as a timestamp, a timestamptz or a date, at least one of them not
+// a date: an interval in PostgreSQL (date - date is an integer there).
+func isTemporalDifference(n plansql.Node) bool {
+	b, ok := plansql.Unparen(n).(*plansql.BinaryOp)
+	if !ok || b.Op != "-" {
+		return false
+	}
+	kind := func(x plansql.Node) string {
+		c, ok := plansql.Unparen(x).(*plansql.CastNode)
+		if !ok {
+			return ""
+		}
+		switch castTypeBase(c.TypeName) {
+		case "timestamp", "timestamp without time zone", "timestamptz", "timestamp with time zone":
+			return "ts"
+		case "date":
+			return "date"
+		}
+		return ""
+	}
+	l, r := kind(b.Left), kind(b.Right)
+	return l != "" && r != "" && (l == "ts" || r == "ts")
 }
 
 // temporalScaling refuses `*`, `/` and `%` with a DATE or a TIMESTAMP operand

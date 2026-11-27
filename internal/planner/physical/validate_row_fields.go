@@ -96,6 +96,12 @@ func refuseInvalidRowFields(node plansql.Node, scope *colScope) error {
 		// about a column's type, which refuseUnknownFlagNames deliberately
 		// does not carry.
 		if err := expr.RefuseUnresolvableCall(fc, declOf); err != nil {
+			if tzErr := timestamptzCallRefusal(fc); tzErr != nil {
+				// PostgreSQL has date_add / date_subtract over a timestamptz
+				// and an interval (with or without a zone): its 42883 would be
+				// untrue, and the refusal is this engine's, named.
+				return tzErr
+			}
 			return err
 		}
 		// An AGGREGATE's argument class, on the same walk and for the same

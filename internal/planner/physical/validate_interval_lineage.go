@@ -183,14 +183,15 @@ var intervalValueArg = map[string]int{
 // where it is consumed, never left to an unknown-function error that hides
 // the interval).
 //
-// age is NOT here although PostgreSQL declares it interval: this engine has
-// no age, and `age(TIMESTAMP 'infinity', TIMESTAMP 'infinity')` is a cell
-// stage C owns as PostgreSQL's own 22008 (10_definitions:age/infInf), whose
-// recorded disposition (42883 unknown function) stage A may not move. Its
-// bare-result cells stay unmet until that is ruled (1680c_r3.md).
+// age is one although this engine has no age: "unknown function" is not
+// true of a function PostgreSQL has, and a bare age(...) is a query result
+// column PostgreSQL declares interval, refused as one (the architect's ruling
+// on 1680c r3: stage A may move the two C cells whose PostgreSQL answer is
+// its own run-time 22008, 10_definitions:age/infInf and age/negInfNegInf).
 var intervalReturningFunctions = map[string]bool{
 	"make_interval": true,
 	"justify_days":  true, "justify_hours": true, "justify_interval": true,
+	"age": true,
 }
 
 // --- The wrong-today intersections (ADR-0052 §5; the record §11) ---------
@@ -407,6 +408,31 @@ func (t intervalTyper) permanentRule(node plansql.Node) error {
 		}
 	}
 	return nil
+}
+
+// timestamptzCallRefusal is the binder's refusal of a call the signature
+// check cannot resolve because it is PostgreSQL's timestamptz form:
+// date_add / date_subtract over a timestamptz first argument and an interval
+// literal second (an optional zone third). Nil for any other call, whose
+// signature error stands.
+func timestamptzCallRefusal(fc *plansql.FuncCallNode) error {
+	name := strings.ToLower(strings.TrimSpace(fc.Name))
+	if (name != "date_add" && name != "date_subtract") || len(fc.Args) < 2 || len(fc.Args) > 3 {
+		return nil
+	}
+	if !isTimestamptzOperand(fc.Args[0]) {
+		return nil
+	}
+	switch a := plansql.Unparen(fc.Args[1]).(type) {
+	case *plansql.IntervalLit:
+	case *plansql.CastNode:
+		if castTypeBase(a.TypeName) != "interval" {
+			return nil
+		}
+	default:
+		return nil
+	}
+	return timestamptzRefusal(name + " with a time zone or a timestamptz")
 }
 
 // tableFuncTimestamptz is the intersection's judgment of a table function's

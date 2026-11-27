@@ -734,10 +734,13 @@ func TestArc1713cMeasure(t *testing.T) {
 //     td/caseNumber, td/castBigint, tsub/vsNumber, tsub/intervalTimesDiff:
 //     no pin, PostgreSQL's code). td/abs and td/round are 0A000 here, 42883
 //     there (an interval's function argument, as for a literal). date - date
-//     is bigint here, integer there (ivTypeGaps). tsub/tsDate,
-//     tsub/tsDateVsInterval and tsub/tsMinusDiff: 42883 at base already
-//     (timestamp - date and timestamp - double have no operator here; the
+//     is bigint here, integer there (ivTypeGaps). tsub/tsMinusDiff: 42883
+//     at base already (timestamp - double has no operator here; the
 //     planner's operator resolution precedes the interval rule), unchanged.
+//     tsub/tsDate and tsub/tsDateVsInterval: 42883 at base, 0A000 since the
+//     rulings on 1680c r3 (timestamp - date is an interval in PostgreSQL,
+//     so its 42883 was untrue: the binder's refusal is named,
+//     timestamp-date-difference).
 //   - lp/multiField: a multi-field interval literal is 22007 here, accepted
 //     there (1713c's literal grammar, unchanged).
 //   - fam/opaqueEmpty@dag*, pos/divZeroEmpty@dag*: a row-dependent error
@@ -774,8 +777,8 @@ var ivKnown = map[string]string{
 	"pos/divZeroEmpty@dag":          "ERR 22012",
 	"pos/divZeroEmpty@dag-shuffled": "ERR 22012",
 	"pos/divZeroEmpty@dag-morsel4":  "ERR 22012",
-	"tsub/tsDate":                   "ERR 42883",
-	"tsub/tsDateVsInterval":         "ERR 42883",
+	"tsub/tsDate":                   "ERR 0A000",
+	"tsub/tsDateVsInterval":         "ERR 0A000",
 	"tsub/tsMinusDiff":              "ERR 42883",
 	"lp/multiField":                 "ERR 22007",
 	"ddl/intervalArray":             "ERR 42601",
