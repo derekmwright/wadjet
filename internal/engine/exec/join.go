@@ -1119,7 +1119,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	}
 	defer source.Close()
 
-	workers := runtime.NumCPU()
+	workers := joinBuildWorkers(runtime.NumCPU())
 
 	// Key-only builds (semi/anti joins without filter) store no batches —
 	// only the key index and bloom filter. Parallel is safe since there is

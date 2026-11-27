@@ -601,6 +601,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// Rows whose join key is definitely not in the build side are filtered
 	// out via selection vector before they reach the probe operator.
 	if bf := hj.BloomPushdownOp(); bf != nil {
+		probeOps := leftOps
 		leftOps = append(leftOps, bf)
 
 		// Push bloom filter deeper into the scan layer for row-group-level
@@ -608,7 +609,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		// keys, attach a BloomScanFilter so entire row groups whose key
 		// range has no hits in the bloom filter are skipped before I/O.
 		if bsf := bf.BloomScanFilter(); bsf != nil {
-			attachBloomToScanSource(leftSource, bsf)
+			attachBloomToScanSource(leftSource, probeOps, bsf)
 		}
 	}
 
@@ -616,7 +617,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// Complements the bloom filter: works for all types (string, date, wide int
 	// ranges) and is cheaper to evaluate (single range comparison per row group).
 	if ranges := hj.BuildKeyRange(); len(ranges) > 0 {
-		attachDynamicFilterToScanSource(leftSource, ranges)
+		attachDynamicFilterToScanSource(leftSource, leftOps, ranges)
 	}
 	probe := hj.Probe()
 	p.applyLateMaterialization(probe)

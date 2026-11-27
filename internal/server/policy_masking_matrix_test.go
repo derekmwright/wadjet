@@ -1069,6 +1069,33 @@ func pmCells() []pmCell {
 		{name: "correlated_exists_masked",
 			sql:  `SELECT COUNT(*) AS c FROM e7emp a WHERE EXISTS (SELECT 1 FROM e7emp b WHERE b.ssn = a.ssn AND b.id = 1)`,
 			want: []string{"c=12"}},
+		// The same semi joins keyed by each other masked TYPE the rig carries
+		// (#1677 line q). The join's build-key scan filters — the min/max
+		// range, and for an integer key the bloom scan filter — used to be
+		// installed on the probe scan through the mask, comparing the masked
+		// build keys with the STORED column's statistics: every row group was
+		// pruned and the answer was 0. The integer kinds went wrong on every
+		// host (the bloom), the string on one CPU (the range).
+		{name: "in_subquery_masked_int",
+			sql:  `SELECT COUNT(*) AS c FROM e7emp a WHERE a.acct IN (SELECT acct FROM e7emp b WHERE b.id < 3)`,
+			want: []string{"c=12"}},
+		{name: "correlated_exists_masked_int",
+			sql:  `SELECT COUNT(*) AS c FROM e7emp a WHERE EXISTS (SELECT 1 FROM e7emp b WHERE b.acct = a.acct AND b.id = 1)`,
+			want: []string{"c=12"}},
+		{name: "in_subquery_masked_signed_numeric",
+			sql:  `SELECT COUNT(*) AS c FROM e7bal a WHERE a.bal IN (SELECT bal FROM e7bal b WHERE b.id < 3)`,
+			want: []string{"c=8"}},
+		{name: "in_subquery_masked_port",
+			sql:  `SELECT COUNT(*) AS c FROM e7net a WHERE a.c_port IN (SELECT c_port FROM e7net b WHERE b.id < 3)`,
+			want: []string{"c=6"}},
+		{name: "in_subquery_masked_protocol",
+			sql:  `SELECT COUNT(*) AS c FROM e7net a WHERE a.c_proto IN (SELECT c_proto FROM e7net b WHERE b.id < 3)`,
+			want: []string{"c=6"}},
+		// The control: an UNMASKED key of a policed relation answers by its
+		// stored value through the same security projection.
+		{name: "in_subquery_unmasked_key_of_policed_relation",
+			sql:  `SELECT COUNT(*) AS c FROM e7emp a WHERE a.id IN (SELECT id FROM e7emp b WHERE b.id < 3)`,
+			want: []string{"c=2"}},
 		{name: "correlated_scalar_outer_ref",
 			sql:  `SELECT a.id, (SELECT MIN(b.ssn) FROM e7emp b WHERE b.id = a.id) AS m FROM e7emp a WHERE a.id < 3`,
 			want: []string{"id=1|m=" + pmMaskSSN, "id=2|m=" + pmMaskSSN}},

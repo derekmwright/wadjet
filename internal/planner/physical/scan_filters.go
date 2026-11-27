@@ -77,25 +77,33 @@ func frontLoadBlooms(source exec.Source, ops []exec.UnaryOperator) []exec.UnaryO
 	return append(front, rest...)
 }
 
-// attachBloomToScanSource walks the probe-side source chain to find a
-// catalogScanSource and attaches a bloom filter for row-group-level pruning.
-func attachBloomToScanSource(source exec.Source, bsf *exec.BloomScanFilter) {
-	switch s := source.(type) {
-	case *catalogScanSource:
+// attachBloomToScanSource installs a join's bloom scan filter on the probe
+// side's catalog scan for row-group pruning — only where scanFilterTarget
+// PROVES the probe key at the join is that scan's stored column (#1677). ops
+// are the operators between source and the join's probe, in pipeline order.
+func attachBloomToScanSource(source exec.Source, ops []exec.UnaryOperator, bsf *exec.BloomScanFilter) {
+	if s := scanFilterTarget(source, ops, bsf.Column); s != nil {
 		s.SetBloomFilter(bsf)
-	case *pipelineSource:
-		attachBloomToScanSource(s.source, bsf)
 	}
 }
 
-// attachDynamicFilterToScanSource walks the probe-side source chain to find a
-// catalogScanSource and attaches a dynamic min/max range filter for row-group pruning.
-func attachDynamicFilterToScanSource(source exec.Source, ranges []exec.DynamicRange) {
-	switch s := source.(type) {
-	case *catalogScanSource:
-		s.SetDynamicFilter(ranges)
-	case *pipelineSource:
-		attachDynamicFilterToScanSource(s.source, ranges)
+// attachDynamicFilterToScanSource installs a join's build-key min/max ranges
+// on the probe side's catalog scan for row-group pruning, keeping only the
+// ranges whose column scanFilterTarget proves (#1677). ops are as for
+// attachBloomToScanSource.
+func attachDynamicFilterToScanSource(source exec.Source, ops []exec.UnaryOperator, ranges []exec.DynamicRange) {
+	var target *catalogScanSource
+	var kept []exec.DynamicRange
+	for _, r := range ranges {
+		s := scanFilterTarget(source, ops, r.Column)
+		if s == nil || (target != nil && s != target) {
+			continue
+		}
+		target = s
+		kept = append(kept, r)
+	}
+	if target != nil {
+		target.SetDynamicFilter(kept)
 	}
 }
 
