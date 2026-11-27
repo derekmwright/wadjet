@@ -45,17 +45,28 @@ func TestAnInSubquerysMembershipSetIsChargedToTheQueryBudget(t *testing.T) {
 		}
 	})
 
-	// The twin that must keep answering: the same predicate with a bare inner
-	// column decorrelates into a semi join, whose build side is already
-	// budgeted and spillable. If this one starts refusing, the charge has been
-	// applied to a set that no longer exists.
-	t.Run("decorrelating_twin_answers", func(t *testing.T) {
+	// The twin: the same predicate with a bare inner column decorrelates into
+	// a semi join and reaches no membership set at all. Its build is the
+	// key-only one, which is charged as it grows but cannot spill (#1706, line
+	// 1706p): it holds 139,480 bytes on a 2-CPU host and 314,584 on a 24-CPU
+	// one, more than this budget, so here it refuses — naming the key-only
+	// build, never the membership set, which would mean the charge landed on
+	// a set that does not exist. Before 1706p it answered here with those
+	// bytes uncharged. At a budget its build fits, it answers.
+	twin := fmt.Sprintf(`SELECT COUNT(*) AS n FROM %[1]s WHERE id IN (SELECT id FROM %[1]s)`, typematrix.Table)
+	t.Run("decorrelating_twin_refuses_as_the_key_only_build", func(t *testing.T) {
 		db := spillMxOpen(t, budget)
-		got, err := tmRun(ctx, db, fmt.Sprintf(
-			`SELECT COUNT(*) AS n FROM %[1]s WHERE id IN (SELECT id FROM %[1]s)`, typematrix.Table))
+		_, err := tmRun(ctx, db, twin)
+		if err == nil || !strings.Contains(err.Error(), "key-only build") || strings.Contains(err.Error(), "membership set") {
+			t.Fatalf("want the key-only build's honest refusal (and no membership set), got %v", err)
+		}
+	})
+	t.Run("decorrelating_twin_answers", func(t *testing.T) {
+		db := spillMxOpen(t, 1<<20)
+		got, err := tmRun(ctx, db, twin)
 		if err != nil {
-			t.Fatalf("the decorrelating shape must still answer — its semi join is budgeted and "+
-				"spillable and reaches no membership set at all: %v", err)
+			t.Fatalf("the decorrelating shape must answer at a budget its key-only build fits — it "+
+				"reaches no membership set at all: %v", err)
 		}
 		if n := fmt.Sprint(got.Rows[0]["n"]); n != fmt.Sprint(typematrix.Rows) {
 			t.Fatalf("COUNT(*)=%s, want %d", n, typematrix.Rows)

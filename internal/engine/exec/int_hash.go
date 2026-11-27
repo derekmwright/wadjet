@@ -371,8 +371,12 @@ func (h *intHashTable) freeEntries() {
 }
 
 // grow doubles the table capacity and rehashes all entries.
-func (h *intHashTable) grow() {
-	newCap := len(h.entries) * 2
+func (h *intHashTable) grow() { h.growTo(len(h.entries) * 2) }
+
+// growTo rehashes the entries into newCap slots (a power of two at least the
+// current one) in one step. grow is growTo(2x); the join's compact builds call
+// it directly so a reserved replacement is the only one allocated.
+func (h *intHashTable) growTo(newCap int) {
 	oldOffheap := h.entriesOffheap
 	old := h.entries
 	newEntries := h.allocEntries(newCap)

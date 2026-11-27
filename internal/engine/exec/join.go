@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -208,11 +207,18 @@ type HashJoin struct {
 	// pair whose integer storage is not PostgreSQL's comparison: neExactPair).
 	SemiAntiNEProbeCol string
 	SemiAntiNEBuildCol string
-	neActive           bool
-	neValIdx           int
-	neValType          batch.TypeID
-	nePairs            []nePair
-	neProbeValIdx      int
+	// neDeclined is set at Build entry, before any row is consumed, when the
+	// distinct-pair state is estimated not to fit the budget's room and the
+	// grace-partitioned build (which can spill) is available: the join then
+	// takes the generic filtered build, with SemiAntiFilter, as it does for
+	// every residual the distinct-pair state cannot answer
+	// (join_compact_accounting.go, neShouldDecline).
+	neDeclined    bool
+	neActive      bool
+	neValIdx      int
+	neValType     batch.TypeID
+	nePairs       []nePair
+	neProbeValIdx int
 
 	// BuildStoreCols, when non-empty, narrows every stored build batch to the
 	// named columns (join keys + SemiAntiFilter-referenced columns) at arrival
@@ -294,6 +300,17 @@ type HashJoin struct {
 	// rather than resetting the entire shared tracker (which would wipe other
 	// concurrent builds' accounting).
 	trackedMem int64
+
+	// compactCharged is what a compact build (key-only, serial or parallel,
+	// and the distinct-pair NE build) holds reserved on MemTracker, as
+	// ordinary refusable bytes reserved before each allocation. It is kept
+	// apart from trackedMem, which those builds never touch: they skip the
+	// forced index reconciliation (join_compact_accounting.go). Atomic, because
+	// the parallel key-only workers reserve concurrently.
+	compactCharged atomic.Int64
+	// compactKeyBufCharged is the capacity of keyBuf a serial compact build has
+	// charged; guarded by mu like keyBuf.
+	compactKeyBufCharged int
 
 	// AccountedOperator (Phase 2) state — see HashAggregate for the contract.
 	// Registered during Build only (the spill-eligible phase); accState is read
@@ -1119,13 +1136,22 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	}
 	defer source.Close()
 
-	workers := runtime.NumCPU()
+	workers := keyOnlyBuildWorkers()
 
 	// Key-only builds (semi/anti joins without filter) store no batches —
 	// only the key index and bloom filter. Parallel is safe since there is
 	// no merge overhead (each worker inserts directly into the shared table).
 	if workers > 1 && h.SemiAntiKeyOnly {
 		return h.buildParallelKeyOnly(ctx, source, workers)
+	}
+
+	// A distinct-pair NE build cannot spill. When its state is estimated not
+	// to fit and the spilling grace build is available, decline it here,
+	// before the first row is read, so the join takes the generic filtered
+	// build below — the dispatch reads semiAntiNEEligible, which now says no.
+	if h.neShouldDecline() {
+		h.neDeclined = true
+		CompactNEDeclined.Add(1)
 	}
 
 	// Cooperative-spill registration: when the join has both a Spill manager
@@ -1204,6 +1230,27 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	// instead of failing (#1706, line 1706n round 2). flatHeld is a variable,
 	// not a per-arrival defer, so the loop keeps its cost; every normal exit
 	// from the held region clears it before unlocking.
+	//
+	// A compact build (serial key-only, NE) that does not finish drops its
+	// state and releases its reservation on every exit — error, cancel,
+	// refusal, panic — so nothing it reserved outlives the failure, whether or
+	// not the caller ever closes the join (join_compact_accounting.go). It is
+	// deferred before the unlock below, so it runs after it.
+	defer func() {
+		if !h.buildDone && (h.SemiAntiKeyOnly || h.neActive) {
+			h.mu.Lock()
+			h.dropCompactState()
+			h.mu.Unlock()
+		}
+	}()
+	// A serial key-only build reserves what exists before its first key —
+	// the part headers and the key buffer — up front, so an empty build's
+	// charge also describes what it holds.
+	if h.SemiAntiKeyOnly {
+		if err := h.compactReserveStart(); err != nil {
+			return err
+		}
+	}
 	flatHeld := false
 	defer func() {
 		if flatHeld {
@@ -1250,6 +1297,13 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			// Distinct-pair NE activation (join_semianti_ne.go): needs the
 			// int-key path plus an integer value vector on this batch.
 			h.neTryEnable(b)
+			if h.neActive {
+				if err := h.compactReserveStart(); err != nil {
+					flatHeld = false
+					h.mu.Unlock()
+					return err
+				}
+			}
 
 			// Pre-allocate arena and index to avoid repeated slice growth.
 			// This path has one index part, so the whole hint is its share.
@@ -1269,8 +1323,15 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			// Distinct-pair NE build: key index + per-key value pairs, no
 			// batch storage (join_semianti_ne.go).
 			h.updateKeyMinMax(b)
-			h.insertNEBatch(b)
+			if err := h.insertNEBatch(b); err != nil {
+				flatHeld = false
+				h.mu.Unlock()
+				return err
+			}
 			h.buildRows += int64(b.ActiveLen())
+			if phaseHook.Load() != nil {
+				runPhaseHook(PhaseCompactArrival, &CompactBuildPoint{Join: h, Route: "ne"})
+			}
 			flatHeld = false
 			h.mu.Unlock()
 			continue
@@ -1289,15 +1350,34 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			pt := &h.parts[0]
 			var intIdx *intHashTable
 			var strIdx *strHashTable
+			// Every table and every growth is reserved before it is made
+			// (join_compact_accounting.go); a refusal ends the build here,
+			// before the allocation, and the deferred drop releases the rest.
+			var cerr error
 			if h.useIntKey || h.useDualIntKey {
-				intIdx = pt.intTable(batchRows)
-				intIdx.EnsureCapacity(batchRows)
+				if pt.ints == nil {
+					pt.ints, cerr = h.newIntTableCharged(batchRows, "the key table")
+				}
+				if cerr == nil {
+					cerr = h.ensureIntCapacityCharged(pt.ints, batchRows, "the key table's growth")
+				}
+				intIdx = pt.ints
 			} else {
 				// Seed to this batch's row count: a 64-bucket seed would let
 				// the first batch fill the table mid-loop (GetOrInsertNoGrow
 				// spins forever on a full table).
-				strIdx = h.strTable(pt, batchRows)
-				strIdx.EnsureCapacity(batchRows)
+				if pt.strs == nil {
+					pt.strs, cerr = h.newStrTableCharged(batchRows, strArenaFirstChunk/len(h.parts), "the key table")
+				}
+				if cerr == nil {
+					cerr = h.ensureStrCapacityCharged(pt.strs, batchRows, "the key table's growth")
+				}
+				strIdx = pt.strs
+			}
+			if cerr != nil {
+				flatHeld = false
+				h.mu.Unlock()
+				return cerr
 			}
 			if h.useIntKey {
 				col := b.Columns[h.buildKeyIdx[0]]
@@ -1362,19 +1442,38 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 						if !h.buildKeyFromBatch(b, int(si)) {
 							h.nullBuildKeyOnly()
 						}
-						strIdx.GetOrInsertNoGrow(h.keyBuf, 0)
+						if _, _, need := strIdx.getOrInsertNoGrowNoChunk(h.keyBuf, 0); need {
+							if cerr = h.strInsertCharged(strIdx, h.keyBuf); cerr != nil {
+								break
+							}
+						}
 					}
 				} else {
 					for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 						if !h.buildKeyFromBatch(b, rowIdx) {
 							h.nullBuildKeyOnly()
 						}
-						strIdx.GetOrInsertNoGrow(h.keyBuf, 0)
+						if _, _, need := strIdx.getOrInsertNoGrowNoChunk(h.keyBuf, 0); need {
+							if cerr = h.strInsertCharged(strIdx, h.keyBuf); cerr != nil {
+								break
+							}
+						}
 					}
+				}
+				if cerr == nil {
+					cerr = h.chargeKeyBufGrowth(h.keyBuf, &h.compactKeyBufCharged)
+				}
+				if cerr != nil {
+					flatHeld = false
+					h.mu.Unlock()
+					return cerr
 				}
 				strIdx.CheckGrow()
 			}
 			h.buildRows += int64(b.ActiveLen())
+			if phaseHook.Load() != nil {
+				runPhaseHook(PhaseCompactArrival, &CompactBuildPoint{Join: h, Route: "serial key-only"})
+			}
 			flatHeld = false
 			h.mu.Unlock()
 			continue
@@ -1529,13 +1628,29 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	// O(n log n) pair sorting during probe and improve gather cache locality.
 	h.consolidateBuild()
 
-	// Build bloom filter for fast negative lookups during probe.
-	h.buildBloom()
+	if h.SemiAntiKeyOnly || h.neActive {
+		// A compact build reserved its index as it grew; its bloom is reserved
+		// the same way (omitted when refused), and the forced reconciliation
+		// below would charge those bytes a second time.
+		h.buildBloomCharged()
+	} else {
+		// Build bloom filter for fast negative lookups during probe.
+		h.buildBloom()
 
-	// Final reconciliation: bloom + arenaMatched allocations happened outside
-	// the per-batch tracking loop. Charge them to the memory tracker.
-	h.reconcileHashMemory()
+		// Final reconciliation: bloom + arenaMatched allocations happened outside
+		// the per-batch tracking loop. Charge them to the memory tracker.
+		h.reconcileHashMemory()
+	}
 
+	if h.neActive {
+		if phaseHook.Load() != nil {
+			runPhaseHook(PhaseCompactDone, &CompactBuildPoint{Join: h, Route: "ne"})
+		}
+	} else if h.SemiAntiKeyOnly {
+		if phaseHook.Load() != nil {
+			runPhaseHook(PhaseCompactDone, &CompactBuildPoint{Join: h, Route: "serial key-only"})
+		}
+	}
 	h.warmBuildNullBitmaps()
 	h.applyBuildSchemaHint()
 	h.buildDone = true
@@ -1559,7 +1674,22 @@ func (h *HashJoin) applyBuildSchemaHint() {
 // need key existence (no batch storage, no arena). Each worker builds a local
 // hash table, then tables are merged by inserting all keys into the main table.
 // For Q21-style queries this parallelizes two 6M-row lineitem builds.
+//
+// Every table, growth step, arena chunk and key buffer is reserved before it is
+// allocated (join_compact_accounting.go). A refused reservation in any worker
+// stops that worker before the allocation and cancels the others; the build
+// then drops every table and releases its whole reservation. The workers reserve
+// without a lock (the ledger is atomic) and never hold one across source.Next.
 func (h *HashJoin) buildParallelKeyOnly(ctx context.Context, source Source, workers int) error {
+	// Every exit that does not finish the build — an error, a refusal, a
+	// cancel, a recovered worker panic or a panic on this goroutine — drops the
+	// tables and releases the reservation. All workers have stopped by then:
+	// the only exits after they start follow wg.Wait.
+	defer func() {
+		if !h.buildDone {
+			h.dropCompactState()
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("join build cancelled: %w", err)
 	}
@@ -1584,6 +1714,9 @@ func (h *HashJoin) buildParallelKeyOnly(ctx context.Context, source Source, work
 	if h.buildKeyErr != nil {
 		return h.buildKeyErr
 	}
+	if err := h.compactReserveStart(); err != nil {
+		return err
+	}
 
 	// Per-worker local hash tables (key-only, no arena/batch storage).
 	hint := 64
@@ -1595,17 +1728,35 @@ func (h *HashJoin) buildParallelKeyOnly(ctx context.Context, source Source, work
 	}
 	locals := make([]*localKeyBuild, workers)
 	for i := range locals {
-		lb := &localKeyBuild{keyBuf: make([]byte, 0, 128)}
-		if h.useIntKey || h.useDualIntKey {
-			lb.intIndex = newIntHashTable(hint)
-		} else {
-			lb.strIndex = newStrHashTable(hint)
+		if err := h.compactReserve(localKeyBufCap, "a worker's key buffer"); err != nil {
+			return err
 		}
+		lb := &localKeyBuild{keyBuf: make([]byte, 0, localKeyBufCap), keyBufCharged: localKeyBufCap}
 		locals[i] = lb
+		// The hinted size is an optimization: when its reservation is refused
+		// the worker starts at the unhinted size and reserves its growth as
+		// keys actually arrive, so a pessimistic row hint alone cannot refuse
+		// a build whose keys fit.
+		var err error
+		for _, n := range []int{hint, 64} {
+			if h.useIntKey || h.useDualIntKey {
+				lb.intIndex, err = h.newIntTableCharged(n, "a worker's key table")
+			} else {
+				lb.strIndex, err = h.newStrTableCharged(n, strArenaFirstChunk, "a worker's key table")
+			}
+			if err == nil {
+				break
+			}
+		}
+		if err != nil {
+			return err
+		}
 	}
 
 	// Insert first batch into worker 0.
-	h.insertKeyOnlyBatch(locals[0], first)
+	if err := h.insertKeyOnlyBatch(locals[0], first); err != nil {
+		return err
+	}
 	progress := ProgressReporterFromContext(ctx)
 	if progress != nil {
 		progress.AddRows(int64(first.ActiveLen()))
@@ -1676,7 +1827,11 @@ func (h *HashJoin) buildParallelKeyOnly(ctx context.Context, source Source, work
 				if progress != nil {
 					progress.AddRows(int64(b.ActiveLen()))
 				}
-				h.insertKeyOnlyBatch(lb, b)
+				if err := h.insertKeyOnlyBatch(lb, b); err != nil {
+					firstErr.Set(err)
+					cancelBuild()
+					return
+				}
 			}
 		}(locals[i])
 	}
@@ -1684,6 +1839,9 @@ func (h *HashJoin) buildParallelKeyOnly(ctx context.Context, source Source, work
 
 	if err := firstErr.Err(); err != nil {
 		return err
+	}
+	if phaseHook.Load() != nil {
+		runPhaseHook(PhaseKeyOnlyLocals, &CompactBuildPoint{Join: h, Route: "parallel key-only", Locals: locals})
 	}
 
 	// Merge: count total rows, pick largest local table as base, insert rest.
@@ -1719,34 +1877,116 @@ func (h *HashJoin) buildParallelKeyOnly(ctx context.Context, source Source, work
 		return fmt.Errorf("key-only build adopted a local table into %d index parts "+
 			"(partMask=%d); it must have exactly one", len(h.parts), h.partMask)
 	}
+	// The adopted table's reservation stays where it is: it was this join's
+	// before the adoption and is after. Each donor stays charged until its
+	// keys are merged and its table is dropped; growth of the adopted table is
+	// reserved before it happens, a key run at a time, so it grows as the
+	// keys actually arrive rather than by an upper bound.
 	pt := &h.parts[0]
 	if h.useIntKey || h.useDualIntKey {
 		pt.ints = locals[bestIdx].intIndex
+		locals[bestIdx].intIndex = nil
 		for i, lb := range locals {
-			if i == bestIdx {
+			if i == bestIdx || lb.intIndex == nil {
 				continue
 			}
-			lb.intIndex.ForEach(func(key int64, _ int32) {
-				pt.ints.Put(key, 0)
-			})
+			if err := h.mergeIntDonor(pt.ints, lb.intIndex); err != nil {
+				return err
+			}
+			donor := lb.intIndex.MemoryUsage()
+			lb.intIndex = nil
+			h.compactRelease(donor)
 		}
 	} else {
 		pt.strs = locals[bestIdx].strIndex
+		locals[bestIdx].strIndex = nil
 		for i, lb := range locals {
-			if i == bestIdx {
+			if i == bestIdx || lb.strIndex == nil {
 				continue
 			}
-			if lb.strIndex != nil {
-				lb.strIndex.ForEach(func(key []byte) {
-					pt.strs.GetOrInsert(key, 0)
-				})
+			if err := h.mergeStrDonor(pt.strs, lb.strIndex); err != nil {
+				return err
 			}
+			donor := strTableBytes(lb.strIndex)
+			lb.strIndex = nil
+			h.compactRelease(donor)
 		}
 	}
+	// The workers' key buffers are dropped with the workers.
+	for _, lb := range locals {
+		c := lb.keyBufCharged
+		lb.keyBuf, lb.keyBufCharged = nil, 0
+		h.compactRelease(int64(c))
+	}
+	if phaseHook.Load() != nil {
+		runPhaseHook(PhaseKeyOnlyMerged, &CompactBuildPoint{Join: h, Route: "parallel key-only", Locals: locals})
+	}
 
-	h.buildBloom()
+	h.buildBloomCharged()
+	if phaseHook.Load() != nil {
+		runPhaseHook(PhaseCompactDone, &CompactBuildPoint{Join: h, Route: "parallel key-only"})
+	}
 	h.buildDone = true
 	return nil
+}
+
+// localKeyBufCap is a parallel key-only worker's initial key buffer.
+const localKeyBufCap = 128
+
+// mergeKeyRun is how many donor keys the merge inserts per reserved growth.
+const mergeKeyRun = batch.DefaultBatchSize
+
+// mergeIntDonor inserts every key of donor into dst, reserving dst's growth
+// before each run of keys.
+func (h *HashJoin) mergeIntDonor(dst, donor *intHashTable) error {
+	left := donor.Len()
+	room := 0
+	for i := range donor.entries {
+		key := donor.entries[i].key
+		if key == intHashEmpty {
+			continue
+		}
+		if room == 0 {
+			room = min(mergeKeyRun, left)
+			if err := h.ensureIntCapacityCharged(dst, room, "the merged key table's growth"); err != nil {
+				return err
+			}
+		}
+		dst.PutNoGrow(key, 0)
+		room--
+		left--
+	}
+	return nil
+}
+
+// mergeStrDonor is mergeIntDonor for string tables; arena chunks are reserved
+// as keys need them.
+func (h *HashJoin) mergeStrDonor(dst, donor *strHashTable) error {
+	left := donor.Len()
+	room := 0
+	for _, e := range donor.entries {
+		if e.keyLen < 0 {
+			continue
+		}
+		if room == 0 {
+			room = min(mergeKeyRun, left)
+			if err := h.ensureStrCapacityCharged(dst, room, "the merged key table's growth"); err != nil {
+				return err
+			}
+		}
+		if err := h.strInsertCharged(dst, donor.keyAt(e)); err != nil {
+			return err
+		}
+		room--
+		left--
+	}
+	return nil
+}
+
+// strTableBytes is everything a string table reserved through the charged
+// helpers: its entry array, its arena chunks and its chunk-header slice.
+func strTableBytes(t *strHashTable) int64 {
+	return t.MemoryUsage() + int64(cap(t.chunks))*chunkHeaderSize
 }
 
 // localKeyBuild is a per-worker accumulator for parallel key-only hash join build.
@@ -1755,6 +1995,8 @@ type localKeyBuild struct {
 	strIndex *strHashTable
 	rows     int64
 	keyBuf   []byte
+	// keyBufCharged is the capacity of keyBuf this worker has reserved.
+	keyBufCharged int
 	// hasNullKey is this worker's half of HashJoin.buildHasNullKey; the
 	// merge below ORs them, because a NULL anywhere in the build poisons a
 	// null-aware anti join's whole answer (#507).
@@ -1763,12 +2005,18 @@ type localKeyBuild struct {
 
 // insertKeyOnlyBatch inserts keys from a batch into a local key-only hash table.
 // Uses PutNoGrow/GetOrInsertNoGrow for deferred growth — one CheckGrow per batch.
-func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
+// The batch's growth, and every arena chunk a string key needs, is reserved
+// before it is allocated; a refusal returns before the allocation.
+func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) error {
 	batchRows := b.ActiveLen()
 	if h.useIntKey || h.useDualIntKey {
-		lk.intIndex.EnsureCapacity(batchRows)
+		if err := h.ensureIntCapacityCharged(lk.intIndex, batchRows, "a worker's key table growth"); err != nil {
+			return err
+		}
 	} else if lk.strIndex != nil {
-		lk.strIndex.EnsureCapacity(batchRows)
+		if err := h.ensureStrCapacityCharged(lk.strIndex, batchRows, "a worker's key table growth"); err != nil {
+			return err
+		}
 	}
 	if h.useIntKey {
 		col := b.Columns[h.buildKeyIdx[0]]
@@ -1833,7 +2081,11 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
 			// skipped a nil strIndex, and a 64-bucket seed would let the
 			// first batch fill the table mid-loop (GetOrInsertNoGrow spins
 			// forever on a full table).
-			lk.strIndex = newStrHashTable(batchRows)
+			t, err := h.newStrTableCharged(batchRows, strArenaFirstChunk, "a worker's key table")
+			if err != nil {
+				return err
+			}
+			lk.strIndex = t
 		}
 		if b.Sel != nil {
 			for _, si := range b.Sel {
@@ -1856,7 +2108,11 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
 						}
 					}
 				}
-				lk.strIndex.GetOrInsertNoGrow(lk.keyBuf, 0)
+				if _, _, need := lk.strIndex.getOrInsertNoGrowNoChunk(lk.keyBuf, 0); need {
+					if err := h.strInsertCharged(lk.strIndex, lk.keyBuf); err != nil {
+						return err
+					}
+				}
 			}
 		} else {
 			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
@@ -1879,38 +2135,30 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
 						}
 					}
 				}
-				lk.strIndex.GetOrInsertNoGrow(lk.keyBuf, 0)
+				if _, _, need := lk.strIndex.getOrInsertNoGrowNoChunk(lk.keyBuf, 0); need {
+					if err := h.strInsertCharged(lk.strIndex, lk.keyBuf); err != nil {
+						return err
+					}
+				}
 			}
+		}
+		if err := h.chargeKeyBufGrowth(lk.keyBuf, &lk.keyBufCharged); err != nil {
+			return err
 		}
 		lk.strIndex.CheckGrow()
 	}
 	lk.rows += int64(b.ActiveLen())
+	return nil
 }
 
 // buildBloom populates the bloom filter from the build-side hash table keys.
 // Uses a 64-bit-per-slot bloom with 2 hash functions. The filter size is
 // chosen to give ~1% false positive rate for the number of distinct keys.
 func (h *HashJoin) buildBloom() {
-	var nKeys int
-	for i := range h.parts {
-		if t := h.parts[i].ints; t != nil {
-			nKeys += t.Len()
-		}
-		if t := h.parts[i].strs; t != nil {
-			nKeys += t.Len()
-		}
-	}
-	if nKeys == 0 {
-		return
-	}
 	// Size: ~10 bits per key for ~1% FPR, rounded to power-of-2 uint64 slots.
-	nBits := nKeys * 10
-	nSlots := 1
-	for nSlots*64 < nBits {
-		nSlots *= 2
-	}
-	if nSlots < 8 {
-		nSlots = 8
+	nSlots := bloomSlotsFor(h.indexKeyCount())
+	if nSlots == 0 {
+		return
 	}
 	h.bloom = make([]uint64, nSlots)
 	h.bloomMask = uint64(nSlots - 1)
@@ -4893,6 +5141,10 @@ func (h *HashJoin) Close() error {
 	}
 	h.trackedHashOverhead = 0
 	h.forcedStoreBytes = 0
+	// A compact build's reservation is ordinary bytes, never forced ones
+	// (join_compact_accounting.go); its structures were dropped above.
+	h.compactKeyBufCharged = 0
+	h.releaseCompactCharge()
 	return nil
 }
 

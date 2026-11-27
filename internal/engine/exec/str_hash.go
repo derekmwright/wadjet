@@ -154,6 +154,15 @@ func (h *strHashTable) addChunk(need int) {
 			"a single hash table cannot hold more than %d bytes of keys",
 			len(h.chunks), h.arenaCap, strArenaMaxChunks*strArenaMaxChunk))
 	}
+	size := h.nextChunkSize(need)
+	h.chunks = append(h.chunks, make([]byte, 0, size))
+	h.arenaCap += int64(size)
+}
+
+// nextChunkSize is the size addChunk gives the next chunk for a key of need
+// bytes. The join's compact builds read it to reserve a chunk before adding it
+// (join_compact_accounting.go).
+func (h *strHashTable) nextChunkSize(need int) int {
 	first := h.firstChunk
 	if first < 1 {
 		first = strArenaFirstChunk
@@ -167,8 +176,14 @@ func (h *strHashTable) addChunk(need int) {
 	if need > size {
 		size = need
 	}
-	h.chunks = append(h.chunks, make([]byte, 0, size))
-	h.arenaCap += int64(size)
+	return size
+}
+
+// tailFits reports whether the arena's current chunk can take a key of n
+// bytes without a new chunk: storeKey's own fit test.
+func (h *strHashTable) tailFits(n int) bool {
+	ci := len(h.chunks) - 1
+	return ci >= 0 && n <= cap(h.chunks[ci])-len(h.chunks[ci])
 }
 
 // Get looks up a key. Returns the value and whether the key was found.
@@ -379,6 +394,36 @@ func (h *strHashTable) GetOrInsertNoGrow(key []byte, val int32) (int32, bool) {
 	}
 }
 
+// getOrInsertNoGrowNoChunk is GetOrInsertNoGrow that never allocates: when the
+// key is absent and the arena's current chunk cannot hold it, it inserts nothing
+// and reports needChunk. The caller funds and adds the chunk, then retries. The
+// join's compact builds use it to reserve every arena chunk before it exists
+// (join_compact_accounting.go); "NoGrow" alone still allocates chunks.
+func (h *strHashTable) getOrInsertNoGrowNoChunk(key []byte, val int32) (v int32, existed, needChunk bool) {
+	hash := strHash(key)
+	tag := uint32(hash)
+	idx := hash & h.mask
+	for {
+		e := &h.entries[idx]
+		if e.keyLen < 0 {
+			if !h.tailFits(len(key)) {
+				return 0, false, true
+			}
+			ref, _ := h.storeKey(key)
+			e.ref = ref
+			e.keyLen = int32(len(key))
+			e.val = val
+			e.hashTag = tag
+			h.size++
+			return val, false, false
+		}
+		if e.hashTag == tag && e.keyLen == int32(len(key)) && strKeyEqual(h.keyAt(*e), key) {
+			return e.val, true, false
+		}
+		idx = (idx + 1) & h.mask
+	}
+}
+
 // CheckGrow grows the table if load factor exceeds 70%.
 // Must be called after a batch of PutNoGrow/GetOrInsertNoGrow calls.
 //
@@ -414,8 +459,12 @@ func (h *strHashTable) MemoryUsage() int64 {
 // Uses stored hashTag for index computation instead of re-reading keys
 // from the arena and re-computing the hash, avoiding cache misses and
 // hash computation for every entry.
-func (h *strHashTable) grow() {
-	newCap := len(h.entries) * 2
+func (h *strHashTable) grow() { h.growTo(len(h.entries) * 2) }
+
+// growTo rehashes the entries into newCap slots (a power of two at least the
+// current one) in one step. grow is growTo(2x); the join's compact builds call
+// it directly so a reserved replacement is the only one allocated.
+func (h *strHashTable) growTo(newCap int) {
 	newEntries := make([]strEntry, newCap)
 	fillEmptyStrEntries(newEntries)
 	newMask := uint64(newCap - 1)

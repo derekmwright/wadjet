@@ -86,7 +86,7 @@ func SemiAntiNEDeclaredTypes(probeCol, buildCol string, probeHint, buildHint []p
 // pair is not eligible: the optimization never enables where it cannot
 // show the comparison is exact.
 func (h *HashJoin) semiAntiNEEligible() bool {
-	if (h.JoinType != SemiJoin && h.JoinType != AntiJoin) ||
+	if (h.JoinType != SemiJoin && h.JoinType != AntiJoin) || h.neDeclined ||
 		h.SemiAntiNEProbeCol == "" || h.SemiAntiNEBuildCol == "" {
 		return false
 	}
@@ -119,19 +119,38 @@ func (h *HashJoin) neTryEnable(b *batch.RecordBatch) {
 	h.neValType = b.Columns[idx].Type
 	h.neValIdx = idx
 	h.neActive = true
-	if h.BuildRowHint > 0 {
-		h.nePairs = make([]nePair, 0, h.BuildRowHint/4)
+	// The hinted preallocation is an optimization: reserved first, and simply
+	// skipped when refused, since every batch reserves its own growth
+	// (growNEPairsCharged).
+	if n := h.BuildRowHint / 4; n > 0 && h.compactReserve(n*nePairBytes, "the distinct-pair values") == nil {
+		h.nePairs = make([]nePair, 0, n)
 	}
 }
 
 // insertNEBatch folds one build batch into the distinct-pair table.
-// Called under h.mu (serial flat build path).
-func (h *HashJoin) insertNEBatch(b *batch.RecordBatch) {
+// Called under h.mu (serial flat build path). The table, its growth and the
+// pairs' room for this batch are reserved before any of them is allocated
+// (join_compact_accounting.go); a refusal returns before the batch is folded.
+func (h *HashJoin) insertNEBatch(b *batch.RecordBatch) error {
 	keyCol := b.Columns[h.buildKeyIdx[0]]
 	valCol := b.Columns[h.neValIdx]
 	// The NE build takes the flat path, so it has one index part.
-	intIdx := h.parts[0].intTable(b.ActiveLen())
-	intIdx.EnsureCapacity(b.ActiveLen())
+	n := b.ActiveLen()
+	pt := &h.parts[0]
+	if pt.ints == nil {
+		t, err := h.newIntTableCharged(n, "the key table")
+		if err != nil {
+			return err
+		}
+		pt.ints = t
+	}
+	intIdx := pt.ints
+	if err := h.ensureIntCapacityCharged(intIdx, n, "the key table's growth"); err != nil {
+		return err
+	}
+	if err := h.growNEPairsCharged(n); err != nil {
+		return err
+	}
 	insert := func(row int) {
 		key, ok := intKeyFromVector(keyCol, row)
 		if !ok {
@@ -162,6 +181,7 @@ func (h *HashJoin) insertNEBatch(b *batch.RecordBatch) {
 		}
 	}
 	intIdx.CheckGrow()
+	return nil
 }
 
 // probeNESemiAnti is the typed probe loop for the distinct-pair path.

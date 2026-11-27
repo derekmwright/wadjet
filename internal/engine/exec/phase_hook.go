@@ -27,7 +27,33 @@ const (
 	// is the window in which a relief call selected during the build can
 	// still take mu (#1706, line 1706o).
 	PhaseJoinBuildEnd PhaseSite = "HashJoin.buildEnd"
+
+	// The compact builds (a key-only semi/anti build, serial or parallel, and
+	// the distinct-pair NE build) report their synchronized points with a
+	// *CompactBuildPoint, so a test can enumerate what they hold against what
+	// they charged (#1706, line 1706p). None of them is registered for relief.
+	//
+	// PhaseKeyOnlyLocals is in the parallel key-only build after every worker
+	// stopped and before the merge: every local table is live.
+	PhaseKeyOnlyLocals PhaseSite = "HashJoin.keyOnlyLocals"
+	// PhaseKeyOnlyMerged is after the parallel merge and before the bloom.
+	PhaseKeyOnlyMerged PhaseSite = "HashJoin.keyOnlyMerged"
+	// PhaseCompactArrival is after one arrival batch of a serial key-only or
+	// NE build, under the join's mu.
+	PhaseCompactArrival PhaseSite = "HashJoin.compactArrival"
+	// PhaseCompactDone is at the end of a compact build on any route, after
+	// the bloom and any final accounting.
+	PhaseCompactDone PhaseSite = "HashJoin.compactDone"
 )
+
+// CompactBuildPoint is what a compact build hands the phase hook: the join,
+// the route that ran ("parallel key-only", "serial key-only", "ne") and, on
+// the parallel route, the per-worker local tables that are still referenced.
+type CompactBuildPoint struct {
+	Join   *HashJoin
+	Route  string
+	Locals []*localKeyBuild
+}
 
 // phaseHook runs at a PhaseSite with the operator in that phase. nil in
 // production.
