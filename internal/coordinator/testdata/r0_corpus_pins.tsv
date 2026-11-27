@@ -44,17 +44,25 @@
 #   single-process arm, differs from PostgreSQL; a routed DAG cell follows L).
 # note (localD rows): the seam's status (established | late-subplan | vetoed | refused-before-planning) and
 #   dag-routes when the stage DAG would route the statement to L.
+# Re-pinned at #1678 line j (the stage DAG's join-stage filter qualifies what a build arm's definition
+#   brings in: on the join's stream a bare name binds the PROBE, so a WHERE / ON comparing a probe column with a
+#   build-arm derived column compared the probe with itself), each cell wrong -> right on dag, dag-shuffled, dag-morsel4:
+#   own/computed_null (wrong:4943005eb162), own/m1_tautology (wrong:641696a73ef5), and wrong:a8f0538aa13e on own/m1_diffbase,
+#   own/m1_samebase, uniq/h1_iii_der_diffbase, uniq/h1_iii_der_diffbase_lt, uniq/kv_where, uniq/pd_two_arm, dup/S2, dup/S4,
+#   dup/h1_ii_der2, dup/h1_iii_der_diffbase, dup/h1_iii_der_diffbase_lt, dup/h1_v_rename_right, dup/h1_vi_rename_rq,
+#   dup/h1_vii_cte_rq, dup/kv_where. Measured with R0_PINS_WRITE=1; every other cell's artifact row equals its pin except the
+#   two bounded h2_base2_control flap pins, kept.
 own	m1_diffbase	single	right	-	-
 own	m1_diffbase	spilled512k	right	-	-
-own	m1_diffbase	dag	wrong:a8f0538aa13e	emission	-
-own	m1_diffbase	dag-shuffled	wrong:a8f0538aa13e	emission	-
-own	m1_diffbase	dag-morsel4	wrong:a8f0538aa13e	emission	-
+own	m1_diffbase	dag	right	-	-
+own	m1_diffbase	dag-shuffled	right	-	-
+own	m1_diffbase	dag-morsel4	right	-	-
 own	m1_diffbase	localD	right	-	status=established
 own	m1_samebase	single	right	-	-
 own	m1_samebase	spilled512k	right	-	-
-own	m1_samebase	dag	wrong:a8f0538aa13e	emission	-
-own	m1_samebase	dag-shuffled	wrong:a8f0538aa13e	emission	-
-own	m1_samebase	dag-morsel4	wrong:a8f0538aa13e	emission	-
+own	m1_samebase	dag	right	-	-
+own	m1_samebase	dag-shuffled	right	-	-
+own	m1_samebase	dag-morsel4	right	-	-
 own	m1_samebase	localD	right	-	status=established
 own	m1_base_control	single	right	-	-
 own	m1_base_control	spilled512k	right	-	-
@@ -88,9 +96,9 @@ own	m3_coalesce	dag-morsel4	right	-	-
 own	m3_coalesce	localD	right	-	status=established
 own	m1_tautology	single	right	-	-
 own	m1_tautology	spilled512k	right	-	-
-own	m1_tautology	dag	wrong:641696a73ef5	emission	-
-own	m1_tautology	dag-shuffled	wrong:641696a73ef5	emission	-
-own	m1_tautology	dag-morsel4	wrong:641696a73ef5	emission	-
+own	m1_tautology	dag	right	-	-
+own	m1_tautology	dag-shuffled	right	-	-
+own	m1_tautology	dag-morsel4	right	-	-
 own	m1_tautology	localD	right	-	status=established
 own	left_sum	single	right	-	-
 own	left_sum	spilled512k	right	-	-
@@ -316,9 +324,9 @@ own	group_arm_first	dag-morsel4	right	-	-
 own	group_arm_first	localD	right	-	status=established
 own	computed_null	single	right	-	-
 own	computed_null	spilled512k	right	-	-
-own	computed_null	dag	wrong:4943005eb162	emission	-
-own	computed_null	dag-shuffled	wrong:4943005eb162	emission	-
-own	computed_null	dag-morsel4	wrong:4943005eb162	emission	-
+own	computed_null	dag	right	-	-
+own	computed_null	dag-shuffled	right	-	-
+own	computed_null	dag-morsel4	right	-	-
 own	computed_null	localD	right	-	status=established
 own	union_cast_values	single	right	-	-
 own	union_cast_values	spilled512k	right	-	-
@@ -718,15 +726,15 @@ uniq	h1_ii_der2	dag-morsel4	right	-	-
 uniq	h1_ii_der2	localD	right	-	status=established
 uniq	h1_iii_der_diffbase	single	right	-	-
 uniq	h1_iii_der_diffbase	spilled512k	right	-	-
-uniq	h1_iii_der_diffbase	dag	wrong:a8f0538aa13e	emission	-
-uniq	h1_iii_der_diffbase	dag-shuffled	wrong:a8f0538aa13e	emission	-
-uniq	h1_iii_der_diffbase	dag-morsel4	wrong:a8f0538aa13e	emission	-
+uniq	h1_iii_der_diffbase	dag	right	-	-
+uniq	h1_iii_der_diffbase	dag-shuffled	right	-	-
+uniq	h1_iii_der_diffbase	dag-morsel4	right	-	-
 uniq	h1_iii_der_diffbase	localD	right	-	status=established
 uniq	h1_iii_der_diffbase_lt	single	right	-	-
 uniq	h1_iii_der_diffbase_lt	spilled512k	right	-	-
-uniq	h1_iii_der_diffbase_lt	dag	wrong:a8f0538aa13e	emission	-
-uniq	h1_iii_der_diffbase_lt	dag-shuffled	wrong:a8f0538aa13e	emission	-
-uniq	h1_iii_der_diffbase_lt	dag-morsel4	wrong:a8f0538aa13e	emission	-
+uniq	h1_iii_der_diffbase_lt	dag	right	-	-
+uniq	h1_iii_der_diffbase_lt	dag-shuffled	right	-	-
+uniq	h1_iii_der_diffbase_lt	dag-morsel4	right	-	-
 uniq	h1_iii_der_diffbase_lt	localD	right	-	status=established
 uniq	h1_iv_base_alias	single	right	-	-
 uniq	h1_iv_base_alias	spilled512k	right	-	-
@@ -910,9 +918,9 @@ uniq	x_inner_v_collision	dag-morsel4	wrong:167b5c6ca775	emission	-
 uniq	x_inner_v_collision	localD	right	-	status=established
 uniq	kv_where	single	right	-	-
 uniq	kv_where	spilled512k	right	-	-
-uniq	kv_where	dag	wrong:a8f0538aa13e	emission	-
-uniq	kv_where	dag-shuffled	wrong:a8f0538aa13e	emission	-
-uniq	kv_where	dag-morsel4	wrong:a8f0538aa13e	emission	-
+uniq	kv_where	dag	right	-	-
+uniq	kv_where	dag-shuffled	right	-	-
+uniq	kv_where	dag-morsel4	right	-	-
 uniq	kv_where	localD	right	-	status=established
 uniq	kv_proj	single	right	-	-
 uniq	kv_proj	spilled512k	right	-	-
@@ -1048,9 +1056,9 @@ uniq	pd_left_isnull	dag-morsel4	right	-	-
 uniq	pd_left_isnull	localD	right	-	status=established
 uniq	pd_two_arm	single	right	-	-
 uniq	pd_two_arm	spilled512k	right	-	-
-uniq	pd_two_arm	dag	wrong:a8f0538aa13e	emission	-
-uniq	pd_two_arm	dag-shuffled	wrong:a8f0538aa13e	emission	-
-uniq	pd_two_arm	dag-morsel4	wrong:a8f0538aa13e	emission	-
+uniq	pd_two_arm	dag	right	-	-
+uniq	pd_two_arm	dag-shuffled	right	-	-
+uniq	pd_two_arm	dag-morsel4	right	-	-
 uniq	pd_two_arm	localD	right	-	status=established
 uniq	pd_cte_single	single	right	-	-
 uniq	pd_cte_single	spilled512k	right	-	-
@@ -1084,9 +1092,9 @@ dup	S1	dag-morsel4	wrong:a8f0538aa13e	emission	-
 dup	S1	localD	right	-	status=established
 dup	S2	single	right	-	-
 dup	S2	spilled512k	right	-	-
-dup	S2	dag	wrong:a8f0538aa13e	emission	-
-dup	S2	dag-shuffled	wrong:a8f0538aa13e	emission	-
-dup	S2	dag-morsel4	wrong:a8f0538aa13e	emission	-
+dup	S2	dag	right	-	-
+dup	S2	dag-shuffled	right	-	-
+dup	S2	dag-morsel4	right	-	-
 dup	S2	localD	right	-	status=established
 dup	S3	single	right	-	-
 dup	S3	spilled512k	right	-	-
@@ -1096,9 +1104,9 @@ dup	S3	dag-morsel4	wrong:a8f0538aa13e	emission	-
 dup	S3	localD	right	-	status=established
 dup	S4	single	right	-	-
 dup	S4	spilled512k	right	-	-
-dup	S4	dag	wrong:a8f0538aa13e	emission	-
-dup	S4	dag-shuffled	wrong:a8f0538aa13e	emission	-
-dup	S4	dag-morsel4	wrong:a8f0538aa13e	emission	-
+dup	S4	dag	right	-	-
+dup	S4	dag-shuffled	right	-	-
+dup	S4	dag-morsel4	right	-	-
 dup	S4	localD	right	-	status=established
 dup	C2L	single	right	-	-
 dup	C2L	spilled512k	right	-	-
@@ -1126,21 +1134,21 @@ dup	M_sums	dag-morsel4	right	-	-
 dup	M_sums	localD	right	-	status=established
 dup	h1_ii_der2	single	right	-	-
 dup	h1_ii_der2	spilled512k	right	-	-
-dup	h1_ii_der2	dag	wrong:a8f0538aa13e	emission	-
-dup	h1_ii_der2	dag-shuffled	wrong:a8f0538aa13e	emission	-
-dup	h1_ii_der2	dag-morsel4	wrong:a8f0538aa13e	emission	-
+dup	h1_ii_der2	dag	right	-	-
+dup	h1_ii_der2	dag-shuffled	right	-	-
+dup	h1_ii_der2	dag-morsel4	right	-	-
 dup	h1_ii_der2	localD	right	-	status=established
 dup	h1_iii_der_diffbase	single	right	-	-
 dup	h1_iii_der_diffbase	spilled512k	right	-	-
-dup	h1_iii_der_diffbase	dag	wrong:a8f0538aa13e	emission	-
-dup	h1_iii_der_diffbase	dag-shuffled	wrong:a8f0538aa13e	emission	-
-dup	h1_iii_der_diffbase	dag-morsel4	wrong:a8f0538aa13e	emission	-
+dup	h1_iii_der_diffbase	dag	right	-	-
+dup	h1_iii_der_diffbase	dag-shuffled	right	-	-
+dup	h1_iii_der_diffbase	dag-morsel4	right	-	-
 dup	h1_iii_der_diffbase	localD	right	-	status=established
 dup	h1_iii_der_diffbase_lt	single	right	-	-
 dup	h1_iii_der_diffbase_lt	spilled512k	right	-	-
-dup	h1_iii_der_diffbase_lt	dag	wrong:a8f0538aa13e	emission	-
-dup	h1_iii_der_diffbase_lt	dag-shuffled	wrong:a8f0538aa13e	emission	-
-dup	h1_iii_der_diffbase_lt	dag-morsel4	wrong:a8f0538aa13e	emission	-
+dup	h1_iii_der_diffbase_lt	dag	right	-	-
+dup	h1_iii_der_diffbase_lt	dag-shuffled	right	-	-
+dup	h1_iii_der_diffbase_lt	dag-morsel4	right	-	-
 dup	h1_iii_der_diffbase_lt	localD	right	-	status=established
 dup	h1_iv_base_alias	single	right	-	-
 dup	h1_iv_base_alias	spilled512k	right	-	-
@@ -1156,9 +1164,9 @@ dup	h1_iv_base_alias_diff	dag-morsel4	right	-	-
 dup	h1_iv_base_alias_diff	localD	right	-	status=established
 dup	h1_v_rename_right	single	right	-	-
 dup	h1_v_rename_right	spilled512k	right	-	-
-dup	h1_v_rename_right	dag	wrong:a8f0538aa13e	emission	-
-dup	h1_v_rename_right	dag-shuffled	wrong:a8f0538aa13e	emission	-
-dup	h1_v_rename_right	dag-morsel4	wrong:a8f0538aa13e	emission	-
+dup	h1_v_rename_right	dag	right	-	-
+dup	h1_v_rename_right	dag-shuffled	right	-	-
+dup	h1_v_rename_right	dag-morsel4	right	-	-
 dup	h1_v_rename_right	localD	right	-	status=established
 dup	h1_v_rename_left	single	right	-	-
 dup	h1_v_rename_left	spilled512k	right	-	-
@@ -1168,15 +1176,15 @@ dup	h1_v_rename_left	dag-morsel4	right	-	-
 dup	h1_v_rename_left	localD	right	-	status=established
 dup	h1_vi_rename_rq	single	right	-	-
 dup	h1_vi_rename_rq	spilled512k	right	-	-
-dup	h1_vi_rename_rq	dag	wrong:a8f0538aa13e	emission	-
-dup	h1_vi_rename_rq	dag-shuffled	wrong:a8f0538aa13e	emission	-
-dup	h1_vi_rename_rq	dag-morsel4	wrong:a8f0538aa13e	emission	-
+dup	h1_vi_rename_rq	dag	right	-	-
+dup	h1_vi_rename_rq	dag-shuffled	right	-	-
+dup	h1_vi_rename_rq	dag-morsel4	right	-	-
 dup	h1_vi_rename_rq	localD	right	-	status=established
 dup	h1_vii_cte_rq	single	right	-	-
 dup	h1_vii_cte_rq	spilled512k	right	-	-
-dup	h1_vii_cte_rq	dag	wrong:a8f0538aa13e	emission	-
-dup	h1_vii_cte_rq	dag-shuffled	wrong:a8f0538aa13e	emission	-
-dup	h1_vii_cte_rq	dag-morsel4	wrong:a8f0538aa13e	emission	-
+dup	h1_vii_cte_rq	dag	right	-	-
+dup	h1_vii_cte_rq	dag-shuffled	right	-	-
+dup	h1_vii_cte_rq	dag-morsel4	right	-	-
 dup	h1_vii_cte_rq	localD	right	-	status=established
 dup	h1_viii_keyrename_only	single	right	-	-
 dup	h1_viii_keyrename_only	spilled512k	right	-	-
@@ -1324,9 +1332,9 @@ dup	x_inner_v_collision	dag-morsel4	wrong:167b5c6ca775	emission	-
 dup	x_inner_v_collision	localD	right	-	status=established
 dup	kv_where	single	right	-	-
 dup	kv_where	spilled512k	right	-	-
-dup	kv_where	dag	wrong:a8f0538aa13e	emission	-
-dup	kv_where	dag-shuffled	wrong:a8f0538aa13e	emission	-
-dup	kv_where	dag-morsel4	wrong:a8f0538aa13e	emission	-
+dup	kv_where	dag	right	-	-
+dup	kv_where	dag-shuffled	right	-	-
+dup	kv_where	dag-morsel4	right	-	-
 dup	kv_where	localD	right	-	status=established
 dup	kv_proj	single	right	-	-
 dup	kv_proj	spilled512k	right	-	-
