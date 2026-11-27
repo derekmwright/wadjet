@@ -45,7 +45,7 @@ between/ts/""	ERR 22007
 between/ts/"0000-01-01"	ERR 22008
 between/ts/"1970-01-01 00:00:00"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 9]
 between/ts/"2024-01-15 10:30:00"	rows=[2 ; 3 ; 9]
-between/ts/"2024-01-15 10:30:00+05:30"	rows=[2 ; 3 ; 9]
+between/ts/"2024-01-15 10:30:00+05:30"	rows=[2 ; 3 ; 9]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 between/ts/"2024-01-15 10:30:00+16"	ERR 22009
 between/ts/"2024-02-30"	ERR 22008
 between/ts/"epoch"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 9]
@@ -65,7 +65,7 @@ between_hi/ts/""	ERR 22007
 between_hi/ts/"0000-01-01"	ERR 22008
 between_hi/ts/"1970-01-01 00:00:00"	rows=[1 ; 8]
 between_hi/ts/"2024-01-15 10:30:00"	rows=[1 ; 2 ; 4 ; 5 ; 8]
-between_hi/ts/"2024-01-15 10:30:00+05:30"	rows=[1 ; 2 ; 4 ; 5 ; 8]
+between_hi/ts/"2024-01-15 10:30:00+05:30"	rows=[1 ; 2 ; 4 ; 5 ; 8]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 between_hi/ts/"2024-01-15 10:30:00+16"	ERR 22009
 between_hi/ts/"2024-02-30"	ERR 22008
 between_hi/ts/"epoch"	rows=[1 ; 8]
@@ -85,7 +85,7 @@ case/ts/""	ERR 22007
 case/ts/"0000-01-01"	ERR 22008
 case/ts/"1970-01-01 00:00:00"	rows=[1|1 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]
 case/ts/"2024-01-15 10:30:00"	rows=[1|0 ; 2|1 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]
-case/ts/"2024-01-15 10:30:00+05:30"	rows=[1|0 ; 2|1 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]
+case/ts/"2024-01-15 10:30:00+05:30"	rows=[1|0 ; 2|1 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 case/ts/"2024-01-15 10:30:00+16"	ERR 22009
 case/ts/"2024-02-30"	ERR 22008
 case/ts/"epoch"	rows=[1|1 ; 2|0 ; 3|0 ; 4|0 ; 5|0 ; 6|0 ; 7|0 ; 8|0 ; 9|0]
@@ -125,7 +125,7 @@ count/ts/""	ERR 22007
 count/ts/"0000-01-01"	ERR 22008
 count/ts/"1970-01-01 00:00:00"	rows=[1]
 count/ts/"2024-01-15 10:30:00"	rows=[1]
-count/ts/"2024-01-15 10:30:00+05:30"	rows=[1]
+count/ts/"2024-01-15 10:30:00+05:30"	rows=[1]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 count/ts/"2024-01-15 10:30:00+16"	ERR 22009
 count/ts/"2024-02-30"	ERR 22008
 count/ts/"epoch"	rows=[1]
@@ -145,7 +145,7 @@ cte/ts/""	ERR 22007
 cte/ts/"0000-01-01"	ERR 22008
 cte/ts/"1970-01-01 00:00:00"	rows=[1]
 cte/ts/"2024-01-15 10:30:00"	rows=[2]
-cte/ts/"2024-01-15 10:30:00+05:30"	rows=[2]
+cte/ts/"2024-01-15 10:30:00+05:30"	rows=[2]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 cte/ts/"2024-01-15 10:30:00+16"	ERR 22009
 cte/ts/"2024-02-30"	ERR 22008
 cte/ts/"epoch"	rows=[1]
@@ -165,7 +165,7 @@ derived/ts/""	ERR 22007
 derived/ts/"0000-01-01"	ERR 22008
 derived/ts/"1970-01-01 00:00:00"	rows=[1]
 derived/ts/"2024-01-15 10:30:00"	rows=[2]
-derived/ts/"2024-01-15 10:30:00+05:30"	rows=[2]
+derived/ts/"2024-01-15 10:30:00+05:30"	rows=[2]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 derived/ts/"2024-01-15 10:30:00+16"	ERR 22009
 derived/ts/"2024-02-30"	ERR 22008
 derived/ts/"epoch"	rows=[1]
@@ -205,7 +205,7 @@ empty/ts/""	ERR 22007
 empty/ts/"0000-01-01"	ERR 22008
 empty/ts/"1970-01-01 00:00:00"	rows=[]
 empty/ts/"2024-01-15 10:30:00"	rows=[]
-empty/ts/"2024-01-15 10:30:00+05:30"	rows=[]
+empty/ts/"2024-01-15 10:30:00+05:30"	rows=[]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 empty/ts/"2024-01-15 10:30:00+16"	ERR 22009
 empty/ts/"2024-02-30"	ERR 22008
 empty/ts/"epoch"	rows=[]
@@ -270,9 +270,9 @@ eq/ts/"2024-01-15 10:30"	rows=[2]
 eq/ts/"2024-01-15 10:30:00 garbage"	ERR 22007
 eq/ts/"2024-01-15 10:30:00"	rows=[2]
 eq/ts/"2024-01-15 10:30:00+053000"	ERR 22009
-eq/ts/"2024-01-15 10:30:00+05:30"	rows=[2]
+eq/ts/"2024-01-15 10:30:00+05:30"	rows=[2]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 eq/ts/"2024-01-15 10:30:00+16"	ERR 22009
-eq/ts/"2024-01-15 10:30:00-08"	rows=[2]
+eq/ts/"2024-01-15 10:30:00-08"	rows=[2]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 eq/ts/"2024-01-15 10:30:00-24"	ERR 22009
 eq/ts/"2024-01-15 10:30:00.123"	rows=[3]
 eq/ts/"2024-01-15 10:30:00Z"	rows=[2]
@@ -311,7 +311,7 @@ ge/ts/""	ERR 22007
 ge/ts/"0000-01-01"	ERR 22008
 ge/ts/"1970-01-01 00:00:00"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 9]
 ge/ts/"2024-01-15 10:30:00"	rows=[2 ; 3 ; 7 ; 9]
-ge/ts/"2024-01-15 10:30:00+05:30"	rows=[2 ; 3 ; 7 ; 9]
+ge/ts/"2024-01-15 10:30:00+05:30"	rows=[2 ; 3 ; 7 ; 9]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 ge/ts/"2024-01-15 10:30:00+16"	ERR 22009
 ge/ts/"2024-02-30"	ERR 22008
 ge/ts/"epoch"	rows=[1 ; 2 ; 3 ; 4 ; 5 ; 7 ; 9]
@@ -331,7 +331,7 @@ gt/ts/""	ERR 22007
 gt/ts/"0000-01-01"	ERR 22008
 gt/ts/"1970-01-01 00:00:00"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 9]
 gt/ts/"2024-01-15 10:30:00"	rows=[3 ; 7 ; 9]
-gt/ts/"2024-01-15 10:30:00+05:30"	rows=[3 ; 7 ; 9]
+gt/ts/"2024-01-15 10:30:00+05:30"	rows=[3 ; 7 ; 9]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 gt/ts/"2024-01-15 10:30:00+16"	ERR 22009
 gt/ts/"2024-02-30"	ERR 22008
 gt/ts/"epoch"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 9]
@@ -351,7 +351,7 @@ having/ts/""	ERR 22007
 having/ts/"0000-01-01"	ERR 22008
 having/ts/"1970-01-01 00:00:00"	rows=[]
 having/ts/"2024-01-15 10:30:00"	rows=[0|4]
-having/ts/"2024-01-15 10:30:00+05:30"	rows=[0|4]
+having/ts/"2024-01-15 10:30:00+05:30"	rows=[0|4]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 having/ts/"2024-01-15 10:30:00+16"	ERR 22009
 having/ts/"2024-02-30"	ERR 22008
 having/ts/"epoch"	rows=[]
@@ -371,7 +371,7 @@ in/ts/""	ERR 22007
 in/ts/"0000-01-01"	ERR 22008
 in/ts/"1970-01-01 00:00:00"	rows=[1 ; 4]
 in/ts/"2024-01-15 10:30:00"	rows=[2 ; 4]
-in/ts/"2024-01-15 10:30:00+05:30"	rows=[2 ; 4]
+in/ts/"2024-01-15 10:30:00+05:30"	rows=[2 ; 4]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 in/ts/"2024-01-15 10:30:00+16"	ERR 22009
 in/ts/"2024-02-30"	ERR 22008
 in/ts/"epoch"	rows=[1 ; 4]
@@ -391,7 +391,7 @@ in_one/ts/""	ERR 22007
 in_one/ts/"0000-01-01"	ERR 22008
 in_one/ts/"1970-01-01 00:00:00"	rows=[1]
 in_one/ts/"2024-01-15 10:30:00"	rows=[2]
-in_one/ts/"2024-01-15 10:30:00+05:30"	rows=[2]
+in_one/ts/"2024-01-15 10:30:00+05:30"	rows=[2]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 in_one/ts/"2024-01-15 10:30:00+16"	ERR 22009
 in_one/ts/"2024-02-30"	ERR 22008
 in_one/ts/"epoch"	rows=[1]
@@ -411,7 +411,7 @@ join_on/ts/""	ERR 22007
 join_on/ts/"0000-01-01"	ERR 22008
 join_on/ts/"1970-01-01 00:00:00"	rows=[1]
 join_on/ts/"2024-01-15 10:30:00"	rows=[2]
-join_on/ts/"2024-01-15 10:30:00+05:30"	rows=[2]
+join_on/ts/"2024-01-15 10:30:00+05:30"	rows=[2]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 join_on/ts/"2024-01-15 10:30:00+16"	ERR 22009
 join_on/ts/"2024-02-30"	ERR 22008
 join_on/ts/"epoch"	rows=[1]
@@ -431,7 +431,7 @@ le/ts/""	ERR 22007
 le/ts/"0000-01-01"	ERR 22008
 le/ts/"1970-01-01 00:00:00"	rows=[1 ; 8]
 le/ts/"2024-01-15 10:30:00"	rows=[1 ; 2 ; 4 ; 5 ; 8]
-le/ts/"2024-01-15 10:30:00+05:30"	rows=[1 ; 2 ; 4 ; 5 ; 8]
+le/ts/"2024-01-15 10:30:00+05:30"	rows=[1 ; 2 ; 4 ; 5 ; 8]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 le/ts/"2024-01-15 10:30:00+16"	ERR 22009
 le/ts/"2024-02-30"	ERR 22008
 le/ts/"epoch"	rows=[1 ; 8]
@@ -451,7 +451,7 @@ left_join_on/ts/""	ERR 22007
 left_join_on/ts/"0000-01-01"	ERR 22008
 left_join_on/ts/"1970-01-01 00:00:00"	rows=[1|1 ; 2|NULL ; 3|NULL ; 4|NULL ; 5|NULL ; 6|NULL ; 7|NULL ; 8|NULL]
 left_join_on/ts/"2024-01-15 10:30:00"	rows=[1|NULL ; 2|2 ; 3|NULL ; 4|NULL ; 5|NULL ; 6|NULL ; 7|NULL ; 8|NULL]
-left_join_on/ts/"2024-01-15 10:30:00+05:30"	rows=[1|NULL ; 2|2 ; 3|NULL ; 4|NULL ; 5|NULL ; 6|NULL ; 7|NULL ; 8|NULL]
+left_join_on/ts/"2024-01-15 10:30:00+05:30"	rows=[1|NULL ; 2|2 ; 3|NULL ; 4|NULL ; 5|NULL ; 6|NULL ; 7|NULL ; 8|NULL]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 left_join_on/ts/"2024-01-15 10:30:00+16"	ERR 22009
 left_join_on/ts/"2024-02-30"	ERR 22008
 left_join_on/ts/"epoch"	rows=[1|1 ; 2|NULL ; 3|NULL ; 4|NULL ; 5|NULL ; 6|NULL ; 7|NULL ; 8|NULL]
@@ -471,7 +471,7 @@ lit_left/ts/""	ERR 22007
 lit_left/ts/"0000-01-01"	ERR 22008
 lit_left/ts/"1970-01-01 00:00:00"	rows=[1]
 lit_left/ts/"2024-01-15 10:30:00"	rows=[2]
-lit_left/ts/"2024-01-15 10:30:00+05:30"	rows=[2]
+lit_left/ts/"2024-01-15 10:30:00+05:30"	rows=[2]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 lit_left/ts/"2024-01-15 10:30:00+16"	ERR 22009
 lit_left/ts/"2024-02-30"	ERR 22008
 lit_left/ts/"epoch"	rows=[1]
@@ -491,7 +491,7 @@ lt/ts/""	ERR 22007
 lt/ts/"0000-01-01"	ERR 22008
 lt/ts/"1970-01-01 00:00:00"	rows=[8]
 lt/ts/"2024-01-15 10:30:00"	rows=[1 ; 4 ; 5 ; 8]
-lt/ts/"2024-01-15 10:30:00+05:30"	rows=[1 ; 4 ; 5 ; 8]
+lt/ts/"2024-01-15 10:30:00+05:30"	rows=[1 ; 4 ; 5 ; 8]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 lt/ts/"2024-01-15 10:30:00+16"	ERR 22009
 lt/ts/"2024-02-30"	ERR 22008
 lt/ts/"epoch"	rows=[8]
@@ -511,7 +511,7 @@ ne/ts/""	ERR 22007
 ne/ts/"0000-01-01"	ERR 22008
 ne/ts/"1970-01-01 00:00:00"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 ne/ts/"2024-01-15 10:30:00"	rows=[1 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
-ne/ts/"2024-01-15 10:30:00+05:30"	rows=[1 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
+ne/ts/"2024-01-15 10:30:00+05:30"	rows=[1 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 ne/ts/"2024-01-15 10:30:00+16"	ERR 22009
 ne/ts/"2024-02-30"	ERR 22008
 ne/ts/"epoch"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
@@ -531,7 +531,7 @@ no_row_reaches/ts/""	ERR 22007
 no_row_reaches/ts/"0000-01-01"	ERR 22008
 no_row_reaches/ts/"1970-01-01 00:00:00"	rows=[]
 no_row_reaches/ts/"2024-01-15 10:30:00"	rows=[]
-no_row_reaches/ts/"2024-01-15 10:30:00+05:30"	rows=[]
+no_row_reaches/ts/"2024-01-15 10:30:00+05:30"	rows=[]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 no_row_reaches/ts/"2024-01-15 10:30:00+16"	ERR 22009
 no_row_reaches/ts/"2024-02-30"	ERR 22008
 no_row_reaches/ts/"epoch"	rows=[]
@@ -551,7 +551,7 @@ not/ts/""	ERR 22007
 not/ts/"0000-01-01"	ERR 22008
 not/ts/"1970-01-01 00:00:00"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
 not/ts/"2024-01-15 10:30:00"	rows=[1 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
-not/ts/"2024-01-15 10:30:00+05:30"	rows=[1 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
+not/ts/"2024-01-15 10:30:00+05:30"	rows=[1 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 not/ts/"2024-01-15 10:30:00+16"	ERR 22009
 not/ts/"2024-02-30"	ERR 22008
 not/ts/"epoch"	rows=[2 ; 3 ; 4 ; 5 ; 7 ; 8 ; 9]
@@ -571,7 +571,7 @@ not_distinct/ts/""	ERR 22007
 not_distinct/ts/"0000-01-01"	ERR 22008
 not_distinct/ts/"1970-01-01 00:00:00"	rows=[1]
 not_distinct/ts/"2024-01-15 10:30:00"	rows=[2]
-not_distinct/ts/"2024-01-15 10:30:00+05:30"	rows=[2]
+not_distinct/ts/"2024-01-15 10:30:00+05:30"	rows=[2]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 not_distinct/ts/"2024-01-15 10:30:00+16"	ERR 22009
 not_distinct/ts/"2024-02-30"	ERR 22008
 not_distinct/ts/"epoch"	rows=[1]
@@ -591,7 +591,7 @@ not_in/ts/""	ERR 22007
 not_in/ts/"0000-01-01"	ERR 22008
 not_in/ts/"1970-01-01 00:00:00"	rows=[2 ; 3 ; 5 ; 7 ; 8 ; 9]
 not_in/ts/"2024-01-15 10:30:00"	rows=[1 ; 3 ; 5 ; 7 ; 8 ; 9]
-not_in/ts/"2024-01-15 10:30:00+05:30"	rows=[1 ; 3 ; 5 ; 7 ; 8 ; 9]
+not_in/ts/"2024-01-15 10:30:00+05:30"	rows=[1 ; 3 ; 5 ; 7 ; 8 ; 9]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 not_in/ts/"2024-01-15 10:30:00+16"	ERR 22009
 not_in/ts/"2024-02-30"	ERR 22008
 not_in/ts/"epoch"	rows=[2 ; 3 ; 5 ; 7 ; 8 ; 9]
@@ -611,7 +611,7 @@ or/ts/""	ERR 22007
 or/ts/"0000-01-01"	ERR 22008
 or/ts/"1970-01-01 00:00:00"	rows=[1 ; 4]
 or/ts/"2024-01-15 10:30:00"	rows=[2 ; 4]
-or/ts/"2024-01-15 10:30:00+05:30"	rows=[2 ; 4]
+or/ts/"2024-01-15 10:30:00+05:30"	rows=[2 ; 4]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 or/ts/"2024-01-15 10:30:00+16"	ERR 22009
 or/ts/"2024-02-30"	ERR 22008
 or/ts/"epoch"	rows=[1 ; 4]
@@ -671,7 +671,7 @@ param25/ts/""	ERR 42883	ERR 22007	comparison-membership r4 (a text-declared para
 param25/ts/"0000-01-01"	ERR 42883	ERR 22008	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
 param25/ts/"1970-01-01 00:00:00"	ERR 42883	rows=[1]	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
 param25/ts/"2024-01-15 10:30:00"	ERR 42883	rows=[2]	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
-param25/ts/"2024-01-15 10:30:00+05:30"	ERR 42883	rows=[2]	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
+param25/ts/"2024-01-15 10:30:00+05:30"	ERR 42883	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 param25/ts/"2024-01-15 10:30:00+16"	ERR 42883	ERR 22009	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
 param25/ts/"2024-02-30"	ERR 42883	ERR 22008	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
 param25/ts/"epoch"	ERR 42883	rows=[1]	comparison-membership r4 (a text-declared parameter is spliced as the quoted literal)
@@ -811,7 +811,7 @@ scalar_subquery/ts/""	ERR 22007
 scalar_subquery/ts/"0000-01-01"	ERR 22008
 scalar_subquery/ts/"1970-01-01 00:00:00"	rows=[]
 scalar_subquery/ts/"2024-01-15 10:30:00"	rows=[]
-scalar_subquery/ts/"2024-01-15 10:30:00+05:30"	rows=[]
+scalar_subquery/ts/"2024-01-15 10:30:00+05:30"	rows=[]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 scalar_subquery/ts/"2024-01-15 10:30:00+16"	ERR 22009
 scalar_subquery/ts/"2024-02-30"	ERR 22008
 scalar_subquery/ts/"epoch"	rows=[]
@@ -831,7 +831,7 @@ select/ts/""	ERR 22007
 select/ts/"0000-01-01"	ERR 22008
 select/ts/"1970-01-01 00:00:00"	rows=[1|t ; 2|f ; 3|f ; 4|f ; 5|f ; 6|NULL ; 7|f ; 8|f ; 9|f]
 select/ts/"2024-01-15 10:30:00"	rows=[1|f ; 2|t ; 3|f ; 4|f ; 5|f ; 6|NULL ; 7|f ; 8|f ; 9|f]
-select/ts/"2024-01-15 10:30:00+05:30"	rows=[1|f ; 2|t ; 3|f ; 4|f ; 5|f ; 6|NULL ; 7|f ; 8|f ; 9|f]
+select/ts/"2024-01-15 10:30:00+05:30"	rows=[1|f ; 2|t ; 3|f ; 4|f ; 5|f ; 6|NULL ; 7|f ; 8|f ; 9|f]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 select/ts/"2024-01-15 10:30:00+16"	ERR 22009
 select/ts/"2024-02-30"	ERR 22008
 select/ts/"epoch"	rows=[1|t ; 2|f ; 3|f ; 4|f ; 5|f ; 6|NULL ; 7|f ; 8|f ; 9|f]
@@ -1356,7 +1356,7 @@ union_all/ts/""	ERR 22007
 union_all/ts/"0000-01-01"	ERR 22008
 union_all/ts/"1970-01-01 00:00:00"	rows=[1]
 union_all/ts/"2024-01-15 10:30:00"	rows=[2]
-union_all/ts/"2024-01-15 10:30:00+05:30"	rows=[2]
+union_all/ts/"2024-01-15 10:30:00+05:30"	rows=[2]	ERR 0A000	temporal r41 (#1680 line d): a quoted literal with a nonzero offset beside a stored timestamp column, whose declaration is not recorded, is refused 0A000 timestamp-zone-ambiguous
 union_all/ts/"2024-01-15 10:30:00+16"	ERR 22009
 union_all/ts/"2024-02-30"	ERR 22008
 union_all/ts/"epoch"	rows=[1]
