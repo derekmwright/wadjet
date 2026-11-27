@@ -164,6 +164,48 @@ func TestTimestampDifferenceIsAnIntervalValuedProducer(t *testing.T) {
 		{"SELECT id FROM tm WHERE " + df, "42804", "argument of WHERE must be type boolean, not type interval"},
 		// date - date is an integer there too: PostgreSQL's own 42883.
 		{"SELECT id FROM tm WHERE c_date - DATE '2024-01-01' > INTERVAL '30 days'", "42883", "operator does not exist: bigint > interval"},
+		// Round 7: an operand whose TIMESTAMP the declared-type walk cannot
+		// type — an aggregate, a window function, a scalar subquery, and an
+		// expression over one — is a timestamp all the same.
+		{"SELECT max(c_ts) - min(c_ts) AS d FROM tm", "0A000", why + "a query result column"},
+		{"SELECT extract(epoch FROM max(c_ts) - min(c_ts)) AS e FROM tm", "0A000", why + "an argument of extract"},
+		{"SELECT CAST(max(c_ts) - min(c_ts) AS TEXT) AS v FROM tm", "0A000", why + "the operand of a cast to text"},
+		{"SELECT count(*) AS n FROM tm HAVING max(c_ts) - min(c_ts) > 1000", "42883", "operator does not exist: interval > integer"},
+		{"SELECT count(*) AS n FROM tm HAVING max(c_ts) - min(c_ts) > INTERVAL '1 day'", "0A000", why + "an operand of a comparison (>)"},
+		{"SELECT id FROM tm GROUP BY id ORDER BY max(c_ts) - min(c_ts)", "0A000", why + "an ORDER BY key"},
+		{"SELECT min_by(c_ts, id) - max_by(c_ts, id) AS d FROM tm", "0A000", why + "a query result column"},
+		{"SELECT max(c_ts) - '2024-01-01' AS d FROM tm", "0A000", why + "a query result column"},
+		{"SELECT COALESCE(max(c_ts), c_ts) - c_ts AS d FROM tm GROUP BY c_ts", "0A000", why + "a query result column"},
+		{"SELECT date_trunc('day', max(c_ts)) - min(c_ts) AS d FROM tm", "0A000", why + "a query result column"},
+		{"SELECT (max(c_ts) + INTERVAL '1 day') - min(c_ts) AS d FROM tm", "0A000", why + "a query result column"},
+		{"SELECT id, c_ts - lag(c_ts) OVER (ORDER BY id) AS d FROM tm", "0A000", why + "a query result column"},
+		{"SELECT id, lead(c_ts) OVER (ORDER BY id) - c_ts AS d FROM tm", "0A000", why + "a query result column"},
+		{"SELECT id, c_ts - first_value(c_ts) OVER (ORDER BY id) AS d FROM tm", "0A000", why + "a query result column"},
+		{"SELECT id, c_ts - last_value(c_ts) OVER (ORDER BY id) AS d FROM tm", "0A000", why + "a query result column"},
+		{"SELECT id, c_ts - nth_value(c_ts, 2) OVER (ORDER BY id) AS d FROM tm", "0A000", why + "a query result column"},
+		{"SELECT id, c_ts - max(c_ts) OVER () AS d FROM tm", "0A000", why + "a query result column"},
+		{"SELECT id, c_ts - lag(c_ts) OVER (ORDER BY id) > 1000 AS b FROM tm", "42883", "operator does not exist: interval > integer"},
+		{"SELECT id, max(c_ts) - lag(max(c_ts)) OVER (ORDER BY id) AS d FROM tm GROUP BY id", "0A000", why + "a query result column"},
+		{"SELECT id, (SELECT max(c_ts) FROM tm) - c_ts AS d FROM tm", "0A000", why + "a query result column"},
+		{"SELECT id FROM tm WHERE c_ts - (SELECT min(c_ts) FROM tm) > 1000", "42883", "operator does not exist: interval > integer"},
+		{"SELECT (SELECT max(c_ts) FROM tm) - (SELECT min(c_ts) FROM tm) AS d", "0A000", why + "a query result column"},
+		{"SELECT id, c_ts - (SELECT max(c_ts) FROM tm UNION SELECT NULL) AS d FROM tm", "0A000", why + "a query result column"},
+		{"SELECT id, c_ts - (SELECT lag(c_ts) OVER (ORDER BY id) FROM tm LIMIT 1) AS d FROM tm", "0A000", why + "a query result column"},
+		// Their neighbours are unchanged: only the producer reads the new
+		// TIMESTAMP typing (PostgreSQL: 42846 and 42883; both refused here).
+		{"SELECT CAST(max(c_ts) AS INTERVAL) AS v FROM tm", "0A000", "interval values cannot yet be used as a query result column"},
+		{"SELECT INTERVAL '1 day' * max(c_ts) AS v FROM tm", "0A000", "interval values cannot yet be used as a query result column"},
+		// Controls: the same producers with no timestamp subtraction.
+		{"SELECT max(c_ts) > min(c_ts) AS b FROM tm", "", ""},
+		{"SELECT max(c_ts) - INTERVAL '1 day' AS v FROM tm", "", ""},
+		{"SELECT (max(c_ts) - min(c_ts)) IS NULL AS b FROM tm", "", ""},
+		{"SELECT max(c_date) - min(c_date) AS v FROM tm", "", ""},
+		{"SELECT max(id) - min(id) AS v FROM tm", "", ""},
+		{"SELECT id, c_ts > lag(c_ts) OVER (ORDER BY id) AS b FROM tm", "", ""},
+		{"SELECT id, lag(c_ts) OVER (ORDER BY id) + INTERVAL '1 day' AS v FROM tm", "", ""},
+		{"SELECT id, c_date - lag(c_date) OVER (ORDER BY id) AS v FROM tm", "", ""},
+		{"SELECT id, c_ts > (SELECT min(c_ts) FROM tm) AS b FROM tm", "", ""},
+		{"SELECT extract(epoch FROM max(c_ts)) - extract(epoch FROM min(c_ts)) AS s FROM tm", "", ""},
 		// Controls: the workarounds the message names, date - date, IS NULL,
 		// a single timestamp's epoch, a quoted interval beside a timestamp
 		// (not a difference), and a timestamp shift as a key.

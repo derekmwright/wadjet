@@ -138,6 +138,17 @@ func TestTimestampDifferenceOnTheWriteDoors(t *testing.T) {
 		{"MERGE INTO tdw t USING tdw src ON t.id = src.id WHEN MATCHED THEN UPDATE SET s = src.ts2 - src.ts", "0A000", sentence + " a written value"},
 		{"CREATE TABLE tdc1 AS SELECT ts2 - ts AS d FROM tdw", "0A000", sentence + " a query result column"},
 		{"CREATE TABLE tdc2 AS SELECT ts2 - ts AS d FROM tdw WITH NO DATA", "0A000", sentence + " a query result column"},
+		// Round 7: the difference of an aggregate, a window function or a
+		// scalar subquery result (each answered its millisecond number
+		// through round 6: `SELECT max(ts2) - min(ts)` was 9.72e+07).
+		{"INSERT INTO tdw (id, s) SELECT 6, max(ts2) - min(ts) FROM tdw", "0A000", sentence + " a query result column"},
+		{"INSERT INTO tdw (id, s) SELECT 7, CAST(max(ts2) - min(ts) AS TEXT) FROM tdw", "0A000", sentence + " the operand of a cast to text"},
+		{"INSERT INTO tdw (id, s) SELECT id + 10, CAST(ts2 - lag(ts2) OVER (ORDER BY id) AS TEXT) FROM tdw", "0A000", sentence + " the operand of a cast to text"},
+		{"INSERT INTO tdw (id, s) SELECT id + 20, CAST((SELECT max(ts2) FROM tdw) - ts AS TEXT) FROM tdw", "0A000", sentence + " the operand of a cast to text"},
+		{"MERGE INTO tdw t USING tdw src ON t.id = src.id WHEN MATCHED THEN UPDATE SET s = (SELECT max(ts2) FROM tdw) - src.ts", "0A000", sentence + " a written value"},
+		{"CREATE TABLE tdc3 AS SELECT max(ts2) - min(ts) AS d FROM tdw", "0A000", sentence + " a query result column"},
+		{"CREATE TABLE tdc4 AS SELECT id, ts2 - lag(ts2) OVER (ORDER BY id) AS d FROM tdw WITH NO DATA", "0A000", sentence + " a query result column"},
+		{"CREATE TABLE tdc5 AS SELECT id, (SELECT max(ts2) FROM tdw) - ts AS d FROM tdw", "0A000", sentence + " a query result column"},
 		// Controls: the epoch workaround written, a timestamp shifted.
 		{"UPDATE tdw SET n = CAST(extract(epoch FROM ts2) - extract(epoch FROM ts) AS BIGINT)", "", ""},
 		{"UPDATE tdw SET ts = ts + INTERVAL '1 hour'", "", ""},
@@ -163,7 +174,9 @@ func TestTimestampDifferenceOnTheWriteDoors(t *testing.T) {
 	if got, want := strings.Join(rows, "; "), "[1 97200 <nil> 2024-01-01 01:00:00]"; got != want {
 		t.Errorf("rows\n  got  %s\n  want %s", got, want)
 	}
-	if _, err := db.Query(ctx, "SELECT 1 FROM tdc1"); err == nil {
-		t.Errorf("a refused CTAS created its table")
+	for _, tbl := range []string{"tdc1", "tdc2", "tdc3", "tdc4", "tdc5"} {
+		if _, err := db.Query(ctx, "SELECT 1 FROM "+tbl); err == nil {
+			t.Errorf("a refused CTAS created its table %s", tbl)
+		}
 	}
 }

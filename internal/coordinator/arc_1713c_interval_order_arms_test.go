@@ -1059,6 +1059,35 @@ var ivRefused = map[string]bool{
 	"td/tzCast":          true,
 	"td/dateCast":        true,
 	"td/shiftedMinus":    true,
+	// #1713d round 7: the difference of an aggregate, a window function or
+	// a scalar subquery result (ivCellsTD).
+	"td/aggPublish":        true,
+	"td/aggEpoch":          true,
+	"td/aggDatePart":       true,
+	"td/aggDiv":            true,
+	"td/aggCastText":       true,
+	"td/aggHavingInterval": true,
+	"td/aggOrderBy":        true,
+	"td/aggGrouped":        true,
+	"td/aggMinusLit":       true,
+	"td/aggMinusUnknown":   true,
+	"td/aggCoalesce":       true,
+	"td/aggDateTrunc":      true,
+	"td/aggShifted":        true,
+	"td/winLag":            true,
+	"td/winLead":           true,
+	"td/winFirst":          true,
+	"td/winLast":           true,
+	"td/winNth":            true,
+	"td/winMaxOver":        true,
+	"td/winLagInterval":    true,
+	"td/winLagEpoch":       true,
+	"td/winOfAgg":          true,
+	"td/subPublish":        true,
+	"td/subWhereInterval":  true,
+	"td/subBoth":           true,
+	"td/subUnion":          true,
+	"td/subWindow":         true,
 }
 
 // ivTypeGaps is a cell's declared header where its VALUE agrees with
@@ -1070,6 +1099,7 @@ var ivTypeGaps = map[string]string{
 	// unchanged).
 	"tsub/dateDate":      "a:bigint",
 	"td/ctlDateDiffDays": "id:bigint,v:bigint",
+	"td/ctlAggDateDiff":  "v:bigint",
 	// `INTERVAL '1 day' + NULL` is NULL on both sides, published as text
 	// here (the NULL addend is not classified interval-valued, so the
 	// publication rule does not see an interval) and interval there.

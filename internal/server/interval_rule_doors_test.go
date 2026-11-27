@@ -99,12 +99,31 @@ func TestIntervalRuleOnEveryDoor(t *testing.T) {
 			"operator does not exist: interval > integer"},
 		{"SELECT count(*) AS n FROM vld GROUP BY CAST(d AS TIMESTAMP) - TIMESTAMP '1998-01-01 00:00:00'", "0A000",
 			"a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a GROUP BY key"},
+		// Round 7: the difference of an aggregate, a window function or a
+		// scalar subquery result (each answered its millisecond number
+		// through round 6).
+		{"SELECT max(CAST(d AS TIMESTAMP)) - min(CAST(d AS TIMESTAMP)) AS r FROM vld", "0A000",
+			"a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column"},
+		{"SELECT extract(epoch FROM max(CAST(d AS TIMESTAMP)) - min(CAST(d AS TIMESTAMP))) AS r FROM vld", "0A000",
+			"a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as an argument of extract"},
+		{"SELECT count(*) AS n FROM vld HAVING max(CAST(d AS TIMESTAMP)) - min(CAST(d AS TIMESTAMP)) > 1000", "42883",
+			"operator does not exist: interval > integer"},
+		{"SELECT id, CAST(d AS TIMESTAMP) - lag(CAST(d AS TIMESTAMP)) OVER (ORDER BY id) AS r FROM vld", "0A000",
+			"a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column"},
+		{"SELECT id, CAST(CAST(d AS TIMESTAMP) - lag(CAST(d AS TIMESTAMP)) OVER (ORDER BY id) AS TEXT) AS r FROM vld", "0A000",
+			"a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as the operand of a cast to text"},
+		{"SELECT id, (SELECT max(CAST(d AS TIMESTAMP)) FROM vld) - CAST(d AS TIMESTAMP) AS r FROM vld", "0A000",
+			"a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column"},
+		{"SELECT count(*) AS n FROM vld WHERE CAST(d AS TIMESTAMP) - (SELECT min(CAST(d AS TIMESTAMP)) FROM vld) > 1000", "42883",
+			"operator does not exist: interval > integer"},
 		{"SELECT count(*) AS n FROM vld WHERE d - DATE '1998-01-01' > INTERVAL '30 days'", "42883", "operator does not exist"},
 		// Controls.
 		{"SELECT count(*) AS n FROM vld WHERE d + INTERVAL '1 month' > TIMESTAMP '1998-12-15 00:00:00'", "", ""},
 		{"SELECT CAST(INTERVAL '1 day' * 2 AS TEXT) AS r FROM vld WHERE id = 1", "", ""},
 		{"SELECT extract(epoch FROM CAST(d AS TIMESTAMP)) - extract(epoch FROM TIMESTAMP '1998-01-01 00:00:00') AS r FROM vld WHERE id = 1", "", ""},
 		{"SELECT d - DATE '1998-01-01' AS r FROM vld WHERE id = 1", "", ""},
+		{"SELECT max(CAST(d AS TIMESTAMP)) > min(CAST(d AS TIMESTAMP)) AS r FROM vld", "", ""},
+		{"SELECT max(d) - min(d) AS r FROM vld", "", ""},
 	} {
 		var got []string
 		check := func(door, state, text string) {

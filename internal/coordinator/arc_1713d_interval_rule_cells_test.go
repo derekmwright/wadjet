@@ -292,6 +292,53 @@ func ivCellsTD() []ivCell {
 	add("td/shiftedMinus", "SELECT id, (ts + INTERVAL '1 day') - ts AS v FROM iv_t ORDER BY id")
 	add("td/isNull", "SELECT id, ("+df+") IS NULL AS b FROM iv_t ORDER BY id")
 	add("td/isNotNull", "SELECT id FROM iv_t WHERE ("+df+") IS NOT NULL ORDER BY id")
+	// #1713d round 7: a difference whose TIMESTAMP operand is an aggregate, a
+	// window function or a scalar subquery (the declared-type walk could not
+	// type them, so these answered the millisecond number through round 6).
+	ag := "max(ts) - min(ts)"
+	add("td/aggPublish", "SELECT "+ag+" AS v FROM iv_t")
+	add("td/aggEpoch", "SELECT extract(epoch FROM "+ag+") AS e FROM iv_t")
+	add("td/aggDatePart", "SELECT date_part('epoch', "+ag+") AS e FROM iv_t")
+	add("td/aggDiv", "SELECT ("+ag+") / 1000 AS v FROM iv_t")
+	add("td/aggCastText", "SELECT CAST("+ag+" AS TEXT) AS v FROM iv_t")
+	add("td/aggHavingNumber", "SELECT count(*) AS n FROM iv_t HAVING "+ag+" > 1000")
+	add("td/aggHavingInterval", "SELECT count(*) AS n FROM iv_t HAVING "+ag+" > INTERVAL '1 day'")
+	add("td/aggOrderBy", "SELECT id FROM iv_t GROUP BY id ORDER BY "+ag+", id")
+	add("td/aggGrouped", "SELECT id, "+ag+" AS v FROM iv_t GROUP BY id ORDER BY id")
+	add("td/aggMinusLit", "SELECT max(ts) - "+t0+" AS v FROM iv_t")
+	add("td/aggMinusUnknown", "SELECT max(ts) - '2024-01-01' AS v FROM iv_t")
+	add("td/aggCoalesce", "SELECT COALESCE(max(ts), "+t0+") - min(ts) AS v FROM iv_t")
+	add("td/aggDateTrunc", "SELECT date_trunc('day', max(ts)) - min(ts) AS v FROM iv_t")
+	add("td/aggShifted", "SELECT (max(ts) + INTERVAL '1 day') - min(ts) AS v FROM iv_t")
+	add("td/aggIsNull", "SELECT ("+ag+") IS NULL AS b FROM iv_t")
+	lagd := "ts - lag(ts) OVER (ORDER BY id)"
+	add("td/winLag", "SELECT id, "+lagd+" AS v FROM iv_t ORDER BY id")
+	add("td/winLead", "SELECT id, lead(ts) OVER (ORDER BY id) - ts AS v FROM iv_t ORDER BY id")
+	add("td/winFirst", "SELECT id, ts - first_value(ts) OVER (ORDER BY id) AS v FROM iv_t ORDER BY id")
+	add("td/winLast", "SELECT id, ts - last_value(ts) OVER (ORDER BY id) AS v FROM iv_t ORDER BY id")
+	add("td/winNth", "SELECT id, ts - nth_value(ts, 1) OVER (ORDER BY id) AS v FROM iv_t ORDER BY id")
+	add("td/winMaxOver", "SELECT id, ts - max(ts) OVER () AS v FROM iv_t ORDER BY id")
+	add("td/winLagNumber", "SELECT id, "+lagd+" > 1000 AS b FROM iv_t ORDER BY id")
+	add("td/winLagInterval", "SELECT id, "+lagd+" > INTERVAL '1 day' AS b FROM iv_t ORDER BY id")
+	add("td/winLagEpoch", "SELECT id, extract(epoch FROM "+lagd+") AS e FROM iv_t ORDER BY id")
+	add("td/winOfAgg", "SELECT id, max(ts) - lag(max(ts)) OVER (ORDER BY id) AS v FROM iv_t GROUP BY id ORDER BY id")
+	add("td/winLagIsNull", "SELECT id, ("+lagd+") IS NULL AS b FROM iv_t ORDER BY id")
+	add("td/subPublish", "SELECT id, (SELECT max(ts) FROM iv_t) - ts AS v FROM iv_t ORDER BY id")
+	add("td/subWhereNumber", "SELECT id FROM iv_t WHERE ts - (SELECT min(ts) FROM iv_t) > 1000 ORDER BY id")
+	add("td/subWhereInterval", "SELECT id FROM iv_t WHERE ts - (SELECT min(ts) FROM iv_t) > INTERVAL '30 days' ORDER BY id")
+	add("td/subBoth", "SELECT (SELECT max(ts) FROM iv_t) - (SELECT min(ts) FROM iv_t) AS v")
+	add("td/subUnion", "SELECT id, ts - (SELECT max(ts) FROM iv_t UNION SELECT max(ts) FROM iv_t) AS v FROM iv_t ORDER BY id")
+	add("td/subWindow", "SELECT id, (SELECT lead(ts) OVER (ORDER BY id) FROM iv_t ORDER BY id LIMIT 1) - ts AS v FROM iv_t ORDER BY id")
+	// Controls over the same producers: no timestamp subtraction.
+	add("td/ctlAggCompare", "SELECT max(ts) > min(ts) AS b FROM iv_t")
+	// (A shifted timestamp is cast to text, as ctl/tsShiftProject is: the
+	// arms render a published timestamp by its carrier.)
+	add("td/ctlAggShift", "SELECT CAST(max(ts) - INTERVAL '1 day' AS TEXT) AS v FROM iv_t")
+	add("td/ctlAggEpochDiff", "SELECT extract(epoch FROM max(ts)) - extract(epoch FROM min(ts)) > 1000 AS b FROM iv_t")
+	add("td/ctlAggDateDiff", "SELECT max(d) - min(d) AS v FROM iv_t")
+	add("td/ctlWinCompare", "SELECT id, ts > lag(ts) OVER (ORDER BY id) AS b FROM iv_t ORDER BY id")
+	add("td/ctlWinShift", "SELECT id, CAST(lag(ts) OVER (ORDER BY id) + INTERVAL '1 day' AS TEXT) AS v FROM iv_t ORDER BY id")
+	add("td/ctlSubCompare", "SELECT id, ts > (SELECT min(ts) FROM iv_t) AS b FROM iv_t ORDER BY id")
 	// Controls: not a timestamp difference.
 	add("td/ctlEpochDiff", "SELECT id, extract(epoch FROM ts) - extract(epoch FROM "+t0+") > 3000000 AS b FROM iv_t ORDER BY id")
 	add("td/ctlDateDiffDays", "SELECT id, d - DATE '2024-01-01' AS v FROM iv_t ORDER BY id")
@@ -305,4 +352,5 @@ func ivCellsTD() []ivCell {
 // timestamp difference and that may ANSWER (IS [NOT] NULL: the number and the
 // interval are NULL on the same rows). Every other such cell must be a
 // refusal on every arm: TestArc1713dTimestampDifferenceIsNeverANumber.
-var ivTDNumberFree = map[string]bool{"td/isNull": true, "td/isNotNull": true}
+var ivTDNumberFree = map[string]bool{"td/isNull": true, "td/isNotNull": true,
+	"td/aggIsNull": true, "td/winLagIsNull": true}

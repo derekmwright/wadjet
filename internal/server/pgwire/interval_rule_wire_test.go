@@ -166,7 +166,16 @@ func TestTimestampDifferenceOverTheWire(t *testing.T) {
 		{"UPDATE tw SET n = TIMESTAMP '2024-01-02 00:00:00' - TIMESTAMP '2024-01-01 00:00:00'", "42804"},
 		{"UPDATE tw SET s = TIMESTAMP '2024-01-02 00:00:00' - TIMESTAMP '2024-01-01 00:00:00'", "0A000"},
 		{"CREATE TABLE tw2 AS SELECT ts2 - ts AS d FROM tw", "0A000"},
+		// Round 7: an aggregate's, a window function's or a scalar
+		// subquery's timestamp.
+		{"SELECT max(ts2) - min(ts) AS d FROM tw", "0A000"},
+		{"SELECT extract(epoch FROM max(ts2) - min(ts)) AS d FROM tw", "0A000"},
+		{"SELECT count(*) AS n FROM tw HAVING max(ts2) - min(ts) > 1000", "42883"},
+		{"SELECT id, ts2 - lag(ts2) OVER (ORDER BY id) AS d FROM tw", "0A000"},
+		{"SELECT id, (SELECT max(ts2) FROM tw) - ts AS d FROM tw", "0A000"},
+		{"CREATE TABLE tw3 AS SELECT max(ts2) - min(ts) AS d FROM tw", "0A000"},
 		// Controls.
+		{"SELECT max(ts2) > min(ts) AS b FROM tw", ""},
 		{"SELECT extract(epoch FROM ts2) - extract(epoch FROM ts) AS d FROM tw", ""},
 		{"SELECT id FROM tw WHERE ts2 > ts + INTERVAL '1 hour'", ""},
 	} {
