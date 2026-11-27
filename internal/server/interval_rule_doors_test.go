@@ -82,7 +82,10 @@ func TestIntervalRuleOnEveryDoor(t *testing.T) {
 		{"SELECT count(r) AS n FROM (SELECT CAST(sd AS INTERVAL) * 2 AS r FROM vld) t", "0A000", sentence},
 		{"SELECT count(*) * INTERVAL '1 hour' AS r FROM vld", "0A000", sentence},
 		{"SELECT id FROM vld ORDER BY INTERVAL '1 day' * id, id", "0A000", sentence},
-		{"SELECT max(INTERVAL '1 day') AS r FROM vld", "0A000", "max over an interval argument is not supported"},
+		// #1680c: the bare aggregate is the statement's interval result
+		// column (named first); the argument's refusal under a display cast.
+		{"SELECT max(INTERVAL '1 day') AS r FROM vld", "0A000", sentence},
+		{"SELECT CAST(max(INTERVAL '1 day') AS TEXT) AS r FROM vld", "0A000", "max over an interval argument is not supported"},
 		{"SELECT CASE WHEN id = 1 THEN INTERVAL '1 day' ELSE id END AS r FROM vld", "42804", "cannot be matched"},
 		// A timestamp difference is an interval (#1713d rounds 3 and 6):
 		// PostgreSQL answers each 0A000 statement, the difference is
@@ -92,6 +95,8 @@ func TestIntervalRuleOnEveryDoor(t *testing.T) {
 		{"SELECT CAST(d AS TIMESTAMP) - TIMESTAMP '1998-01-01 00:00:00' AS r FROM vld WHERE id = 1", "0A000",
 			"a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column"},
 		{"SELECT sum(CAST(d AS TIMESTAMP) - TIMESTAMP '1998-01-01 00:00:00') AS r FROM vld", "0A000",
+			"a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column"},
+		{"SELECT CAST(sum(CAST(d AS TIMESTAMP) - TIMESTAMP '1998-01-01 00:00:00') AS TEXT) AS r FROM vld", "0A000",
 			"a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as an argument of sum"},
 		{"SELECT extract(epoch FROM CAST(d AS TIMESTAMP) - TIMESTAMP '1998-01-01 00:00:00') AS r FROM vld", "0A000",
 			"a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as an argument of extract"},
