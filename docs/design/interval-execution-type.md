@@ -795,8 +795,10 @@ ADR-0047 stage 2). The positional lists come from
 
 **The contract** [proposed]: (a) the INTERVAL type id is the declaration of
 every slot an interval producer fills (literal, cast, arithmetic, timestamp
-difference, `timestamp - date`, `lag` / `lead` with a timestamp default, CASE
-/ COALESCE / NULLIF / GREATEST / LEAST over an interval, MIN / MAX over one);
+difference (including one whose operand is a `lag` / `lead` typed TIMESTAMP
+by its default: the window function itself produces a timestamp, the
+subtraction produces the interval), `timestamp - date`, CASE / COALESCE /
+NULLIF / GREATEST / LEAST over an interval, MIN / MAX over one);
 (b) `nodeIsInterval` and `producesInterval` answer from the bound slot's
 declaration for a column reference, from the syntax only for an expression
 that is not one; (c) a set operation gets a positional list (its result
