@@ -906,10 +906,12 @@ table, §9):
    independently of any chunk decode, so a stream with no rows is refused the
    same as one with rows. [wadjet-source] The columnar spill format writes
    the type byte per batch, not once per file, so a spill file with no
-   batches carries no type byte at all; B either gives that format a schema
-   header or shows that an empty spill file is never read back as typed
-   output (spill is written and read by one process within one query, so
-   this is defence against corruption, not against another binary). The refusal is SQLSTATE **XX001** (`data_corrupted`, the code
+   batches carries no type byte at all; B therefore gives the columnar spill
+   format a schema header (each column's type byte, written once per file)
+   that the reader validates before any batch, empty files included. Spill
+   is written and read by one process within one query, so for spill this is
+   defence against corruption and against a mistyped reader, not against
+   another binary; the obligation is the same either way. The refusal is SQLSTATE **XX001** (`data_corrupted`, the code
    PostgreSQL raises when a file it reads is not in the format it expects),
    sentence `<shuffle|spill> stream <path> column <i> has type id <n>, which
    this binary does not know` [proposed, for the stage-B brief]. Not 0A000,
