@@ -15,6 +15,7 @@ import (
 
 	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/optswitch"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
 	"github.com/derekmwright/wadjet/internal/worker"
 	"github.com/derekmwright/wadjet/wadjet"
@@ -190,6 +191,22 @@ func ekCells() []ekCell {
 		add(pre+"comma3", "SELECT "+q+".id AS l, "+d+".id AS r, z.id AS z FROM "+k.o+", ("+b+") "+d+", ej_v z WHERE "+q+".id = z.id AND "+d+".id = z.id AND "+q+".n > 1 ORDER BY 1, 2, 3")
 	}
 
+	// Axis 4b: the comma-join reorder and its edge membership read the same
+	// side attribution as the pushdown, over a CTE referenced once and twice
+	// and a LATERAL arm (round 2: each reader of the attribution, each block
+	// kind).
+	for _, k := range ekKinds {
+		if k.name != "aa" && k.name != "tt" && k.name != "none" {
+			continue
+		}
+		q, d, b := k.q, k.d, body(k)
+		pre := "reorder/" + k.name + "/"
+		add(pre+"cteOnceComma3", "WITH "+d+" AS ("+b+") SELECT "+q+".id AS l, "+d+".id AS r, z.id AS z FROM "+k.o+", "+d+", ej_v z WHERE "+q+".id = z.id AND "+d+".id = z.id AND "+q+".n > 1 ORDER BY 1, 2, 3")
+		add(pre+"cteTwiceComma", "WITH "+d+" AS ("+b+") SELECT "+q+".id AS l, "+d+".id AS r, d2.id AS r2 FROM "+k.o+", "+d+", "+d+" d2 WHERE upper("+q+".s) = "+d+".k AND d2.id = "+d+".id AND "+q+".n > 1 ORDER BY 1, 2, 3")
+		add(pre+"lateralComma", "SELECT "+q+".id AS l, "+d+".id AS r FROM "+k.o+", LATERAL ("+b+") "+d+" WHERE upper("+q+".s) = "+d+".k AND "+q+".n > 1 ORDER BY 1, 2")
+		add(pre+"lateralComma3", "SELECT "+q+".id AS l, "+d+".id AS r, z.id AS z FROM "+k.o+", LATERAL ("+b+") "+d+", ej_v z WHERE "+q+".id = z.id AND "+d+".id = z.id AND "+q+".n > 1 ORDER BY 1, 2, 3")
+	}
+
 	// Axis 5: statement 3 and its neighbours.
 	s3 := "SELECT a.id AS l, b.bid AS r FROM ej_t a JOIN (SELECT id AS bid, lower(s) AS bs FROM ej_u) b ON upper(a.s) = upper(b.bs)"
 	add("s3/asFiled", s3+" AND n > 1 ORDER BY 1, 2")
@@ -331,6 +348,14 @@ func TestArc1678kMeasure(t *testing.T) {
 //   - async-nostage: the asynchronous door has no distributed lowering for
 //     the shape (a correlated or scalar subquery, a grouped body): identical
 //     at base.
+//   - cte-ref-alias: a CTE referenced twice in a comma list, once as `b` and
+//     once as `b d2`: the aliased reference still publishes the CTE's own
+//     name `b` (logical.cteScopeNames returns CTEName and CTERefAlias), so
+//     `d2.id = b.id` is attributed to d2's side alone, pushed onto it and
+//     true on every row — a cross product with d2 on EVERY arm. Wrong at
+//     base on every arm with no collision at all (reorder/none, the same
+//     answer at base and tip); the aa / tt cells, wrong at base for this
+//     line's reason as well, now answer what the no-collision cell answers.
 //
 // A pin FAILS the moment the arm starts agreeing or answers anything else.
 const ekPinsPath = "testdata/arc_1678k_derived_scope_pins.tsv"
@@ -351,7 +376,7 @@ func ekPins(t *testing.T) map[string]string {
 			t.Fatalf("malformed pin line %q", line)
 		}
 		switch f[3] {
-		case "dag-respell", "dag-nocollision", "dag-0A000", "async-nostage":
+		case "dag-respell", "dag-nocollision", "dag-0A000", "async-nostage", "cte-ref-alias":
 		default:
 			t.Fatalf("pin %s@%s: unknown reason %q", f[0], f[1], f[3])
 		}
@@ -418,6 +443,106 @@ func TestArc1678kDerivedScopeEveryArm(t *testing.T) {
 	t.Logf("%d (cell, arm) answers agree with PostgreSQL 17.11, %d pinned", agree, pinned)
 	if pinned != len(pins) {
 		t.Fatalf("%d pins read of %d in %s: a pin names no (cell, arm)", pinned, len(pins), ekPinsPath)
+	}
+}
+
+// ekKillSwitchRefusals are the (toggle, cell@arm) answers that a kill switch
+// turns into a LOUD refusal rather than another value, measured identical at
+// base 6ef333fb: with the correlated-subquery decorrelation off, an EXISTS
+// over a derived table correlated by a.n has no stage-DAG lowering and the
+// asynchronous door (which has no single-process route) refuses it.
+var ekKillSwitchRefusals = map[string]bool{
+	"decorrelated-inner-plan box/corr/derivedInExists@async":                  true,
+	"decorrelated-inner-plan box/corr/derivedInExists@async-probesplit":       true,
+	"decorrelated-inner-plan box/corr/derivedShadowInExists@async":            true,
+	"decorrelated-inner-plan box/corr/derivedShadowInExists@async-probesplit": true,
+}
+
+// TestArc1678kKillSwitchInvariance runs every cell on every arm with all
+// toggles on, then once per registered internal/optswitch toggle with that
+// toggle off, and requires every (cell, arm) answer to be unchanged: no
+// optimization the kill switches govern may move a derived-scope answer
+// (ekKillSwitchRefusals lists the loud refusals, identical at base).
+// It is env-gated (EK_KILLSWITCH=1): one pass per toggle over the whole
+// table is a long run, not a per-commit gate. Measured with this
+// line's fix and at base 6ef333fb, it does NOT pass: scan-col-sanitize off
+// moves 364 answers on the four DAG arms and 12 on the asynchronous door
+// (and moved them at base too: that switch is not answer-neutral on the
+// stage DAG), and scalar-defer off turns box/{aa,tt}/scalar into a refusal
+// on the asynchronous door, identical at base. It stays strict so the day
+// those hold is visible.
+func TestArc1678kKillSwitchInvariance(t *testing.T) {
+	if os.Getenv("EK_KILLSWITCH") != "1" {
+		t.Skip("set EK_KILLSWITCH=1: one pass over the derived-scope table per kill switch")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Minute)
+	t.Cleanup(cancel)
+	writer, arms := ekArmsFixture(t, ctx)
+	var queries []ekCell
+	for _, c := range ekCells() {
+		if c.ddl {
+			if got := writer(c.sql); got != "ok" {
+				t.Fatalf("%s: %s: %s", c.name, c.sql, got)
+			}
+			continue
+		}
+		queries = append(queries, c)
+	}
+	pass := func() (map[string]string, map[string]string) {
+		out, errs := map[string]string{}, map[string]string{}
+		for _, c := range queries {
+			for _, arm := range arms {
+				raw, errText := arm.exec(c.sql)
+				out[c.name+"@"+arm.name] = ekRows(raw)
+				errs[c.name+"@"+arm.name] = errText
+			}
+		}
+		return out, errs
+	}
+	on, _ := pass()
+	// EK_KILLSWITCH_ONLY=<name,name…> sweeps those toggles; EK_DUMP=<path>
+	// writes every toggle-off answer (toggle, cell@arm, answer, error) for a
+	// base-against-tip comparison.
+	only := map[string]bool{}
+	for _, n := range strings.Split(os.Getenv("EK_KILLSWITCH_ONLY"), ",") {
+		if n != "" {
+			only[n] = true
+		}
+	}
+	var toggles []*optswitch.Toggle
+	for _, tog := range optswitch.All() {
+		if len(only) == 0 || only[tog.Name] {
+			toggles = append(toggles, tog)
+		}
+	}
+	var dump strings.Builder
+	defer func() {
+		if p := os.Getenv("EK_DUMP"); p != "" {
+			if err := os.WriteFile(p, []byte(dump.String()), 0o644); err != nil {
+				t.Error(err)
+			}
+		}
+	}()
+	t.Logf("%d toggles x %d (cell, arm) answers", len(toggles), len(on))
+	for _, tog := range toggles {
+		prev := tog.Set(false)
+		off, offErrs := pass()
+		tog.Set(prev)
+		for k, got := range off {
+			dump.WriteString(tog.Name + "\t" + k + "\t" + got + "\t" + strings.ReplaceAll(offErrs[k], "\n", " ") + "\n")
+		}
+		moved := 0
+		for k, want := range on {
+			if got := off[k]; got != want {
+				if ekKillSwitchRefusals[tog.Name+" "+k] && strings.Contains(offErrs[k], "requires per-row execution") {
+					t.Logf("%s off: %s refused, identical at base 6ef333fb: %s", tog.Name, k, offErrs[k])
+					continue
+				}
+				moved++
+				t.Errorf("%s off: %s moved\n  on  %s\n  off %s %s", tog.Name, k, want, got, offErrs[k])
+			}
+		}
+		t.Logf("%s (%s) off: %d of %d answers moved", tog.Name, tog.Env, moved, len(on))
 	}
 }
 
