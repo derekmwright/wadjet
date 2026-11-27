@@ -981,27 +981,19 @@ func TestRowFieldPathSurvivesAJoinFourArms(t *testing.T) {
 		},
 		{
 			// A field path on BOTH sides of an INNER key. Right on the
-			// single-process and broadcast arms — PostgreSQL's eight rows —
-			// and PINNED on the shuffled one, where the repartition's own
-			// projection asks for `z.b` as a column name. It is LOUD there,
-			// which is the difference from base: at base all three arms
-			// answered a cross product, silently.
-			//
-			// The mechanism is the shuffle's projection, not this arc's
-			// resolver: `z` is the derived arm's renamed CONTAINER and the
-			// exchange stage carries columns by name, so the materialized
-			// field never reaches it. Closing it is the same
-			// carry-the-container question `rowContainersOf` answers for the
-			// join, asked of an exchange-repartition stage.
+			// single-process and broadcast arms — PostgreSQL's eight rows.
+			// The shuffled arm was pinned LOUD here (the repartition's own
+			// projection asked for `z.b` as a column name) until #1678 line
+			// j: the key stays a filter above the join, the filter is
+			// re-spelled through the build arm's `c_row AS z`, and the build
+			// arm's reference is now qualified by its alias (`c_row.b =
+			// y.b`), which the join stage's stream carries.
 			name: "both-sides-field-path-key",
 			sql: "SELECT x.id AS xid, z.b AS zb FROM " + nested + " x JOIN (SELECT id, " +
 				"c_row AS z FROM " + nested + " WHERE id < 12) y ON c_row.b = z.b " +
 				"WHERE x.id < 12 ORDER BY x.id",
 			cols: []string{"xid", "zb"},
 			want: "8 rows: 0|0;1|11;4|44;5|55;6|66;7|77;8|88;11|121;",
-			armErr: map[string]string{
-				"dag-shuffled": `column "z.b" does not exist in the input schema`,
-			},
 		},
 		{
 			// The WORKED EXAMPLE from docs/data-types.md — the escape hatch

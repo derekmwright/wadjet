@@ -139,16 +139,14 @@ func jrRenamedCells() map[string]jrRenCell {
 		"ren/inner/fn": {sql: sel("INNER", "LOWER(y.ss2) = x.ss"),
 			want: "rows=2 | 1,101 | 1,102",
 			pin: map[string]string{
-				"dag":          jrInnerSortKeyErr,
-				"dag-morsel4":  jrInnerSortKeyErr,
-				"dag-shuffled": "rows=5 | 1,101 | 1,102 | 2,101 | 2,102 | 3,103",
+				"dag":         jrInnerSortKeyErr,
+				"dag-morsel4": jrInnerSortKeyErr,
 			}, why: jrLiftedFilterWhy},
 		"ren/inner/between": {sql: sel("INNER", "x.nn BETWEEN y.nn2 - 5 AND y.nn2 + 5"),
 			want: "rows=5 | 1,101 | 1,102 | 2,102 | 3,103 | 6,104",
 			pin: map[string]string{
-				"dag":          jrInnerSortKeyErr,
-				"dag-morsel4":  jrInnerSortKeyErr,
-				"dag-shuffled": "rows=6 | 1,101 | 1,102 | 2,101 | 2,102 | 3,103 | 6,104",
+				"dag":         jrInnerSortKeyErr,
+				"dag-morsel4": jrInnerSortKeyErr,
 			}, why: jrLiftedFilterWhy},
 		// ---- the same join spelled with two CTEs instead of two derived
 		// tables: a different route to the same stage boundary.
@@ -237,4 +235,5 @@ const jrInnerSortKeyErr = `ERR ~sort: key column "a" does not exist in the input
 const jrLiftedFilterWhy = "an INNER join LIFTS its ON non-equality into a filter ABOVE the " +
 	"join, so it never reaches the residual path; that filter loses its identity at the stage " +
 	"boundary the same way, and dagplan's carrier check does not model a join stage's output. " +
-	"ren/inner/fn is WRONG at 563aa517 on dag-shuffled too"
+	"ren/inner/fn was WRONG at 563aa517 on dag-shuffled too, until #1678 line j qualified the " +
+	"build arm's definitions in that lifted filter (dag-shuffled answers PostgreSQL's rows since)"
