@@ -106,6 +106,57 @@ var tzCells = []tzCell{
 	{"ar/diff", "SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' - TIMESTAMPTZ '2024-07-01 10:00:00+00' AS v"},
 	{"ar/plusInt", "SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' + 1 AS v"},
 	{"ar/plusInterval", "SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' + INTERVAL '1 day' AS v"},
+	// A timestamptz CARRIED in a column — a derived table, a CTE, a UNION ALL
+	// arm, a scalar subquery, a join's output, a cast of text — beside a quoted
+	// literal with and without an offset, a TIMESTAMPTZ literal and a
+	// TIMESTAMP one; the plain-timestamp control (lin/plain/*); the
+	// common-type consumers (round 2, the reviewer's cells).
+	{"lin/derived/ofs", "SELECT count(*) AS n FROM (SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS x FROM " + tzRows + " WHERE id = 1) s WHERE x = '2024-07-01 12:00:00+05:30'"},
+	{"lin/derived/ofsGe", "SELECT count(*) AS n FROM (SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS x FROM " + tzRows + " WHERE id = 1) s WHERE x >= '2024-07-01 12:00:00+05:30'"},
+	{"lin/derived/noOfs", "SELECT count(*) AS n FROM (SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS x FROM " + tzRows + " WHERE id = 1) s WHERE x = '2024-07-01 06:30:00'"},
+	{"lin/derived/tzLit", "SELECT count(*) AS n FROM (SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS x FROM " + tzRows + " WHERE id = 1) s WHERE x = TIMESTAMPTZ '2024-07-01 12:00:00+05:30'"},
+	{"lin/derived/tsLit", "SELECT count(*) AS n FROM (SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS x FROM " + tzRows + " WHERE id = 1) s WHERE x = TIMESTAMP '2024-07-01 06:30:00'"},
+	{"lin/cte/ofs", "WITH c AS (SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS x FROM " + tzRows + " WHERE id = 1) SELECT count(*) AS n FROM c WHERE x = '2024-07-01 12:00:00+05:30'"},
+	{"lin/cte/ofsGe", "WITH c AS (SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS x FROM " + tzRows + " WHERE id = 1) SELECT count(*) AS n FROM c WHERE x >= '2024-07-01 12:00:00+05:30'"},
+	{"lin/cte/noOfs", "WITH c AS (SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS x FROM " + tzRows + " WHERE id = 1) SELECT count(*) AS n FROM c WHERE x = '2024-07-01 06:30:00'"},
+	{"lin/cte/tzLit", "WITH c AS (SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS x FROM " + tzRows + " WHERE id = 1) SELECT count(*) AS n FROM c WHERE x = TIMESTAMPTZ '2024-07-01 12:00:00+05:30'"},
+	{"lin/cte/tsLit", "WITH c AS (SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS x FROM " + tzRows + " WHERE id = 1) SELECT count(*) AS n FROM c WHERE x = TIMESTAMP '2024-07-01 06:30:00'"},
+	{"lin/union/ofs", "SELECT count(*) AS n FROM (SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS x FROM " + tzRows + " WHERE id = 1 UNION ALL SELECT TIMESTAMPTZ '2024-07-01 00:00:00+00' FROM " + tzRows + " WHERE id = 2) s WHERE x = '2024-07-01 12:00:00+05:30'"},
+	{"lin/union/ofsGe", "SELECT count(*) AS n FROM (SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS x FROM " + tzRows + " WHERE id = 1 UNION ALL SELECT TIMESTAMPTZ '2024-07-01 00:00:00+00' FROM " + tzRows + " WHERE id = 2) s WHERE x >= '2024-07-01 12:00:00+05:30'"},
+	{"lin/union/noOfs", "SELECT count(*) AS n FROM (SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS x FROM " + tzRows + " WHERE id = 1 UNION ALL SELECT TIMESTAMPTZ '2024-07-01 00:00:00+00' FROM " + tzRows + " WHERE id = 2) s WHERE x = '2024-07-01 06:30:00'"},
+	{"lin/union/tzLit", "SELECT count(*) AS n FROM (SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS x FROM " + tzRows + " WHERE id = 1 UNION ALL SELECT TIMESTAMPTZ '2024-07-01 00:00:00+00' FROM " + tzRows + " WHERE id = 2) s WHERE x = TIMESTAMPTZ '2024-07-01 12:00:00+05:30'"},
+	{"lin/union/tsLit", "SELECT count(*) AS n FROM (SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS x FROM " + tzRows + " WHERE id = 1 UNION ALL SELECT TIMESTAMPTZ '2024-07-01 00:00:00+00' FROM " + tzRows + " WHERE id = 2) s WHERE x = TIMESTAMP '2024-07-01 06:30:00'"},
+	{"lin/scalar/ofs", "SELECT count(*) AS n FROM " + tzRows + " WHERE id = 1 AND (SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30') = '2024-07-01 12:00:00+05:30'"},
+	{"lin/scalar/ofsGe", "SELECT count(*) AS n FROM " + tzRows + " WHERE id = 1 AND (SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30') >= '2024-07-01 12:00:00+05:30'"},
+	{"lin/scalar/noOfs", "SELECT count(*) AS n FROM " + tzRows + " WHERE id = 1 AND (SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30') = '2024-07-01 06:30:00'"},
+	{"lin/scalar/tzLit", "SELECT count(*) AS n FROM " + tzRows + " WHERE id = 1 AND (SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30') = TIMESTAMPTZ '2024-07-01 12:00:00+05:30'"},
+	{"lin/scalar/tsLit", "SELECT count(*) AS n FROM " + tzRows + " WHERE id = 1 AND (SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30') = TIMESTAMP '2024-07-01 06:30:00'"},
+	{"lin/join/ofs", "SELECT count(*) AS n FROM (SELECT id, TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS x FROM " + tzRows + ") a JOIN (SELECT id FROM " + tzRows + ") b ON a.id = b.id WHERE a.id = 1 AND a.x = '2024-07-01 12:00:00+05:30'"},
+	{"lin/join/ofsGe", "SELECT count(*) AS n FROM (SELECT id, TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS x FROM " + tzRows + ") a JOIN (SELECT id FROM " + tzRows + ") b ON a.id = b.id WHERE a.id = 1 AND a.x >= '2024-07-01 12:00:00+05:30'"},
+	{"lin/join/noOfs", "SELECT count(*) AS n FROM (SELECT id, TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS x FROM " + tzRows + ") a JOIN (SELECT id FROM " + tzRows + ") b ON a.id = b.id WHERE a.id = 1 AND a.x = '2024-07-01 06:30:00'"},
+	{"lin/join/tzLit", "SELECT count(*) AS n FROM (SELECT id, TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS x FROM " + tzRows + ") a JOIN (SELECT id FROM " + tzRows + ") b ON a.id = b.id WHERE a.id = 1 AND a.x = TIMESTAMPTZ '2024-07-01 12:00:00+05:30'"},
+	{"lin/join/tsLit", "SELECT count(*) AS n FROM (SELECT id, TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS x FROM " + tzRows + ") a JOIN (SELECT id FROM " + tzRows + ") b ON a.id = b.id WHERE a.id = 1 AND a.x = TIMESTAMP '2024-07-01 06:30:00'"},
+	{"lin/cast/ofs", "SELECT count(*) AS n FROM (SELECT CAST('2024-07-01 12:00:00+05:30' AS TIMESTAMPTZ) AS x FROM " + tzRows + " WHERE id = 1) s WHERE x = '2024-07-01 12:00:00+05:30'"},
+	{"lin/cast/ofsGe", "SELECT count(*) AS n FROM (SELECT CAST('2024-07-01 12:00:00+05:30' AS TIMESTAMPTZ) AS x FROM " + tzRows + " WHERE id = 1) s WHERE x >= '2024-07-01 12:00:00+05:30'"},
+	{"lin/cast/noOfs", "SELECT count(*) AS n FROM (SELECT CAST('2024-07-01 12:00:00+05:30' AS TIMESTAMPTZ) AS x FROM " + tzRows + " WHERE id = 1) s WHERE x = '2024-07-01 06:30:00'"},
+	{"lin/cast/tzLit", "SELECT count(*) AS n FROM (SELECT CAST('2024-07-01 12:00:00+05:30' AS TIMESTAMPTZ) AS x FROM " + tzRows + " WHERE id = 1) s WHERE x = TIMESTAMPTZ '2024-07-01 12:00:00+05:30'"},
+	{"lin/cast/tsLit", "SELECT count(*) AS n FROM (SELECT CAST('2024-07-01 12:00:00+05:30' AS TIMESTAMPTZ) AS x FROM " + tzRows + " WHERE id = 1) s WHERE x = TIMESTAMP '2024-07-01 06:30:00'"},
+	{"lin/plain/ofs", "SELECT count(*) AS n FROM (SELECT TIMESTAMP '2024-07-01 12:00:00' AS x FROM " + tzRows + " WHERE id = 1) s WHERE x = '2024-07-01 12:00:00+05:30'"},
+	{"lin/plain/ofsGe", "SELECT count(*) AS n FROM (SELECT TIMESTAMP '2024-07-01 12:00:00' AS x FROM " + tzRows + " WHERE id = 1) s WHERE x >= '2024-07-01 12:00:00+05:30'"},
+	{"lin/plain/noOfs", "SELECT count(*) AS n FROM (SELECT TIMESTAMP '2024-07-01 12:00:00' AS x FROM " + tzRows + " WHERE id = 1) s WHERE x = '2024-07-01 12:00:00'"},
+	{"lin/plain/tzLit", "SELECT count(*) AS n FROM (SELECT TIMESTAMP '2024-07-01 12:00:00' AS x FROM " + tzRows + " WHERE id = 1) s WHERE x = TIMESTAMPTZ '2024-07-01 12:00:00+05:30'"},
+	{"lin/plain/tsLit", "SELECT count(*) AS n FROM (SELECT TIMESTAMP '2024-07-01 12:00:00' AS x FROM " + tzRows + " WHERE id = 1) s WHERE x = TIMESTAMP '2024-07-01 12:00:00'"},
+	{"lin/greatest", "SELECT greatest(TIMESTAMPTZ '2024-07-01 12:00:00+00', '2024-07-01 15:00:00+05:30') AS v"},
+	{"lin/least", "SELECT least(TIMESTAMPTZ '2024-07-01 12:00:00+00', '2024-07-01 15:00:00+05:30') AS v"},
+	{"lin/coalesce", "SELECT coalesce(CAST(NULL AS TIMESTAMPTZ), '2024-07-01 15:00:00+05:30') AS v"},
+	{"lin/case", "SELECT CASE WHEN 1 = 0 THEN TIMESTAMPTZ '2024-07-01 12:00:00+00' ELSE '2024-07-01 15:00:00+05:30' END AS v"},
+	{"lin/simpleCase", "SELECT CASE TIMESTAMPTZ '2024-07-01 12:00:00+00' WHEN '2024-07-01 17:30:00+05:30' THEN 1 ELSE 0 END AS v"},
+	{"lin/anyArray", "SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' = ANY(ARRAY['2024-07-01 17:30:00+05:30']) AS v"},
+	{"lin/isDistinct", "SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' IS DISTINCT FROM '2024-07-01 17:30:00+05:30' AS v"},
+	{"lin/now", "SELECT count(*) AS n FROM " + tzRows + " WHERE id = 1 AND now() > '2000-01-01 00:00:00+05:30'"},
+	{"lin/tstzText", "SELECT count(*) AS n FROM (SELECT CAST('2024-07-01 12:00:00+05:30' AS TEXT) AS s FROM " + tzRows + " WHERE id = 1) q WHERE TIMESTAMPTZ '2024-07-01 12:00:00+05:30' = s"},
+	{"ext/datePartTzTs", "SELECT date_part('timezone', TIMESTAMP '2024-07-01 12:00:00') AS v"},
+	{"ext/tzHourDate", "SELECT extract(timezone_hour FROM DATE '2024-07-01') AS v"},
 }
 
 var tzZones = []string{"UTC", "America/New_York", "Asia/Kolkata"}
@@ -122,6 +173,9 @@ const tzRows = "(SELECT * FROM (VALUES (1), (2), (3), (4), (5), (6), (7), (8)) q
 
 // tzEngineSQL is the statement the arms run for a cell (tzCells' comment).
 func tzEngineSQL(c tzCell) string {
+	if strings.HasPrefix(c.name, "lin/") && !tzSingleExpr.MatchString(c.sql) {
+		return strings.ReplaceAll(c.sql, tzRows, "ej_t")
+	}
 	if strings.HasPrefix(c.name, "key/") {
 		s := strings.ReplaceAll(c.sql, tzRows, "ej_t")
 		return strings.Replace(s, "SELECT x AS v,", "SELECT CAST(x AS TEXT) AS v,", 1)
@@ -296,9 +350,6 @@ var tzAllArms = []string{"single", "spilled512k", "dag", "dag-shuffled", "dag-mo
 // tzKnown are the cells whose answer under UTC is not PostgreSQL's, each
 // pinned on every arm (a pin fails when the answer moves):
 //
-//   - this line's refusal: a comparison of a timestamptz with a quoted literal
-//     carrying a nonzero offset (0A000 timestamptz-zoned-literal), which read
-//     the literal as a timestamp and discarded its offset (false at the base);
 //   - stage A's named refusals of timestamptz arithmetic and the existing
 //     AT TIME ZONE refusal of a zone other than UTC (0A000, unchanged here);
 //   - loud gaps, the same at the base: TIMESTAMP WITH TIME ZONE is not parsed
@@ -307,16 +358,14 @@ var tzAllArms = []string{"single", "spilled512k", "dag", "dag-shuffled", "dag-mo
 //     to_timestamp, to_char, transaction_timestamp, extract(timezone …) (the
 //     parser's timezone(x) rewrite) and the three-argument date_trunc do not
 //     exist here (42883);
-//   - two cells PostgreSQL refuses that this engine answers: time_bucket is
-//     this engine's own function, and timezone_hour of a TIMESTAMP is 0A000
-//     there — this engine holds a timestamptz in its TIMESTAMP carrier and
-//     cannot tell the two apart, so it answers the session offset, 0, for both
-//     (the process zone's offset at the base).
+//   - a cell PostgreSQL refuses that this engine answers: time_bucket is this
+//     engine's own function.
+//
+// A quoted literal with an offset beside a timestamptz carried in a column is
+// PostgreSQL's answer on every arm (round 2); beside a STORED timestamp
+// column it is refused, which the door test and the wadjet test pin (this
+// matrix's relations are derived, as PostgreSQL measures them).
 var tzKnown = map[string]string{
-	"cmp/tstzLitOfs":     "ERR 0A000",
-	"cmp/betweenOfs":     "ERR 0A000",
-	"cmp/inOfs":          "ERR 0A000",
-	"cmp/nullifOfs":      "ERR 0A000",
 	"ar/diff":            "ERR 0A000",
 	"ar/plusInterval":    "ERR 0A000",
 	"atz/tstzNY":         "ERR 0A000",
@@ -334,7 +383,6 @@ var tzKnown = map[string]string{
 	"out/text":       "rows=1 2024-07-01 06:30:00",
 	"out/textOrd":    "rows=1 2024-07-01 12:00:00",
 	"ext/timeBucket": "rows=1 2024-07-01 07:00:00",
-	"ext/tzHourTs":   "rows=1 0",
 }
 
 // A TIMESTAMPTZ VALUE IS POSTGRESQL'S INSTANT ON EVERY ARM (#1680 line d).
@@ -399,9 +447,10 @@ func TestArc1680dTimestamptzEveryArm(t *testing.T) {
 
 // TestArc1680dUnderEveryKillSwitch: the line-d answers and refusals are
 // decided before any optimization, so turning any one kill switch off moves
-// no cell's answer on the single-process or the DAG arm — the refusal
-// (timestamptz-zoned-literal) keeps its SQLSTATE, and every value cell its
-// value (docs/testing/GATES.md, the kill-switch invariance of a refusal).
+// no cell's answer on the single-process or the DAG arm — a refusal keeps
+// its SQLSTATE, and every value cell its value, the rewritten quoted
+// literals included (docs/testing/GATES.md, the kill-switch invariance of a
+// refusal).
 func TestArc1680dUnderEveryKillSwitch(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: every kill switch over the timestamptz matrix")
@@ -420,8 +469,8 @@ func TestArc1680dUnderEveryKillSwitch(t *testing.T) {
 			base[a.name+"|"+c.name] = a.run(tzEngineSQL(c))
 		}
 	}
-	if got := base["single|cmp/tstzLitOfs"]; got != "ERR 0A000" {
-		t.Fatalf("cmp/tstzLitOfs on single = %s, want the refusal", got)
+	if got := base["single|lin/derived/ofs"]; got != "rows=1 1" {
+		t.Fatalf("lin/derived/ofs on single = %s, want PostgreSQL's 1", got)
 	}
 	moved := 0
 	for _, tog := range optswitch.All() {

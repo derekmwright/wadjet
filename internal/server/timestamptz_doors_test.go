@@ -27,8 +27,12 @@ import (
 // Every door that runs a SELECT reads a timestamptz literal as the instant it
 // names (its offset applied: `TIMESTAMPTZ '2024-07-01 12:00:00+05:30'` is
 // 06:30 UTC, PostgreSQL 17.11's answer under TimeZone=UTC; it was 12:00 on
-// every door) and refuses a comparison of a timestamptz with a quoted literal
-// spelling a nonzero offset by name. pgwire, the only door with a session,
+// every door), reads a quoted literal with an offset beside a timestamptz —
+// written directly or carried by a derived table, a CTE, a UNION ALL arm, a
+// scalar subquery or a join — as a timestamptz, and refuses one beside a
+// stored timestamp column, whose declaration no door records (round 1 left
+// the carried cells answering false, a regression from the base's true).
+// pgwire, the only door with a session,
 // refuses a SET TimeZone / SET TIME ZONE naming any zone but UTC on both arms
 // and both protocols, and the session keeps answering at UTC after it; the
 // embedded, HTTP and gRPC doors have no SET and refuse the statement. The
@@ -88,8 +92,60 @@ func TestTimestamptzOnEveryDoor(t *testing.T) {
 		return ""
 	}
 
+	// The stored columns of rule 3 (validate_timestamptz_lineage.go): a
+	// TIMESTAMP column declared through SQL DDL (tzs), through the HTTP and
+	// gRPC table-creation doors (tzh, tzg), and a CREATE TABLE AS of a
+	// timestamptz (tzc). No door can declare a timestamptz column — each
+	// answers TIMESTAMPTZ with 42704 — and none records which declaration a
+	// TIMESTAMP column had, so a quoted literal with an offset beside any of
+	// them is refused.
+	for _, s := range []string{
+		"CREATE TABLE tzs (id BIGINT, ts TIMESTAMP)",
+		"INSERT INTO tzs VALUES (1, TIMESTAMP '2024-07-01 12:00:00')",
+		"CREATE TABLE tzc AS SELECT id, TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS ts FROM vld WHERE id = 1",
+	} {
+		if _, err := db.Query(ctx, s); err != nil {
+			t.Fatalf("%s: %v", s, err)
+		}
+	}
+	if _, err := db.Query(ctx, "CREATE TABLE tzbad (ts TIMESTAMPTZ)"); sqlerr.StateOf(err) != "42704" {
+		t.Errorf("SQL DDL TIMESTAMPTZ: %v, want 42704 (no door declares a timestamptz column)", err)
+	}
+	httpCreate := func(name, typ string) (int, string) {
+		nullable := true
+		body, _ := json.Marshal(map[string]any{"name": name, "columns": []map[string]any{
+			{"name": "id", "type": "INT64", "nullable": &nullable}, {"name": "ts", "type": typ, "nullable": &nullable}}})
+		resp, err := http.Post(local.URL+"/v1/tables", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(raw)
+	}
+	if code, body := httpCreate("tzh", "TIMESTAMP"); code != http.StatusCreated {
+		t.Fatalf("HTTP CREATE TABLE tzh: %d %s", code, body)
+	}
+	if code, body := httpCreate("tzhbad", "TIMESTAMPTZ"); code == http.StatusCreated || !strings.Contains(body, `type \"TIMESTAMPTZ\" does not exist`) {
+		t.Errorf("HTTP CREATE TABLE TIMESTAMPTZ: %d %s, want type does not exist (42704)", code, body)
+	}
+	grpcCols := func(typ string) []*wadjetv1.ColumnDef {
+		return []*wadjetv1.ColumnDef{{Name: "id", Type: "INT64", Nullable: true}, {Name: "ts", Type: typ, Nullable: true}}
+	}
+	gDDL := NewGRPCServer(GRPCConfig{Catalog: db.Catalog()}, slog.Default())
+	if _, err := gDDL.CreateTable(ctx, &wadjetv1.CreateTableRequest{Name: "tzg", Columns: grpcCols("TIMESTAMP")}); err != nil {
+		t.Fatalf("gRPC CreateTable tzg: %v", err)
+	}
+	if _, err := gDDL.CreateTable(ctx, &wadjetv1.CreateTableRequest{Name: "tzgbad", Columns: grpcCols("TIMESTAMPTZ")}); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("gRPC CreateTable TIMESTAMPTZ: %v, want type does not exist", err)
+	}
+
 	// Values: PostgreSQL 17.11 under UTC, as text (the timestamptz's `+00`
-	// is the divergence; the instant is the answer).
+	// is the divergence; the instant is the answer). A bare expression runs
+	// as `SELECT CAST(<expr> AS TEXT) AS r FROM vld WHERE id = 1`; a statement
+	// (one starting with SELECT or WITH) runs as written.
+	const tz = "TIMESTAMPTZ '2024-07-01 12:00:00+05:30'"
+	const ofs = "'2024-07-01 12:00:00+05:30'"
 	for _, c := range []struct{ expr, want string }{
 		{"TIMESTAMPTZ '2024-07-01 12:00:00+05:30'", "2024-07-01 06:30:00"},
 		{"CAST('2024-07-01 12:00:00-04' AS TIMESTAMPTZ)", "2024-07-01 16:00:00"},
@@ -101,8 +157,27 @@ func TestTimestamptzOnEveryDoor(t *testing.T) {
 		{"date_part('timezone', TIMESTAMPTZ '2024-07-01 12:00:00+05:30')", "0"},
 		{"TIMESTAMPTZ '2024-07-01 12:00:00+00' = TIMESTAMPTZ '2024-07-01 17:30:00+05:30'", "true"},
 		{"TIMESTAMP '2024-07-01 12:00:00+05:30'", "2024-07-01 12:00:00"},
+		// A quoted literal beside a timestamptz is read as one (its offset
+		// applied), directly and through every carrier of the slot.
+		{"TIMESTAMPTZ '2024-07-01 12:00:00+00' = '2024-07-01 17:30:00+05:30'", "true"},
+		{"greatest(TIMESTAMPTZ '2024-07-01 12:00:00+00', '2024-07-01 15:00:00+05:30')", "2024-07-01 12:00:00"},
+		{"coalesce(CAST(NULL AS TIMESTAMPTZ), '2024-07-01 15:00:00+05:30')", "2024-07-01 09:30:00"},
+		{"SELECT CAST(count(*) AS TEXT) AS r FROM (SELECT " + tz + " AS x FROM vld WHERE id = 1) s WHERE x = " + ofs, "1"},
+		{"WITH c AS (SELECT " + tz + " AS x FROM vld WHERE id = 1) SELECT CAST(count(*) AS TEXT) AS r FROM c WHERE x >= " + ofs, "1"},
+		{"SELECT CAST(count(*) AS TEXT) AS r FROM (SELECT " + tz + " AS x FROM vld WHERE id = 1 UNION ALL SELECT TIMESTAMPTZ '2024-07-01 00:00:00+00' FROM vld WHERE id = 2) s WHERE x = " + ofs, "1"},
+		{"SELECT CAST(count(*) AS TEXT) AS r FROM vld WHERE id = 1 AND (SELECT " + tz + ") = " + ofs, "1"},
+		{"SELECT CAST(count(*) AS TEXT) AS r FROM (SELECT id, " + tz + " AS x FROM vld) a JOIN vld b ON a.id = b.id WHERE a.id = 1 AND a.x = " + ofs, "1"},
+		{"SELECT CAST(count(*) AS TEXT) AS r FROM (SELECT CAST(" + ofs + " AS TIMESTAMPTZ) AS x FROM vld WHERE id = 1) q WHERE x = " + ofs, "1"},
+		// Beside a plain timestamp by lineage the offset is discarded.
+		{"SELECT CAST(count(*) AS TEXT) AS r FROM (SELECT TIMESTAMP '2024-07-01 12:00:00' AS x FROM vld WHERE id = 1) s WHERE x = " + ofs, "1"},
+		// A literal without an offset beside a stored column answers.
+		{"SELECT CAST(count(*) AS TEXT) AS r FROM tzs WHERE ts = '2024-07-01 12:00:00'", "1"},
+		{"SELECT CAST(count(*) AS TEXT) AS r FROM tzc WHERE ts = TIMESTAMPTZ '2024-07-01 12:00:00+05:30'", "1"},
 	} {
-		sql := "SELECT CAST(" + c.expr + " AS TEXT) AS r FROM vld WHERE id = 1"
+		sql := c.expr
+		if !strings.HasPrefix(sql, "SELECT ") && !strings.HasPrefix(sql, "WITH ") {
+			sql = "SELECT CAST(" + c.expr + " AS TEXT) AS r FROM vld WHERE id = 1"
+		}
 		var got []string
 		check := func(door string, v any, err error) {
 			if err != nil {
@@ -146,40 +221,70 @@ func TestTimestamptzOnEveryDoor(t *testing.T) {
 		}
 	}
 
-	// The comparison refusal, by its identity on every door.
-	refusal := "SELECT count(*) AS n FROM vld WHERE TIMESTAMPTZ '2024-07-01 12:00:00+00' = '2024-07-01 17:30:00+05:30'"
-	const sentence = "comparing a timestamptz with a quoted literal that carries a time zone offset is not supported"
-	{
+	// The refusals, by SQLSTATE and sentence on every door: a quoted literal
+	// with an offset beside a stored column of unknown declaration (rule 3,
+	// the authorized right-to-refused class: PostgreSQL answers 1 over a
+	// timestamp column and over a timestamptz one, by different readings),
+	// PostgreSQL's own 42883 for a timestamptz beside a text column, and its
+	// 0A000 for a time zone field of a plain timestamp.
+	const ambiguous = "a quoted literal with a time zone offset beside a stored timestamp column is not supported"
+	for _, c := range []struct{ sql, state, sentence string }{
+		{"SELECT count(*) AS n FROM tzs WHERE ts = " + ofs, "0A000", ambiguous},
+		{"SELECT count(*) AS n FROM tzc WHERE ts >= " + ofs, "0A000", ambiguous},
+		{"SELECT count(*) AS n FROM tzh WHERE ts = " + ofs, "0A000", ambiguous},
+		{"SELECT count(*) AS n FROM tzg WHERE ts = " + ofs, "0A000", ambiguous},
+		{"SELECT count(*) AS n FROM (SELECT ts FROM tzs) q WHERE ts BETWEEN " + ofs + " AND '2024-07-02 00:00:00'", "0A000", ambiguous},
+		{"SELECT count(*) AS n FROM vld WHERE " + tz + " = sd", "42883", "operator does not exist: timestamp with time zone = text"},
+		{"SELECT date_part('timezone', TIMESTAMP '2024-07-01 12:00:00') AS n FROM vld WHERE id = 1", "0A000", `unit "timezone" not supported for type timestamp without time zone`},
+	} {
 		var got []string
-		_, err := db.Query(ctx, refusal)
-		if sqlerr.StateOf(err) != "0A000" || sqlerr.ReasonOf(err) != "timestamptz-zoned-literal" {
+		_, err := db.Query(ctx, c.sql)
+		if sqlerr.StateOf(err) != c.state || !strings.Contains(fmt.Sprint(err), c.sentence) {
 			got = append(got, fmt.Sprintf("embedded: %v", err))
 		}
 		for name, base := range map[string]string{"http/local": local.URL, "http/distributed": dist.URL} {
-			if _, e, s := post(base, refusal); s != "0A000" || !strings.Contains(e, sentence) {
+			if _, e, s := post(base, c.sql); s != c.state || !strings.Contains(e, c.sentence) {
 				got = append(got, fmt.Sprintf("%s: %q %q", name, s, e))
 			}
 		}
 		for name, g := range map[string]*GRPCServer{"grpc/embedded": gEmbedded, "grpc/distributed": gDist} {
-			if _, err := g.Query(ctx, &wadjetv1.QueryRequest{Sql: refusal}); err == nil || !strings.Contains(err.Error(), sentence) {
+			if _, err := g.Query(ctx, &wadjetv1.QueryRequest{Sql: c.sql}); err == nil || !strings.Contains(err.Error(), c.sentence) {
 				got = append(got, fmt.Sprintf("%s: %v", name, err))
 			}
 		}
 		for name, conn := range conns {
-			_, err := conn.Exec(ctx, refusal).ReadAll()
-			if pgState(err) != "0A000" || !strings.Contains(fmt.Sprint(err), sentence) {
+			_, err := conn.Exec(ctx, c.sql).ReadAll()
+			if pgState(err) != c.state || !strings.Contains(fmt.Sprint(err), c.sentence) {
 				got = append(got, fmt.Sprintf("%s/simple: %v", name, err))
 			}
-			r := conn.ExecParams(ctx, refusal, nil, nil, nil, nil).Read()
-			if pgState(r.Err) != "0A000" || !strings.Contains(fmt.Sprint(r.Err), sentence) {
+			r := conn.ExecParams(ctx, c.sql, nil, nil, nil, nil).Read()
+			if pgState(r.Err) != c.state || !strings.Contains(fmt.Sprint(r.Err), c.sentence) {
 				got = append(got, fmt.Sprintf("%s/extended: %v", name, r.Err))
 			}
 		}
 		if len(got) > 0 {
-			t.Errorf("%s:\n    %s", refusal, strings.Join(got, "\n    "))
+			t.Errorf("%s:\n    %s", c.sql, strings.Join(got, "\n    "))
 		}
 	}
-
+	// DML: the same refusal for a predicate and an assignment, before any
+	// row is written (embedded and pgwire, the doors that run DML here).
+	for _, s := range []string{
+		"UPDATE tzs SET id = 2 WHERE ts = " + ofs,
+		"UPDATE tzs SET ts = " + ofs + " WHERE id = 1",
+		"DELETE FROM tzs WHERE ts = " + ofs,
+		"INSERT INTO tzs VALUES (3, " + ofs + ")",
+		"INSERT INTO tzs SELECT 4, " + ofs,
+	} {
+		if _, err := db.Query(ctx, s); sqlerr.StateOf(err) != "0A000" || !strings.Contains(fmt.Sprint(err), ambiguous) {
+			t.Errorf("embedded %s: %v, want the 0A000 refusal", s, err)
+		}
+		if _, err := conns["pgwire/single"].Exec(ctx, s).ReadAll(); pgState(err) != "0A000" || !strings.Contains(fmt.Sprint(err), ambiguous) {
+			t.Errorf("pgwire/single %s: %v, want the 0A000 refusal", s, err)
+		}
+	}
+	if res, err := db.Query(ctx, "SELECT CAST(count(*) AS TEXT) AS r FROM tzs"); err != nil || fmt.Sprint(res.Rows[0]["r"]) != "1" {
+		t.Errorf("tzs after the refused DML: %v %v, want the one row it had", res, err)
+	}
 	// The session zone: pgwire refuses a non-UTC SET on both protocols and
 	// keeps answering at UTC; UTC itself is accepted; the declared type of a
 	// timestamptz value is timestamp (1114), printed with no offset.

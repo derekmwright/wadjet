@@ -86,11 +86,11 @@ func TestTimestamptzIsTheInstantItsTextNames(t *testing.T) {
 	if _, err := db.Query(ctx, "SELECT TIMESTAMPTZ '294276-12-31 23:00:00-15' AS v"); sqlerr.StateOf(err) != "22008" {
 		t.Errorf("TIMESTAMPTZ '294276-12-31 23:00:00-15': %v, want 22008 timestamp out of range", err)
 	}
-	// A comparison of a timestamptz with a quoted literal spelling a nonzero
-	// offset is refused by name; a literal without one still answers.
-	_, err = db.Query(ctx, "SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' = '2024-07-01 17:30:00+05:30' AS v")
-	if sqlerr.StateOf(err) != "0A000" || sqlerr.ReasonOf(err) != "timestamptz-zoned-literal" {
-		t.Errorf("tstz = zoned quoted literal: %v, want the 0A000 timestamptz-zoned-literal refusal", err)
+	// A quoted literal spelling a nonzero offset beside a timestamptz is read
+	// as a timestamptz, PostgreSQL's reading (validate_timestamptz_lineage.go);
+	// a literal without one still answers.
+	if res, err := db.Query(ctx, "SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' = '2024-07-01 17:30:00+05:30' AS v"); err != nil || res.Rows[0]["v"] != true {
+		t.Errorf("tstz = zoned quoted literal: %v %v, want true", res, err)
 	}
 	if res, err := db.Query(ctx, "SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' = '2024-07-01 12:00:00' AS v"); err != nil || res.Rows[0]["v"] != true {
 		t.Errorf("tstz = quoted literal without an offset: %v %v, want true", res, err)
