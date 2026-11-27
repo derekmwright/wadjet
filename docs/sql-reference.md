@@ -5119,9 +5119,18 @@ declare `timestamp without time zone` where PostgreSQL declares
 declaration at all: this engine has no TIME type among its 22, so the
 SQL-standard niladic spelling parses but the call itself is refused
 (`unknown function: current_time`) rather than declaring a value it cannot
-represent. A timestamp minus a timestamp is PostgreSQL's INTERVAL, which this
-engine cannot hold as a column value: it answers the difference in
-milliseconds.
+represent. A timestamp minus a timestamp (`ts2 - ts1`, `now() - ts`,
+`ts - '2024-01-01'`) is PostgreSQL's INTERVAL, and it is an interval here too:
+every rule below applies to it. Because this engine computes the difference
+as a number of milliseconds, not an interval, every use of it is refused —
+the comparisons and arithmetic an interval CAN take included — except
+`IS [NOT] NULL`; the refusal says "a timestamp difference (timestamp -
+timestamp) is an interval and cannot yet be used as …". Compare the
+timestamps themselves instead (`ts > TIMESTAMP '2024-01-01 00:00:00' +
+INTERVAL '30 days'`, `a.ts > b.ts + INTERVAL '30 days'`), or take a number of
+seconds as `extract(epoch FROM ts2) - extract(epoch FROM ts1)` (double
+precision; PostgreSQL's numeric has the same value). `date - date` is a
+count of days, not an interval.
 
 **What an INTERVAL can and cannot do today.** There is no INTERVAL column
 type yet, so an interval is consumed inside the expression that computes it
@@ -5144,7 +5153,9 @@ and never leaves it (#1713d):
   argument, or a value written to a column. Each is refused `0A000`
   ("interval values cannot yet be used as …"); PostgreSQL's own refusals keep
   their codes (`42804` for a `CASE` mixing an interval with a number, `42883`
-  for `interval = integer`, `22007` for text that is no interval).
+  for `interval = integer` and `interval + integer` — `ts2 - ts1 > 1000`
+  among them —, `42846` for a CAST to a number, `22007` for text that is no
+  interval).
 - A new column cannot be declared `INTERVAL` (`0A000`, every door). For a
   stored duration declare `DURATION`: nanoseconds in one BIGINT (wire OID 20),
   compared, summed and ordered as a number. Existing `DURATION` columns,

@@ -630,9 +630,9 @@ between the two types keep the value; `EXTRACT` / `date_part` (and `year()`
 … the functions `EXTRACT` is written as) answer `Infinity` / `-Infinity` for
 year and epoch and NULL for every other field this engine extracts; `date_trunc`
 answers the value, and so does `time_bucket` (this engine's function). `date - date` with an infinite side is 22008,
-as on PostgreSQL. Refused 22008 where PostgreSQL answers or has no such
-operation: a `timestamp - timestamp` difference (this engine's millisecond
-count; PostgreSQL's infinite interval), a `CAST` of an infinite value to
+as on PostgreSQL. A `timestamp - timestamp` difference is refused 0A000 for
+every value (it is an interval; temporal r16). Refused 22008 where PostgreSQL answers or has no such
+operation: a `CAST` of an infinite value to
 `bigint` or `double precision` (to `integer` or `smallint` it is 22003, and to
 `numeric` an internal error), this engine's own temporal functions (`date_add`, `to_date`,
 `last_day_of_month`, `to_unixtime`, …) and `time_bucket`'s infinite origin
