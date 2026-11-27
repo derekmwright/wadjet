@@ -52,6 +52,15 @@
 #   dup/h1_ii_der2, dup/h1_iii_der_diffbase, dup/h1_iii_der_diffbase_lt, dup/h1_v_rename_right, dup/h1_vi_rename_rq,
 #   dup/h1_vii_cte_rq, dup/kv_where. Measured with R0_PINS_WRITE=1; every other cell's artifact row equals its pin except the
 #   two bounded h2_base2_control flap pins, kept.
+# Re-pinned at #1678 line j round 2, on dag, dag-shuffled, dag-morsel4 (localD's note gains dag-routes where the DAG routes):
+#   a CTE read on both sides shares its definition nodes, which round 1 could not tell apart, now qualified:
+#   dup/M_eq (wrong:24197d77f8e1 -> right), dup/S1, dup/S3, dup/h1_x_computed (wrong:a8f0538aa13e -> right);
+#   dup/sj_proj_after_filter wrong:607544d01aeb -> wrong:75e38ef096a4: its WHERE is now right, its sum(b.r) still reads the
+#   probe's column (the SELECT-list build-column defect on #1678, wrong at base and here; PostgreSQL 72.5, DAG 60);
+#   an outer join's filter over a derived table's computed column routes to L (ErrOuterJoinDerivedFilterDistributed):
+#   own/computed_null (right -> routed-right), own/outer_nonstrict_rows (wrong:564413ecb116 -> routed-right),
+#   own/outer_constant, own/outer_nonstrict, own/outer_strict (refused:42000 -> routed-right).
+#   Measured with R0_PINS_WRITE=1; every other artifact row equals its pin except the h2_base2_control flap pin, kept.
 own	m1_diffbase	single	right	-	-
 own	m1_diffbase	spilled512k	right	-	-
 own	m1_diffbase	dag	right	-	-
@@ -324,10 +333,10 @@ own	group_arm_first	dag-morsel4	right	-	-
 own	group_arm_first	localD	right	-	status=established
 own	computed_null	single	right	-	-
 own	computed_null	spilled512k	right	-	-
-own	computed_null	dag	right	-	-
-own	computed_null	dag-shuffled	right	-	-
-own	computed_null	dag-morsel4	right	-	-
-own	computed_null	localD	right	-	status=established
+own	computed_null	dag	routed-right	-	-
+own	computed_null	dag-shuffled	routed-right	-	-
+own	computed_null	dag-morsel4	routed-right	-	-
+own	computed_null	localD	right	-	status=established;dag-routes
 own	union_cast_values	single	right	-	-
 own	union_cast_values	spilled512k	right	-	-
 own	union_cast_values	dag	right	-	-
@@ -342,28 +351,28 @@ own	limit_set_cast	dag-morsel4	refused:42000	emission	-
 own	limit_set_cast	localD	right	-	status=established
 own	outer_nonstrict	single	right	-	-
 own	outer_nonstrict	spilled512k	right	-	-
-own	outer_nonstrict	dag	refused:42000	emission	-
-own	outer_nonstrict	dag-shuffled	refused:42000	emission	-
-own	outer_nonstrict	dag-morsel4	refused:42000	emission	-
-own	outer_nonstrict	localD	right	-	status=established
+own	outer_nonstrict	dag	routed-right	-	-
+own	outer_nonstrict	dag-shuffled	routed-right	-	-
+own	outer_nonstrict	dag-morsel4	routed-right	-	-
+own	outer_nonstrict	localD	right	-	status=established;dag-routes
 own	outer_strict	single	right	-	-
 own	outer_strict	spilled512k	right	-	-
-own	outer_strict	dag	refused:42000	emission	-
-own	outer_strict	dag-shuffled	refused:42000	emission	-
-own	outer_strict	dag-morsel4	refused:42000	emission	-
-own	outer_strict	localD	right	-	status=established
+own	outer_strict	dag	routed-right	-	-
+own	outer_strict	dag-shuffled	routed-right	-	-
+own	outer_strict	dag-morsel4	routed-right	-	-
+own	outer_strict	localD	right	-	status=established;dag-routes
 own	outer_constant	single	right	-	-
 own	outer_constant	spilled512k	right	-	-
-own	outer_constant	dag	refused:42000	emission	-
-own	outer_constant	dag-shuffled	refused:42000	emission	-
-own	outer_constant	dag-morsel4	refused:42000	emission	-
-own	outer_constant	localD	right	-	status=established
+own	outer_constant	dag	routed-right	-	-
+own	outer_constant	dag-shuffled	routed-right	-	-
+own	outer_constant	dag-morsel4	routed-right	-	-
+own	outer_constant	localD	right	-	status=established;dag-routes
 own	outer_nonstrict_rows	single	right	-	-
 own	outer_nonstrict_rows	spilled512k	right	-	-
-own	outer_nonstrict_rows	dag	wrong:564413ecb116	emission	-
-own	outer_nonstrict_rows	dag-shuffled	wrong:564413ecb116	emission	-
-own	outer_nonstrict_rows	dag-morsel4	wrong:564413ecb116	emission	-
-own	outer_nonstrict_rows	localD	right	-	status=established
+own	outer_nonstrict_rows	dag	routed-right	-	-
+own	outer_nonstrict_rows	dag-shuffled	routed-right	-	-
+own	outer_nonstrict_rows	dag-morsel4	routed-right	-	-
+own	outer_nonstrict_rows	localD	right	-	status=established;dag-routes
 own	one_arm_respelling	single	right	-	-
 own	one_arm_respelling	spilled512k	right	-	-
 own	one_arm_respelling	dag	right	-	-
@@ -1086,9 +1095,9 @@ uniq	df_inner	dag-morsel4	right	-	-
 uniq	df_inner	localD	right	-	status=established
 dup	S1	single	right	-	-
 dup	S1	spilled512k	right	-	-
-dup	S1	dag	wrong:a8f0538aa13e	emission	-
-dup	S1	dag-shuffled	wrong:a8f0538aa13e	emission	-
-dup	S1	dag-morsel4	wrong:a8f0538aa13e	emission	-
+dup	S1	dag	right	-	-
+dup	S1	dag-shuffled	right	-	-
+dup	S1	dag-morsel4	right	-	-
 dup	S1	localD	right	-	status=established
 dup	S2	single	right	-	-
 dup	S2	spilled512k	right	-	-
@@ -1098,9 +1107,9 @@ dup	S2	dag-morsel4	right	-	-
 dup	S2	localD	right	-	status=established
 dup	S3	single	right	-	-
 dup	S3	spilled512k	right	-	-
-dup	S3	dag	wrong:a8f0538aa13e	emission	-
-dup	S3	dag-shuffled	wrong:a8f0538aa13e	emission	-
-dup	S3	dag-morsel4	wrong:a8f0538aa13e	emission	-
+dup	S3	dag	right	-	-
+dup	S3	dag-shuffled	right	-	-
+dup	S3	dag-morsel4	right	-	-
 dup	S3	localD	right	-	status=established
 dup	S4	single	right	-	-
 dup	S4	spilled512k	right	-	-
@@ -1122,9 +1131,9 @@ dup	M_nofilter	dag-morsel4	right	-	-
 dup	M_nofilter	localD	right	-	status=established
 dup	M_eq	single	right	-	-
 dup	M_eq	spilled512k	right	-	-
-dup	M_eq	dag	wrong:24197d77f8e1	emission	-
-dup	M_eq	dag-shuffled	wrong:24197d77f8e1	emission	-
-dup	M_eq	dag-morsel4	wrong:24197d77f8e1	emission	-
+dup	M_eq	dag	right	-	-
+dup	M_eq	dag-shuffled	right	-	-
+dup	M_eq	dag-morsel4	right	-	-
 dup	M_eq	localD	right	-	status=established
 dup	M_sums	single	right	-	-
 dup	M_sums	spilled512k	right	-	-
@@ -1200,9 +1209,9 @@ dup	h1_ix_cte_norename	dag-morsel4	right	-	-
 dup	h1_ix_cte_norename	localD	right	-	status=established
 dup	h1_x_computed	single	right	-	-
 dup	h1_x_computed	spilled512k	right	-	-
-dup	h1_x_computed	dag	wrong:a8f0538aa13e	emission	-
-dup	h1_x_computed	dag-shuffled	wrong:a8f0538aa13e	emission	-
-dup	h1_x_computed	dag-morsel4	wrong:a8f0538aa13e	emission	-
+dup	h1_x_computed	dag	right	-	-
+dup	h1_x_computed	dag-shuffled	right	-	-
+dup	h1_x_computed	dag-morsel4	right	-	-
 dup	h1_x_computed	localD	right	-	status=established
 dup	h1_xiii_prod	single	right	-	-
 dup	h1_xiii_prod	spilled512k	right	-	-
@@ -1410,9 +1419,9 @@ dup	kr_left_swapped	dag-morsel4	right	-	-
 dup	kr_left_swapped	localD	right	-	status=established
 dup	sj_proj_after_filter	single	right	-	-
 dup	sj_proj_after_filter	spilled512k	right	-	-
-dup	sj_proj_after_filter	dag	wrong:607544d01aeb	emission	-
-dup	sj_proj_after_filter	dag-shuffled	wrong:607544d01aeb	emission	-
-dup	sj_proj_after_filter	dag-morsel4	wrong:607544d01aeb	emission	-
+dup	sj_proj_after_filter	dag	wrong:75e38ef096a4	emission	-
+dup	sj_proj_after_filter	dag-shuffled	wrong:75e38ef096a4	emission	-
+dup	sj_proj_after_filter	dag-morsel4	wrong:75e38ef096a4	emission	-
 dup	sj_proj_after_filter	localD	right	-	status=established
 dup	sj_group	single	right	-	-
 dup	sj_group	spilled512k	right	-	-
