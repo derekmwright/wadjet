@@ -4,8 +4,8 @@ lit/1/1 day 2 hours	-	not-parsed 22007	met	-
 lit/2/1 year 2 months 3 days 4 hours 5 minutes 6 seconds	-	not-parsed 22007	met	-
 lit/3/1-2	-	not-parsed 42601	met	-
 lit/4/-1-2	-	not-parsed 42601	met	-
-lit/5/3 4:05:06	A	refusal bare-interval-result	unmet	-
-lit/6/-3 -4:05:06	A	refusal bare-interval-result	unmet	-
+lit/5/3 4:05:06	A	refusal bare-interval-result	met	-
+lit/6/-3 -4:05:06	A	refusal bare-interval-result	met	-
 lit/7/1-2 3 4:05:06	-	not-parsed 22007	met	-
 lit/8/4:05:06	-	not-parsed 42601	met	-
 lit/9/4:05	-	not-parsed 42601	met	-
@@ -41,16 +41,16 @@ lit/38/1.0333333 months	-	not-parsed 22007	met	-
 lit/39/-1.5 months	-	not-parsed 22007	met	-
 lit/40/-1.5 days	-	not-parsed 22007	met	-
 lit/41/1.5 centuries	-	not-parsed 22007	met	-
-lit/42/1 decade	A	refusal bare-interval-result	unmet	-
-lit/43/1 century	A	refusal bare-interval-result	unmet	-
-lit/44/1 millennium	A	refusal bare-interval-result	unmet	-
+lit/42/1 decade	A	refusal bare-interval-result	met	-
+lit/43/1 century	A	refusal bare-interval-result	met	-
+lit/44/1 millennium	A	refusal bare-interval-result	met	-
 lit/45/10 weeks	A	refusal bare-interval-result	met	-
 lit/46/1.000001 seconds	-	not-parsed 22007	met	-
 lit/47/0.0000005 seconds	-	not-parsed 22007	met	-
 lit/48/0.0000015 seconds	-	not-parsed 22007	met	-
 lit/49/0.0000025 seconds	-	not-parsed 22007	met	-
-lit/50/1 microsecond	A	refusal bare-interval-result	unmet	-
-lit/51/1 millisecond	A	refusal bare-interval-result	unmet	-
+lit/50/1 microsecond	A	refusal bare-interval-result	met	-
+lit/51/1 millisecond	A	refusal bare-interval-result	met	-
 lit/52/1.5 microseconds	-	not-parsed 22007	met	-
 lit/53/1:2:3.123456789	-	not-parsed 42601	met	-
 lit/54/-0.000001 seconds	-	not-parsed 22007	met	-
@@ -140,12 +140,12 @@ cast/fromTime	A	refusal time-type	unmet	-
 cast/toTime	-	not-parsed 42601	met	-
 cast/toBigint	C	pg-error 42846	met	-
 cast/fromDuration	C	pg-error 42704	unmet	-
-make/all	A	refusal bare-interval-result	unmet	-
+make/all	A	refusal bare-interval-result	met	-
 make/days	-	not-parsed 42601	met	-
 make/secs	-	not-parsed 42601	met	-
 make/negMins	-	not-parsed 42601	met	-
 make/weeks	-	not-parsed 42601	met	-
-make/zero	A	refusal bare-interval-result	unmet	-
+make/zero	A	refusal bare-interval-result	met	-
 make/yearsOver	C	pg-error 22008	unmet	-
 make/secsInf	C	pg-error 22008	unmet	-
 make/null	-	not-parsed 42601	met	-

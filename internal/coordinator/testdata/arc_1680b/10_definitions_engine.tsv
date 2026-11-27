@@ -1,7 +1,7 @@
 # This engine's disposition of the #1680b interval corpus, section 10_definitions, per arm (TestArc1680bRecordEngine; held by TestArc1680bEngineBaseline).
 # Settings are PostgreSQL's only: the engine runs each statement as written. A TIMESTAMP value is printed as text (iv80EngineText). name<TAB>arms<TAB>class<TAB>answer
-in/usMinUnit	*	refusal	ERR 0A000 {interval-unit}: interval unit "microseconds" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-in/usMaxUnit	*	refusal	ERR 0A000 {interval-unit}: interval unit "microseconds" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+in/usMinUnit	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+in/usMaxUnit	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 in/usOverUnit	*	pg-error	ERR 22015: interval field value out of range: "9223372036854775808 microseconds"
 in/usUnderUnit	*	pg-error	ERR 22015: interval field value out of range: "-9223372036854775809 microseconds"
 in/usMinUnitAgo	*	error	ERR 22007: invalid input syntax for type interval: "9223372036854775807 microseconds ago"
@@ -61,9 +61,9 @@ ar/infFactorNegSign	*	error	ERR 22007: invalid input syntax for type interval: "
 ar/infFactorPosSign	*	error	ERR 22007: invalid input syntax for type interval: "-1 mon 31 days"
 ar/negInfFactorNegSign	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -31 days"
 ar/infDivFiniteSign	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -31 days"
-ar/divRecipMonths	*	refusal	ERR 0A000 {interval-unit}: interval unit "mons" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+ar/divRecipMonths	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 ar/divRecipDays	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-ar/divRecipJudge	*	refusal	ERR 0A000 {interval-unit}: interval unit "microseconds" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+ar/divRecipJudge	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 justify/bigDays24h	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 days 24 hours"
 justify/bigDays24h/hoursOfDays	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 days 24 hours"
 justify/bigDays24h/daysOfHours	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "2147483647 days 24 hours"
@@ -155,9 +155,9 @@ closure/dateMinusTs	*	error	ERR 42883: operator does not exist: date - timestamp
 closure/coalesceText	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
 closure/coalesce	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 closure/caseText	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-closure/case	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+closure/case	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 closure/nullifText	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-closure/nullif	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+closure/nullif	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 closure/unionNull	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 closure/whereFalse	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 closure/whereFalseText	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
@@ -184,6 +184,6 @@ fn/truncMixedSign	*	error	ERR 22007: invalid input syntax for type interval: "1 
 fn/tocharNeg	*	error	ERR 22007: invalid input syntax for type interval: "-1 day -02:03:04"
 fn/overlapsNegEnd	*	error	ERR 42601: syntax error at or near "("
 fn/overlapsInf	*	error	ERR 42601: syntax error at or near ")"
-fn/seriesTsMonthEnd	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+fn/seriesTsMonthEnd	*	refusal	ERR 0A000 {function-generate_series}: interval values cannot yet be used as a table function's argument (generate_series): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 fn/seriesNegStepWrongWay	*	refusal	ERR 0A000 {function-generate_series}: interval values cannot yet be used as a table function's argument (generate_series): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 fn/widthBucketNumeric	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it

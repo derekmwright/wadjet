@@ -43,7 +43,7 @@ bin/month	*	pg-error	ERR 0A000 {interval-function-argument}: date_bin over an in
 bin/zero	*	refusal	ERR 0A000 {interval-function-argument}: date_bin over an interval argument is not supported
 bin/neg	*	refusal	ERR 0A000 {interval-function-argument}: date_bin over an interval argument is not supported
 bin/us	*	error	ERR 42601: syntax error at or near ","
-series/month	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+series/month	*	refusal	ERR 0A000 {function-generate_series}: interval values cannot yet be used as a table function's argument (generate_series): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 series/mixed	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 1 day"
 series/neg	*	refusal	ERR 0A000 {function-generate_series}: interval values cannot yet be used as a table function's argument (generate_series): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 series/date	*	refusal	ERR 0A000 {function-generate_series}: interval values cannot yet be used as a table function's argument (generate_series): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration

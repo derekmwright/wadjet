@@ -15,6 +15,7 @@ import (
 func rowFieldScopeDecls(scope *colScope) ColDecls {
 	decls := ColDecls{}
 	if scope != nil {
+		decls.ivLineage = scope.ivLineage
 		decls.Types = map[string]parquet.TypeID{}
 		for name, t := range scope.colTypes {
 			if t != typeAmbiguous {

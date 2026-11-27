@@ -1,6 +1,6 @@
 # The stage manifest of section 10_definitions (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet; an IntervalStyle cell by the door's SET answer)<TAB>legal alternatives (ADR-0013; ruling 11 pending).
-in/usMinUnit	A	refusal bare-interval-result	unmet	-
-in/usMaxUnit	A	refusal bare-interval-result	unmet	-
+in/usMinUnit	A	refusal bare-interval-result	met	-
+in/usMaxUnit	A	refusal bare-interval-result	met	-
 in/usOverUnit	C	pg-error 22015	met	-
 in/usUnderUnit	C	pg-error 22015	met	-
 in/usMinUnitAgo	-	not-parsed 22007	met	-
@@ -60,9 +60,9 @@ ar/infFactorNegSign	-	not-parsed 22007	met	-
 ar/infFactorPosSign	-	not-parsed 22007	met	-
 ar/negInfFactorNegSign	-	not-parsed 22007	met	-
 ar/infDivFiniteSign	-	not-parsed 22007	met	-
-ar/divRecipMonths	A	refusal bare-interval-result	unmet	-
+ar/divRecipMonths	A	refusal bare-interval-result	met	-
 ar/divRecipDays	A	refusal bare-interval-result	met	-
-ar/divRecipJudge	A	refusal bare-interval-result	unmet	-
+ar/divRecipJudge	A	refusal bare-interval-result	met	-
 justify/bigDays24h	-	not-parsed 22007	met	-
 justify/bigDays24h/hoursOfDays	-	not-parsed 22007	met	-
 justify/bigDays24h/daysOfHours	C	pg-error 22008	unmet	-
@@ -153,9 +153,9 @@ closure/dateMinusTs	A	refusal bare-interval-result	unmet	-
 closure/coalesceText	C	supported	unmet	-
 closure/coalesce	A	refusal bare-interval-result	met	-
 closure/caseText	C	supported	unmet	-
-closure/case	A	refusal bare-interval-result	unmet	-
+closure/case	A	refusal bare-interval-result	met	-
 closure/nullifText	C	supported	unmet	-
-closure/nullif	A	refusal bare-interval-result	unmet	-
+closure/nullif	A	refusal bare-interval-result	met	-
 closure/unionNull	D	supported	unmet	-
 closure/whereFalse	A	refusal bare-interval-result	met	-
 closure/whereFalseText	D	supported	unmet	-
@@ -182,6 +182,6 @@ fn/truncMixedSign	-	not-parsed 22007	met	-
 fn/tocharNeg	-	not-parsed 22007	met	-
 fn/overlapsNegEnd	-	not-parsed 42601	met	-
 fn/overlapsInf	-	not-parsed 42601	met	-
-fn/seriesTsMonthEnd	A	refusal function-generate_series	unmet	-
+fn/seriesTsMonthEnd	A	refusal function-generate_series	met	-
 fn/seriesNegStepWrongWay	A	refusal function-generate_series	met	-
 fn/widthBucketNumeric	C	supported	unmet	-

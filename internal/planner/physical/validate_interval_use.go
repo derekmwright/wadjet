@@ -290,6 +290,25 @@ type intervalTyper struct {
 	// subquery types a scalar subquery's one output column (the binder's
 	// declaration of its body), nil where no binder is at hand.
 	subquery func(sql string) (parquet.TypeID, bool)
+	// ivSubquery reports a scalar subquery whose one output slot is declared
+	// interval by lineage (binder.intervalOut), nil where no binder is at
+	// hand (validate_interval_lineage.go).
+	ivSubquery func(*plansql.SubqueryNode) bool
+	// findings, when set, collects every refusal instead of returning the
+	// first (chooseInterval decides among them); top says this block's
+	// result columns are the statement's own result.
+	findings *[]intervalFinding
+	top      bool
+}
+
+// collect records err when the typer collects; it reports whether err was
+// taken (the caller then carries on).
+func (t intervalTyper) collect(err error, topResult bool) bool {
+	if t.findings == nil || err == nil {
+		return false
+	}
+	*t.findings = append(*t.findings, newIntervalFinding(err, topResult))
+	return true
 }
 
 // newIntervalTyper is the typer over decls, its TIMESTAMP leaves installed
@@ -319,9 +338,48 @@ func (t intervalTyper) isTimestampOperand(k plansql.Node) bool {
 	return ok && id == parquet.TypeTimestamp
 }
 
-// isInterval is the provenance rule, the timestamp difference a producer.
+// isInterval is the interval rule's typing: the provenance rule, with the
+// producers this package declares (a timestamp difference, a slot declared
+// interval by lineage, a scalar subquery whose slot is, an aggregate or
+// window value function over an interval, a function PostgreSQL declares
+// interval, a difference of a date and a timestamp).
 func (t intervalTyper) isInterval(n plansql.Node) bool {
-	return n != nil && expr.IsIntervalNodeWith(n, t.isTimestampDifference)
+	return n != nil && expr.IsIntervalNodeWith(n, t.producer)
+}
+
+// producer reports a node this package declares interval-valued where the
+// expression package's provenance rule cannot (stage A's lineage, §9.1).
+func (t intervalTyper) producer(n plansql.Node) bool {
+	if t.isTimestampDifference(n) || t.decls.isLineageInterval(n) {
+		return true
+	}
+	switch v := plansql.Unparen(n).(type) {
+	case *plansql.SubqueryNode:
+		return t.ivSubquery != nil && !v.Array && t.ivSubquery(v)
+	case *plansql.WindowFuncNode:
+		return v.Func != nil && t.producer(v.Func)
+	case *plansql.FuncCallNode:
+		name := strings.ToLower(strings.TrimSpace(v.Name))
+		if intervalReturningFunctions[name] {
+			return true
+		}
+		if pos, ok := intervalValueArg[name]; ok && !v.Star && pos < len(v.Args) {
+			return t.isInterval(v.Args[pos])
+		}
+	case *plansql.BinaryOp:
+		// date - timestamp and timestamp - date: PostgreSQL's interval
+		// (the date widened to a timestamp); this engine has no such
+		// operator (42883 there), and the result is an interval wherever
+		// it is consumed.
+		if v.Op == "-" && !expr.TimestampDifferenceStatementRuleDisabled() {
+			l, lok := t.declaredID(v.Left)
+			r, rok := t.declaredID(v.Right)
+			if lok && rok && ((l == parquet.TypeDate && r == parquet.TypeTimestamp) || (l == parquet.TypeTimestamp && r == parquet.TypeDate)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isUnknown reports a quoted literal or NULL: PostgreSQL resolves either to
@@ -401,10 +459,23 @@ func (t intervalTyper) refuseIntervalTop(n plansql.Node, use string) error {
 	if t.isInterval(n) {
 		// PostgreSQL folds a constant when it plans: its own refusal (the
 		// literal's range, an overflow, a division by zero) comes first.
-		if err := expr.ConstantEvalError(n); err != nil {
+		// A capability refusal the fold raises (0A000: a unit, a
+		// sub-second or infinite result this engine cannot hold) does not
+		// precede a refusal this program holds permanently (#1680c): the
+		// use is refused whatever the value.
+		topResult := t.top && use == "a query result column"
+		refusal := t.refusal(n, use)
+		if err := expr.ConstantEvalError(n); err != nil &&
+			!(sqlerr.StateOf(err) == "0A000" && t.findings != nil && newIntervalFinding(refusal, topResult).permanent && literalsArePGInput(n)) {
+			if t.collect(err, false) {
+				return nil
+			}
 			return err
 		}
-		return t.refusal(n, use)
+		if t.collect(refusal, topResult) {
+			return nil
+		}
+		return refusal
 	}
 	return nil
 }
@@ -419,7 +490,11 @@ func (t intervalTyper) refuseIntervalCondition(n plansql.Node, clause string) er
 		return err
 	}
 	if t.isInterval(n) {
-		return sqlerr.New("42804", "argument of %s must be type boolean, not type interval", clause)
+		err := sqlerr.New("42804", "argument of %s must be type boolean, not type interval", clause)
+		if t.collect(err, false) {
+			return nil
+		}
+		return err
 	}
 	return nil
 }
@@ -454,7 +529,10 @@ func (t intervalTyper) walk(node plansql.Node) error {
 			return err
 		}
 	}
-	return t.judge(node)
+	if err := t.judge(node); err != nil && !t.collect(err, false) {
+		return err
+	}
+	return nil
 }
 
 // judge decides one node over its (already walked) operands.
@@ -862,6 +940,11 @@ func (t intervalTyper) funcCall(fc *plansql.FuncCallNode) error {
 		// aggregate would sum or order it.
 		return tsDiffRefusal("an argument of " + label)
 	}
+	if (name == "sum" || name == "avg") && fc.Distinct {
+		// Refused in this program (ADR-0052 §3): sum / avg over DISTINCT
+		// intervals.
+		return sqlerr.Refuse("distinct-aggregate", "%s(DISTINCT interval) is not supported", name)
+	}
 	if plansql.IsAggregate(name) {
 		return sqlerr.Refuse("interval-aggregate", "%s over an interval argument is not supported", name)
 	}
@@ -890,7 +973,24 @@ func (t intervalTyper) funcCall(fc *plansql.FuncCallNode) error {
 // (its derived tables, CTE bodies, set-operation arms and subqueries are
 // blocks of their own, each judged where the binder validates it).
 func refuseIntervalBlock(info *plansql.SelectInfo, decls ColDecls, subquery func(string) (parquet.TypeID, bool), tsSubquery func(string) bool) error {
+	return chooseInterval(intervalBlockFindings(info, decls, subquery, tsSubquery, nil, true))
+}
+
+// intervalBlockFindings is every refusal of the rule over one block's own
+// expressions, in the order the rule meets them; ivSubquery types a scalar
+// subquery's slot by lineage, top says the block's result is the statement's.
+func intervalBlockFindings(info *plansql.SelectInfo, decls ColDecls, subquery func(string) (parquet.TypeID, bool), tsSubquery func(string) bool, ivSubquery func(*plansql.SubqueryNode) bool, top bool) []intervalFinding {
+	var fs []intervalFinding
 	t := newIntervalTyper(decls, subquery, tsSubquery)
+	t.ivSubquery = ivSubquery
+	t.findings = &fs
+	t.top = top
+	_ = t.blockClauses(info)
+	return fs
+}
+
+// blockClauses walks one block's clauses (refuseIntervalBlock).
+func (t intervalTyper) blockClauses(info *plansql.SelectInfo) error {
 	for i := range info.Columns {
 		c := info.Columns[i]
 		if c.Star || c.ASTExpr == nil {

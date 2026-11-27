@@ -122,6 +122,12 @@ func aggArgTypeOf(decls ColDecls) func(plansql.Node) (parquet.TypeID, bool) {
 	return func(n plansql.Node) (parquet.TypeID, bool) {
 		switch v := plansql.Unparen(n).(type) {
 		case *plansql.ColRef:
+			if decls.isLineageInterval(v) {
+				// An interval slot (stage A's lineage, #1680c): its carrier
+				// declaration is not its type; the interval rule decides
+				// the call (validate_interval_use.go).
+				return 0, false
+			}
 			c, ok := decls.colDecl(v)
 			return c.Type, ok
 		case *plansql.CastNode:

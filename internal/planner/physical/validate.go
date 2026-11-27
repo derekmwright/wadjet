@@ -80,10 +80,11 @@ func bindColumns(ctx context.Context, src tableColumnSource, info *plansql.Selec
 	for _, c := range info.EnclosingCTEs() {
 		b.ctes[strings.ToLower(c.Name)] = cteEntry{open: true, ident: c.Identity()}
 	}
+	b.root = info
 	if err := b.validateBlock(ctx, info, nil); err != nil {
 		return err
 	}
-	return b.intervalErr
+	return chooseInterval(b.intervalFindings)
 }
 
 // outerDiagScope accumulates the enclosing query levels a DERIVED TABLE's body
@@ -115,7 +116,13 @@ func outerDiagScope(prev, outer *colScope) *colScope {
 type colScope struct {
 	// fieldDecls retains complete derived declarations for postfix binding.
 	fieldDecls map[string]expr.DeclType
-	open       bool
+	// ivLineage holds the names (bare and qualified, folded) whose slot is
+	// declared interval by lineage (validate_interval_lineage.go, #1680c);
+	// ivUnresolved says a source here publishes columns the binder cannot
+	// enumerate and an interval was published below it.
+	ivLineage    map[string]bool
+	ivUnresolved bool
+	open         bool
 	// sourceOpen says WHY the scope is open: a FROM SOURCE this binder cannot
 	// enumerate (a table function, a table the catalog does not have, a
 	// derived body it could not read). `open` alone — without this — means a
@@ -370,6 +377,8 @@ func (s *colScope) merge(o *colScope) {
 	if o == nil {
 		return
 	}
+	// Before the names: a name s already resolves itself shadows o's lineage.
+	s.mergeIntervalLineage(o)
 	if o.open {
 		s.open = true
 	}
@@ -672,6 +681,9 @@ type cteEntry struct {
 	decls []expr.DeclType
 	cols  []string
 	open  bool
+	// body is the item's validated body (a non-recursive item's), whose
+	// output lineage a reference reads (binder.intervalOut, #1680c).
+	body *plansql.SelectInfo
 	// ident is the WITH item registered (plansql.CTEDef.Identity): a nested
 	// WITH that reuses a name replaces the enclosing entry inside its block.
 	ident *plansql.CTEIdentity
@@ -746,11 +758,21 @@ type binder struct {
 	blockSubs map[string]plansql.Node
 	// memoBodies memoizes validatedMemo, as bodies memoizes validatedBody.
 	memoBodies map[memoKey]*plansql.SelectInfo
-	// intervalErr is the first refusal of the INTERVAL rule
-	// (validate_interval_use.go, #1713d), raised once the whole statement has
-	// bound: every refusal PostgreSQL itself raises — a name, a grouping
-	// error — takes precedence over this engine's 0A000.
-	intervalErr error
+	// intervalFindings are the refusals of the INTERVAL rule
+	// (validate_interval_use.go, #1713d), in binding order, decided once the
+	// whole statement has bound (chooseInterval): every refusal PostgreSQL
+	// itself raises — a name, a grouping error — takes precedence over this
+	// engine's 0A000.
+	intervalFindings []intervalFinding
+	// intervalOut is, per block output column, whether its slot is declared
+	// interval by lineage (validate_interval_lineage.go, #1680c);
+	// intervalBelow says an interval was published in a block or below it.
+	intervalOut   map[*plansql.SelectInfo][]bool
+	intervalBelow map[*plansql.SelectInfo]bool
+	// root is the statement's own block: its result columns (and its set
+	// operation arms') are the statement's result.
+	root *plansql.SelectInfo
+	tops map[*plansql.SelectInfo]bool
 }
 
 func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, outer *colScope) error {
@@ -796,6 +818,12 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 
 	// UNION / INTERSECT / EXCEPT: each branch is its own block.
 	if info.Union != nil {
+		if b.isTop(info) {
+			// The arms of the statement's own set operation publish the
+			// statement's result.
+			b.markTop(info.Union.Left)
+			b.markTop(info.Union.Right)
+		}
 		if err := b.validateBlock(ctx, info.Union.Left, outer); err != nil {
 			return err
 		}
@@ -871,6 +899,7 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 			}
 			b.setTimestampOut(info, ts)
 		}
+		b.reconcileIntervalOut(info)
 		return nil
 	}
 
@@ -1227,19 +1256,9 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	}
 
 	// The INTERVAL rule over this block's own expressions (#1713d), kept
-	// until the whole statement has bound.
-	if b.intervalErr == nil {
-		b.intervalErr = refuseIntervalBlock(info, rowFieldScopeDecls(resolve), func(sql string) (parquet.TypeID, bool) {
-			if types := b.subqueryDeclaredTypes(sql, resolve); len(types) == 1 && types[0] != typeAmbiguous {
-				return types[0], true
-			}
-			return 0, false
-		}, func(sql string) bool {
-			sub := b.validatedBody(sql, resolve)
-			ts := b.timestampOut[sub]
-			return sub != nil && len(ts) == 1 && ts[0]
-		})
-	}
+	// until the whole statement has bound; and the block's output lineage
+	// (#1680c), which the scopes that read it are given.
+	b.intervalBlock(info, from, resolve)
 
 	// Every participant's binding, recorded when every one of them binds.
 	bound := b.stampBlock(info, resolve)
@@ -1875,6 +1894,9 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 			into.open = true
 			into.sourceOpen = true
 			into.addOpenInst(b, tr, qual)
+			if b.intervalBelow[inner] {
+				into.ivUnresolved = true
+			}
 			return nil
 		}
 		// The COLUMN-ALIAS LIST renames those outputs positionally, and this
@@ -1897,6 +1919,9 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 			if ds := b.outputDecls[inner]; i < len(ds) && !ds[i].Untyped {
 				into.addFieldDecl(qual, n, ds[i])
 			}
+			if iv := b.intervalOut[inner]; i < len(iv) && iv[i] && !expr.IntervalLineageDisabledAt(expr.LineageDerived) {
+				into.addIntervalLineage(qual, n)
+			}
 		}
 		into.noteSourceDuplicates(qual, names)
 		into.addInst(b, tr, qual, names)
@@ -1909,12 +1934,18 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 			into.open = true
 			into.sourceOpen = true
 			into.addOpenInst(b, tr, qual)
+			if e.body != nil && b.intervalBelow[e.body] {
+				into.ivUnresolved = true
+			}
 			return nil
 		}
 		for i, n := range e.cols {
 			into.addQualified(qual, n)
 			if i < len(e.decls) && !e.decls[i].Untyped {
 				into.addFieldDecl(qual, n, e.decls[i])
+			}
+			if iv := b.intervalOut[e.body]; e.body != nil && i < len(iv) && iv[i] && !expr.IntervalLineageDisabledAt(expr.LineageCTE) {
+				into.addIntervalLineage(qual, n)
 			}
 		}
 		into.noteSourceDuplicates(qual, e.cols)
@@ -2216,6 +2247,7 @@ func (b *binder) registerCTEBody(ctx context.Context, cte *plansql.CTEDef, name 
 	}
 	e := b.ctes[name]
 	e.decls = b.outputDecls[body]
+	e.body = body
 	b.ctes[name] = e
 	return nil
 }

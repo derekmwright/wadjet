@@ -41,7 +41,8 @@ func TestIntervalRuleAtTheBinder(t *testing.T) {
 		{"SELECT id, row_number() OVER (ORDER BY CAST(customer AS INTERVAL)) AS r FROM lat_ord", "0A000", "window ORDER BY key"},
 		{"SELECT id, count(*) OVER (PARTITION BY -INTERVAL '1 day') AS r FROM lat_ord", "0A000", "PARTITION BY key"},
 		// Consumers.
-		{"SELECT max(INTERVAL '1 day') AS a FROM lat_ord", "0A000", "max over an interval argument"},
+		{"SELECT max(INTERVAL '1 day') AS a FROM lat_ord", "0A000", pub},
+		{"SELECT CAST(max(INTERVAL '1 day') AS TEXT) AS a FROM lat_ord", "0A000", "max over an interval argument"},
 		{"SELECT lag(id, 1, INTERVAL '1 day') OVER (ORDER BY id) AS a FROM lat_ord", "0A000", "lag over an interval argument"},
 		{"SELECT ARRAY[INTERVAL '1 day'] = ARRAY[INTERVAL '24 hours'] AS a", "0A000", "array element"},
 		{"SELECT (INTERVAL '1 day', 1) = (INTERVAL '24 hours', 1) AS a", "0A000", "row element"},
@@ -122,10 +123,16 @@ func TestTimestampDifferenceIsAnIntervalValuedProducer(t *testing.T) {
 		{"SELECT a.c_ts - b.c_ts AS d FROM tm a, tm b", "0A000", why + "a query result column"},
 		{"SELECT count(*) AS n FROM tm GROUP BY " + df, "0A000", why + "a GROUP BY key"},
 		{"SELECT id FROM tm ORDER BY " + df, "0A000", why + "an ORDER BY key"},
-		{"SELECT sum(" + df + ") AS s FROM tm", "0A000", why + "an argument of sum"},
+		// #1680c: the bare form's result column is the statement's own (a
+		// refusal held at every stage, named first); the argument's refusal
+		// is pinned under the display cast.
+		{"SELECT sum(" + df + ") AS s FROM tm", "0A000", why + "a query result column"},
+		{"SELECT CAST(sum(" + df + ") AS TEXT) AS s FROM tm", "0A000", why + "an argument of sum"},
 		{"SELECT count(" + df + ") AS s FROM tm", "0A000", why + "an argument of count"},
-		{"SELECT max(" + df + ") AS s FROM tm", "0A000", why + "an argument of max"},
-		{"SELECT id, lag(" + df + ") OVER (ORDER BY id) AS v FROM tm", "0A000", why + "an argument of lag"},
+		{"SELECT max(" + df + ") AS s FROM tm", "0A000", why + "a query result column"},
+		{"SELECT CAST(max(" + df + ") AS TEXT) AS s FROM tm", "0A000", why + "an argument of max"},
+		{"SELECT id, lag(" + df + ") OVER (ORDER BY id) AS v FROM tm", "0A000", "query result column"},
+		{"SELECT id, CAST(lag(" + df + ") OVER (ORDER BY id) AS TEXT) AS v FROM tm", "0A000", why + "an argument of lag"},
 		{"SELECT id, sum(id) OVER (ORDER BY " + df + ") AS v FROM tm", "0A000", why + "a window ORDER BY key"},
 		{"SELECT id FROM tm WHERE extract(epoch FROM " + df + ") > 1000", "0A000", why + "an argument of extract"},
 		{"SELECT date_part('epoch', " + df + ") AS e FROM tm", "0A000", why + "an argument of date_part"},

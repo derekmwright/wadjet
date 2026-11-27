@@ -39,12 +39,12 @@ order/desc	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot ye
 order/ascNullsFirst	*	refusal	ERR 0A000 {interval-key}: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 order/descNullsLast	*	refusal	ERR 0A000 {interval-key}: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 order/idDesc	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-order/minMax	*	refusal	ERR 0A000 {interval-aggregate}: min over an interval argument is not supported
-order/minMaxFinite	*	refusal	ERR 0A000 {interval-aggregate}: min over an interval argument is not supported
+order/minMax	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+order/minMaxFinite	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 order/minTieFwd	*	error	ERR 42601: syntax error at or near ")"
 order/minTieRev	*	error	ERR 42601: syntax error at or near ")"
-order/minTieTable	*	refusal	ERR 0A000 {interval-aggregate}: min over an interval argument is not supported
-order/greatestTie	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+order/minTieTable	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+order/greatestTie	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 order/topN	*	refusal	ERR 0A000 {interval-key}: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 order/wrap	*	refusal	ERR 0A000 {interval-key}: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 filter/eq	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported

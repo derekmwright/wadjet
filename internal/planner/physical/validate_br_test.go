@@ -358,7 +358,9 @@ func TestArcBRAggregateArgumentClassMatchesPostgres(t *testing.T) {
 		// accumulator, and an interval aggregate argument is refused at plan
 		// time on every arm (#1713c round 3). It was bound here and summed
 		// the float8 0 / NULL.
-		brCell{"SELECT SUM(CAST(customer AS INTERVAL)) AS v FROM lat_ord", "0A000", "sum over an interval argument is not supported"},
+		brCell{"SELECT CAST(SUM(CAST(customer AS INTERVAL)) AS TEXT) AS v FROM lat_ord", "0A000", "sum over an interval argument is not supported"},
+		// #1680c: bare, the interval result column is named first.
+		brCell{"SELECT SUM(CAST(customer AS INTERVAL)) AS v FROM lat_ord", "0A000", "query result column"},
 		brCell{"SELECT max_by(c_row, id) AS v FROM tm", "", ""},
 		brCell{"SELECT percentile_cont(0.5, c_f64) AS v FROM tm", "", ""},
 		brCell{"SELECT quantile_cont(c_str, 0.5) AS v FROM tm", "42883", "function quantile_cont(text"},

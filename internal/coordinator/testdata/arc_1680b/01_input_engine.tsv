@@ -5,8 +5,8 @@ lit/1/1 day 2 hours	*	error	ERR 22007: invalid input syntax for type interval: "
 lit/2/1 year 2 months 3 days 4 hours 5 minutes 6 seconds	*	error	ERR 22007: invalid input syntax for type interval: "1 year 2 months 3 days 4 hours 5 minutes 6 seconds"
 lit/3/1-2	*	error	ERR 42601: syntax error at or near "AS"
 lit/4/-1-2	*	error	ERR 42601: syntax error at or near "AS"
-lit/5/3 4:05:06	*	refusal	ERR 0A000 {interval-unit}: interval unit "4:05:06" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-lit/6/-3 -4:05:06	*	refusal	ERR 0A000 {interval-unit}: interval unit "-4:05:06" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+lit/5/3 4:05:06	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+lit/6/-3 -4:05:06	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 lit/7/1-2 3 4:05:06	*	error	ERR 22007: invalid input syntax for type interval: "1-2 3 4:05:06"
 lit/8/4:05:06	*	error	ERR 42601: syntax error at or near "AS"
 lit/9/4:05	*	error	ERR 42601: syntax error at or near "AS"
@@ -42,16 +42,16 @@ lit/38/1.0333333 months	*	error	ERR 22007: invalid input syntax for type interva
 lit/39/-1.5 months	*	error	ERR 22007: invalid input syntax for type interval: "-1.5 months"
 lit/40/-1.5 days	*	error	ERR 22007: invalid input syntax for type interval: "-1.5 days"
 lit/41/1.5 centuries	*	error	ERR 22007: invalid input syntax for type interval: "1.5 centuries"
-lit/42/1 decade	*	refusal	ERR 0A000 {interval-unit}: interval unit "decade" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-lit/43/1 century	*	refusal	ERR 0A000 {interval-unit}: interval unit "century" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-lit/44/1 millennium	*	refusal	ERR 0A000 {interval-unit}: interval unit "millennium" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+lit/42/1 decade	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+lit/43/1 century	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+lit/44/1 millennium	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 lit/45/10 weeks	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 lit/46/1.000001 seconds	*	error	ERR 22007: invalid input syntax for type interval: "1.000001 seconds"
 lit/47/0.0000005 seconds	*	error	ERR 22007: invalid input syntax for type interval: "0.0000005 seconds"
 lit/48/0.0000015 seconds	*	error	ERR 22007: invalid input syntax for type interval: "0.0000015 seconds"
 lit/49/0.0000025 seconds	*	error	ERR 22007: invalid input syntax for type interval: "0.0000025 seconds"
-lit/50/1 microsecond	*	refusal	ERR 0A000 {interval-unit}: interval unit "microsecond" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-lit/51/1 millisecond	*	refusal	ERR 0A000 {interval-unit}: interval unit "millisecond" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+lit/50/1 microsecond	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+lit/51/1 millisecond	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 lit/52/1.5 microseconds	*	error	ERR 22007: invalid input syntax for type interval: "1.5 microseconds"
 lit/53/1:2:3.123456789	*	error	ERR 42601: syntax error at or near "AS"
 lit/54/-0.000001 seconds	*	error	ERR 22007: invalid input syntax for type interval: "-0.000001 seconds"
@@ -141,12 +141,12 @@ cast/fromTime	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot
 cast/toTime	*	error	ERR 42601: syntax error at or near "AS"
 cast/toBigint	*	pg-error	ERR 42846: cannot cast type interval to bigint
 cast/fromDuration	*	wrong-sqlstate	ERR 42846: cannot cast type bigint to interval
-make/all	*	error	ERR 42883: unknown function: make_interval
+make/all	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 make/days	*	error	ERR 42601: syntax error at or near ">"
 make/secs	*	error	ERR 42601: syntax error at or near ">"
 make/negMins	*	error	ERR 42601: syntax error at or near ">"
 make/weeks	*	error	ERR 42601: syntax error at or near ">"
-make/zero	*	error	ERR 42883: unknown function: make_interval
+make/zero	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 make/yearsOver	*	wrong-sqlstate	ERR 42601: syntax error at or near ">"
 make/secsInf	*	wrong-sqlstate	ERR 42601: syntax error at or near ">"
 make/null	*	error	ERR 42601: syntax error at or near ">"

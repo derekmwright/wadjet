@@ -42,7 +42,7 @@ bin/month	C	pg-error 0A000	met	-
 bin/zero	C	pg-error 22008	unmet	-
 bin/neg	C	pg-error 22008	unmet	-
 bin/us	-	not-parsed 42601	met	-
-series/month	A	refusal function-generate_series	unmet	-
+series/month	A	refusal function-generate_series	met	-
 series/mixed	-	not-parsed 22007	met	-
 series/neg	A	refusal function-generate_series	met	-
 series/date	A	refusal function-generate_series	met	-

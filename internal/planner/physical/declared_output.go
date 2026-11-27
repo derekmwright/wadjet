@@ -1104,6 +1104,9 @@ func strictIntArithColsThroughRenames(n *logical.Node) map[string]bool {
 // so every lookup missed, the projection kept its STRING default, and a ROW
 // field path was declared STRING whatever its real type (#568).
 type ColDecls struct {
+	// ivLineage holds the names whose slot is declared interval by lineage
+	// (validate_interval_lineage.go, #1680c), read by the interval rule.
+	ivLineage map[string]bool
 	// setOpRoles preserves a forwarded result's marked, neutral or veto role.
 	setOpRoles map[string]setOpMarkRole
 	Types      map[string]parquet.TypeID
