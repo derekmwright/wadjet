@@ -5184,7 +5184,10 @@ and never leaves it (#1713d):
   `SET TimeZone` / `SET TIME ZONE` naming any zone but UTC (or a name
   PostgreSQL runs at offset zero: `Etc/UTC`, `GMT`, `Zulu`, `+00`, …) is
   refused `0A000`; it was accepted and ignored, so a session in New York
-  answered as if in UTC. A `TIMESTAMPTZ` literal or a cast of text to
+  answered as if in UTC. A zone PostgreSQL does not know (`Not/AZone`, `Z`)
+  is its own `22023`. The embedded, HTTP and gRPC doors have no `SET` at all
+  (`42601`). `AT TIME ZONE` with a non-UTC zone known only at run time (a
+  column) is refused `0A000`; it answered NULL. A `TIMESTAMPTZ` literal or a cast of text to
   `TIMESTAMPTZ` is the instant its offset names (`TIMESTAMPTZ
   '2024-07-01 12:00:00+05:30'` is `2024-07-01 06:30:00`; the offset used to
   be discarded), declared `timestamp` and printed without `+00` (there is no

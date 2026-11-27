@@ -25,7 +25,8 @@ FROM ts), while an instant-preserving conversion leaves it equal.
 So the zone is restricted to UTC, the case where the two readings coincide:
 an instant and its UTC wall clock are the same count of seconds since the
 epoch, and the EXTRACT(EPOCH FROM …) round trip is exact. Every other zone
-is rejected rather than converted with a wrong sign — as a compile-time
-error when the zone is a literal (see compileFuncCallNode) and as NULL here
-when it is not. Widening this means giving the type system a naive-timestamp
+is rejected rather than converted with a wrong sign — as a parse-time
+error when the zone is a literal (parseAtTimeZone) and, when it is not, as
+the per-row 0A000 refusal `timezone` raised here (#1680 line d; until then
+it answered NULL, where PostgreSQL answers the converted value). Widening this means giving the type system a naive-timestamp
 type first.
