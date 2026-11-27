@@ -1016,13 +1016,21 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	if err != nil {
 		return fmt.Errorf("extract: %w", err)
 	}
+	planner := physical.NewPlanner(cat)
+	// The binder again, over the text the coordinator validated: it is where
+	// a quoted literal beside a timestamptz by lineage is read as one — its
+	// text rewritten on the AST this plan is built from (#1680 line d,
+	// validate_timestamptz_lineage.go). The coordinator's own rewrite does
+	// not survive the hop, which carries the statement's original text.
+	if err := planner.ValidateColumns(ctx, selectInfo); err != nil {
+		return fmt.Errorf("validate: %w", err)
+	}
 
 	// Build and optimize logical plan
 	logicalPlan, err := logical.BuildFromSelect(selectInfo)
 	if err != nil {
 		return fmt.Errorf("logical plan: %w", err)
 	}
-	planner := physical.NewPlanner(cat)
 	// The coordinator's planner option, not this worker process's: the task
 	// was shaped by a plan the coordinator made under it, and re-optimizing
 	// the same text under a different one reorders the joins underneath a
