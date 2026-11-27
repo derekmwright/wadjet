@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/derekmwright/wadjet/internal/optswitch"
 )
 
 // The #1680 line d matrix: a timestamptz value against PostgreSQL 17.11, each
@@ -393,4 +395,56 @@ func TestArc1680dTimestamptzEveryArm(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestArc1680dUnderEveryKillSwitch: the line-d answers and refusals are
+// decided before any optimization, so turning any one kill switch off moves
+// no cell's answer on the single-process or the DAG arm — the refusal
+// (timestamptz-zoned-literal) keeps its SQLSTATE, and every value cell its
+// value (docs/testing/GATES.md, the kill-switch invariance of a refusal).
+func TestArc1680dUnderEveryKillSwitch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: every kill switch over the timestamptz matrix")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	t.Cleanup(cancel)
+	var picked []ejArm
+	for _, a := range ejArms(t, ctx) {
+		if a.name == "single" || a.name == "dag" {
+			picked = append(picked, a)
+		}
+	}
+	base := map[string]string{}
+	for _, a := range picked {
+		for _, c := range tzCells {
+			base[a.name+"|"+c.name] = a.run(tzEngineSQL(c))
+		}
+	}
+	if got := base["single|cmp/tstzLitOfs"]; got != "ERR 0A000" {
+		t.Fatalf("cmp/tstzLitOfs on single = %s, want the refusal", got)
+	}
+	moved := 0
+	for _, tog := range optswitch.All() {
+		prev := tog.Set(false)
+		for _, a := range picked {
+			for _, c := range tzCells {
+				got, want := a.run(tzEngineSQL(c)), base[a.name+"|"+c.name]
+				// With scan-col-sanitize off the stage DAG cannot read a
+				// derived table's computed column ("column \"x\" does not
+				// exist in the input schema"), whatever its type: the same
+				// with an integer CASE in place of the timestamptz one, so
+				// not this line's. It is a loud failure, never an answer.
+				if tog.Name == "scan-col-sanitize" && a.name == "dag" && (c.name == "key/orderBy" || c.name == "key/join") &&
+					strings.Contains(got, "does not exist in the input schema") {
+					continue
+				}
+				if got != want {
+					moved++
+					t.Errorf("%s off, %s on %s:\n  with it  %s\n  without  %s", tog.Name, c.name, a.name, want, got)
+				}
+			}
+		}
+		tog.Set(prev)
+	}
+	t.Logf("%d cells x %d kill switches x %d arms; %d moved", len(tzCells), len(optswitch.All()), len(picked), moved)
 }
