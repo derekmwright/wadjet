@@ -52,25 +52,25 @@ join/nestloop	D	supported	unmet	-
 join/left	D	supported	unmet	-
 join/semi	D	supported	unmet	-
 join/anti	D	supported	unmet	-
-setLit/union/default	-	not-parsed 42601	met	-
-setLit/unionRev/default	-	not-parsed 42601	met	-
+setLit/union/default	-	not-accepted 42601	met	-
+setLit/unionRev/default	-	not-accepted 42601	met	-
 setLit/intersect/default	A	refusal bare-interval-result	met	-
 setLit/except/default	A	refusal bare-interval-result	met	-
 setLit/exceptAll/default	-	not-accepted 42601	met	-
 setLit/intersectAll/default	-	not-accepted 42601	met	-
-setLit/valuesDistinct/default	-	not-parsed 42601	met	-
-setLit/union/sortagg	-	not-parsed 42601	met	-
-setLit/unionRev/sortagg	-	not-parsed 42601	met	-
+setLit/valuesDistinct/default	-	not-accepted 42601	met	-
+setLit/union/sortagg	-	not-accepted 42601	met	-
+setLit/unionRev/sortagg	-	not-accepted 42601	met	-
 setLit/intersect/sortagg	A	refusal bare-interval-result	met	-
 setLit/except/sortagg	A	refusal bare-interval-result	met	-
 setLit/exceptAll/sortagg	-	not-accepted 42601	met	-
 setLit/intersectAll/sortagg	-	not-accepted 42601	met	-
-setLit/valuesDistinct/sortagg	-	not-parsed 42601	met	-
+setLit/valuesDistinct/sortagg	-	not-accepted 42601	met	-
 wrap/group	D	supported	unmet	-
 wrap/join	D	supported	unmet	-
-wrap/hashCollide	-	not-parsed 22007	met	-
+wrap/hashCollide	A	refusal interval-input-form	met	-
 adr0024/intersectNumericSort	C	supported	unmet	-
 adr0024/intersectNumericHash	C	supported	met	-
 array/group	A	refusal container	met	-
-array/eq	-	not-parsed 42601	met	-
+array/eq	-	not-accepted 42601	met	-
 row/group	D	supported	unmet	-

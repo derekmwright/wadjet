@@ -5,11 +5,11 @@ ts/monthClamp	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not su
 ts/monthBack	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 ts/yearLeap	*	agree	a:TIMESTAMP | 2025-02-28 00:00:00
 ts/negMonths	*	refusal	ERR 0A000 {interval-unit}: interval unit "mons" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-ts/orderMD	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 2 days"
-ts/orderMDNeg	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 1 day"
-ts/orderDT	*	error	ERR 22007: invalid input syntax for type interval: "1 day 02:00:00"
-ts/mixedSign	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -1 day"
-ts/mixedSign2	*	error	ERR 22007: invalid input syntax for type interval: "-1 mon +30 days"
+ts/orderMD	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon 2 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+ts/orderMDNeg	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon 1 day" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+ts/orderDT	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 day 02:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+ts/mixedSign	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon -1 day" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+ts/mixedSign2	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1 mon +30 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 ts/hours36	*	agree	a:TIMESTAMP | 2024-02-01 12:00:00
 ts/us	*	error	ERR 42601: syntax error at or near "AS"
 ts/usNeg	*	error	ERR 42601: syntax error at or near "AS"
@@ -22,7 +22,7 @@ ts/infTs	*	error	ERR 42601: syntax error at or near "AS"
 ts/infMinusInf	*	wrong-sqlstate	ERR 42601: syntax error at or near "AS"
 ts/null	*	agree	a:TIMESTAMP,b:TIMESTAMP | NULL,NULL
 ts/commuted	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-date/plus	*	error	ERR 22007: invalid input syntax for type interval: "1 day 01:00:00"
+date/plus	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 day 01:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 date/plusInt	*	agree-value	a:DATE,b:bigint,c:DATE | 2024-03-01,29,2024-02-29
 date/minusDate	*	agree-value	a:bigint,b:bigint | 366,-366
 tz/UTC/day	*	refusal	ERR 0A000 {timestamptz}: timestamptz + interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
@@ -39,7 +39,7 @@ tz/America/New_York/minus	*	refusal	ERR 0A000 {timestamptz}: timestamptz - inter
 tz/America/New_York/roundTrip	*	refusal	ERR 0A000 {timestamptz}: timestamptz + interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 tz/America/New_York/age	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 tz/America/New_York/addFn	*	refusal	ERR 0A000 {timestamptz}: date_add with a time zone or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
-time/plus	*	error	ERR 22007: invalid input syntax for type interval: "1 day 1 mon 00:00:01"
+time/plus	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 day 1 mon 00:00:01" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 time/minusTime	*	refusal	ERR 0A000 {time-type}: TIME arithmetic (-) is not supported: this engine has no TIME type, and a TIME operand is not read as a time of day (ADR-0012 temporal r23)
 time/timetz	*	error	ERR 42601: syntax error at or near "'23:00:00+02'"
 tsdiff/days	*	refusal	ERR 0A000 {bare-interval-result}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
@@ -50,13 +50,13 @@ tsdiff/year	*	refusal	ERR 0A000 {bare-interval-result}: a timestamp difference (
 tsdiff/us	*	refusal	ERR 0A000 {timestamp-millisecond-carrier}: an interval operation over a sub-millisecond TIMESTAMP literal is not supported: a TIMESTAMP here holds milliseconds, and the literal has finer digits
 tsdiff/mixedNeg	*	refusal	ERR 0A000 {bare-interval-result}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
 tsdiff/huge	*	wrong-sqlstate	ERR 22007: invalid input syntax for type timestamp: "4713-01-01 00:00:00 BC"
-tsdiff/inf	*	error	ERR 22008: `-` between dates or timestamps is not defined for an infinite timestamp
+tsdiff/inf	*	refusal	ERR 0A000 {bare-interval-result}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
 tsdiff/infInf	*	pg-error	ERR 22008: `-` between dates or timestamps is not defined for an infinite timestamp
-age/basic	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-age/time	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+age/basic	*	refusal	ERR 0A000 {function-age}: age is not supported: PostgreSQL's age answers an interval, which this engine does not compute from timestamps
+age/time	*	refusal	ERR 0A000 {timestamp-millisecond-carrier}: age over a sub-millisecond TIMESTAMP literal is not supported: a TIMESTAMP here holds milliseconds, and the literal has finer digits
 trip/monthEnd	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 trip/diff	*	error	ERR 42883: operator does not exist: timestamp without time zone + double precision
-trip/age	*	error	ERR 42883: unknown function: age (did you mean abs?)
+trip/age	*	refusal	ERR 0A000 {function-age}: age is not supported: PostgreSQL's age answers an interval, which this engine does not compute from timestamps
 trip/compareVsApply	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 trip/assoc	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 ddl/create/iv80_ts	writer	ok	ok

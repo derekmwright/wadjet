@@ -1,21 +1,21 @@
 # This engine's disposition of the #1680b interval corpus, section 01_input, per arm (TestArc1680bRecordEngine; held by TestArc1680bEngineBaseline).
 # Settings are PostgreSQL's only: the engine runs each statement as written. A TIMESTAMP value is printed as text (iv80EngineText). name<TAB>arms<TAB>class<TAB>answer
 lit/0/1 day	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-lit/1/1 day 2 hours	*	error	ERR 22007: invalid input syntax for type interval: "1 day 2 hours"
-lit/2/1 year 2 months 3 days 4 hours 5 minutes 6 seconds	*	error	ERR 22007: invalid input syntax for type interval: "1 year 2 months 3 days 4 hours 5 minutes 6 seconds"
+lit/1/1 day 2 hours	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 day 2 hours" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/2/1 year 2 months 3 days 4 hours 5 minutes 6 seconds	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 2 months 3 days 4 hours 5 minutes 6 seconds" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 lit/3/1-2	*	error	ERR 42601: syntax error at or near "AS"
 lit/4/-1-2	*	error	ERR 42601: syntax error at or near "AS"
 lit/5/3 4:05:06	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 lit/6/-3 -4:05:06	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-lit/7/1-2 3 4:05:06	*	error	ERR 22007: invalid input syntax for type interval: "1-2 3 4:05:06"
+lit/7/1-2 3 4:05:06	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1-2 3 4:05:06" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 lit/8/4:05:06	*	error	ERR 42601: syntax error at or near "AS"
 lit/9/4:05	*	error	ERR 42601: syntax error at or near "AS"
 lit/10/-4:05:06	*	error	ERR 42601: syntax error at or near "AS"
-lit/11/1 day 25:00:00	*	error	ERR 22007: invalid input syntax for type interval: "1 day 25:00:00"
-lit/12/-1 day +25:00:00	*	error	ERR 22007: invalid input syntax for type interval: "-1 day +25:00:00"
-lit/13/1 mon -30 days	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -30 days"
-lit/14/-1 year -2 mons +3 days	*	error	ERR 22007: invalid input syntax for type interval: "-1 year -2 mons +3 days"
-lit/15/1 year -1 second	*	error	ERR 22007: invalid input syntax for type interval: "1 year -1 second"
+lit/11/1 day 25:00:00	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 day 25:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/12/-1 day +25:00:00	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1 day +25:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/13/1 mon -30 days	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon -30 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/14/-1 year -2 mons +3 days	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1 year -2 mons +3 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/15/1 year -1 second	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year -1 second" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 lit/16/P1Y2M3DT4H5M6S	*	error	ERR 42601: syntax error at or near "AS"
 lit/17/P1Y2M3DT4H5M6.5S	*	error	ERR 42601: syntax error at or near "AS"
 lit/18/PT36H	*	error	ERR 42601: syntax error at or near "AS"
@@ -26,35 +26,35 @@ lit/22/-P1D	*	wrong-sqlstate	ERR 42601: syntax error at or near "AS"
 lit/23/P-1DT-1H	*	error	ERR 42601: syntax error at or near "AS"
 lit/24/P0001-02-03T04:05:06	*	error	ERR 42601: syntax error at or near "AS"
 lit/25/PT0S	*	error	ERR 42601: syntax error at or near "AS"
-lit/26/@ 1 year 2 mons	*	error	ERR 22007: invalid input syntax for type interval: "@ 1 year 2 mons"
-lit/27/@ 1 year 2 mons ago	*	error	ERR 22007: invalid input syntax for type interval: "@ 1 year 2 mons ago"
-lit/28/1 day ago	*	error	ERR 22007: invalid input syntax for type interval: "1 day ago"
-lit/29/-1 day ago	*	error	ERR 22007: invalid input syntax for type interval: "-1 day ago"
-lit/30/@ 3 days 4 hours 5 mins 6 secs	*	error	ERR 22007: invalid input syntax for type interval: "@ 3 days 4 hours 5 mins 6 secs"
-lit/31/1.5 months	*	error	ERR 22007: invalid input syntax for type interval: "1.5 months"
-lit/32/1.5 days	*	error	ERR 22007: invalid input syntax for type interval: "1.5 days"
-lit/33/1.5 years	*	error	ERR 22007: invalid input syntax for type interval: "1.5 years"
-lit/34/0.5 weeks	*	error	ERR 22007: invalid input syntax for type interval: "0.5 weeks"
-lit/35/1.5 hours	*	error	ERR 22007: invalid input syntax for type interval: "1.5 hours"
-lit/36/1.5 minutes	*	error	ERR 22007: invalid input syntax for type interval: "1.5 minutes"
-lit/37/0.1 months	*	error	ERR 22007: invalid input syntax for type interval: "0.1 months"
-lit/38/1.0333333 months	*	error	ERR 22007: invalid input syntax for type interval: "1.0333333 months"
-lit/39/-1.5 months	*	error	ERR 22007: invalid input syntax for type interval: "-1.5 months"
-lit/40/-1.5 days	*	error	ERR 22007: invalid input syntax for type interval: "-1.5 days"
-lit/41/1.5 centuries	*	error	ERR 22007: invalid input syntax for type interval: "1.5 centuries"
+lit/26/@ 1 year 2 mons	*	refusal	ERR 0A000 {interval-input-form}: interval literal "@ 1 year 2 mons" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/27/@ 1 year 2 mons ago	*	refusal	ERR 0A000 {interval-input-form}: interval literal "@ 1 year 2 mons ago" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/28/1 day ago	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 day ago" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/29/-1 day ago	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1 day ago" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/30/@ 3 days 4 hours 5 mins 6 secs	*	refusal	ERR 0A000 {interval-input-form}: interval literal "@ 3 days 4 hours 5 mins 6 secs" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/31/1.5 months	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.5 months" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/32/1.5 days	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.5 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/33/1.5 years	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.5 years" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/34/0.5 weeks	*	refusal	ERR 0A000 {interval-input-form}: interval literal "0.5 weeks" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/35/1.5 hours	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.5 hours" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/36/1.5 minutes	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.5 minutes" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/37/0.1 months	*	refusal	ERR 0A000 {interval-input-form}: interval literal "0.1 months" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/38/1.0333333 months	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.0333333 months" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/39/-1.5 months	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1.5 months" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/40/-1.5 days	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1.5 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/41/1.5 centuries	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.5 centuries" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 lit/42/1 decade	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 lit/43/1 century	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 lit/44/1 millennium	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 lit/45/10 weeks	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-lit/46/1.000001 seconds	*	error	ERR 22007: invalid input syntax for type interval: "1.000001 seconds"
-lit/47/0.0000005 seconds	*	error	ERR 22007: invalid input syntax for type interval: "0.0000005 seconds"
-lit/48/0.0000015 seconds	*	error	ERR 22007: invalid input syntax for type interval: "0.0000015 seconds"
-lit/49/0.0000025 seconds	*	error	ERR 22007: invalid input syntax for type interval: "0.0000025 seconds"
+lit/46/1.000001 seconds	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.000001 seconds" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/47/0.0000005 seconds	*	refusal	ERR 0A000 {interval-input-form}: interval literal "0.0000005 seconds" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/48/0.0000015 seconds	*	refusal	ERR 0A000 {interval-input-form}: interval literal "0.0000015 seconds" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/49/0.0000025 seconds	*	refusal	ERR 0A000 {interval-input-form}: interval literal "0.0000025 seconds" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 lit/50/1 microsecond	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 lit/51/1 millisecond	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-lit/52/1.5 microseconds	*	error	ERR 22007: invalid input syntax for type interval: "1.5 microseconds"
+lit/52/1.5 microseconds	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.5 microseconds" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 lit/53/1:2:3.123456789	*	error	ERR 42601: syntax error at or near "AS"
-lit/54/-0.000001 seconds	*	error	ERR 22007: invalid input syntax for type interval: "-0.000001 seconds"
+lit/54/-0.000001 seconds	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-0.000001 seconds" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 lit/55/00:00:00.000001	*	error	ERR 42601: syntax error at or near "AS"
 lit/56/0	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 lit/57/0 seconds	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
@@ -63,9 +63,9 @@ lit/59/-0 days	*	refusal	ERR 0A000 {bare-interval-result}: interval values canno
 lit/60/100	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 lit/61/1.5	*	error	ERR 42601: syntax error at or near "AS"
 lit/62/-100	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-lit/63/178956970 years 7 months	*	error	ERR 22007: invalid input syntax for type interval: "178956970 years 7 months"
+lit/63/178956970 years 7 months	*	refusal	ERR 0A000 {interval-input-form}: interval literal "178956970 years 7 months" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 lit/64/178956970 years 8 months	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "178956970 years 8 months"
-lit/65/-178956970 years -8 months	*	error	ERR 22007: invalid input syntax for type interval: "-178956970 years -8 months"
+lit/65/-178956970 years -8 months	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-178956970 years -8 months" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 lit/66/-178956970 years -9 months	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "-178956970 years -9 months"
 lit/67/2147483647 months	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 lit/68/2147483648 months	*	pg-error	ERR 22015: interval field value out of range: "2147483648 months"
@@ -79,7 +79,7 @@ lit/75/2562047788:00:54.775807	*	error	ERR 42601: syntax error at or near "AS"
 lit/76/2562047788:00:54.775808	*	wrong-sqlstate	ERR 42601: syntax error at or near "AS"
 lit/77/-2562047788:00:54.775808	*	wrong-sqlstate	ERR 42601: syntax error at or near "AS"
 lit/78/-2562047788:00:54.775809	*	wrong-sqlstate	ERR 42601: syntax error at or near "AS"
-lit/79/2147483647 months 2147483647 days 2562047788:00:54.775807	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 months 2147483647 days 2562047788:00:54.775807"
+lit/79/2147483647 months 2147483647 days 2562047788:00:54.775807	*	refusal	ERR 0A000 {interval-input-form}: interval literal "2147483647 months 2147483647 days 2562047788:00:54.775807" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 lit/80/-2147483648 months -2147483648 days -2562047788:00:54.775808	*	pg-error	ERR 22007: invalid input syntax for type interval: "-2147483648 months -2147483648 days -2562047788:00:54.775808"
 lit/81/infinity	*	error	ERR 42601: syntax error at or near "AS"
 lit/82/-infinity	*	error	ERR 42601: syntax error at or near "AS"
@@ -110,28 +110,28 @@ std/dm	*	error	ERR 42601: syntax error at or near "TO"
 std/hm	*	error	ERR 42601: syntax error at or near "HOUR"
 std/ms	*	error	ERR 42601: syntax error at or near "MINUTE"
 std/hs	*	error	ERR 42601: syntax error at or near "HOUR"
-std/dayDropsTime	*	error	ERR 22007: invalid input syntax for type interval: "1 day 2 hours 3 minutes"
-std/yearDropsMonths	*	error	ERR 22007: invalid input syntax for type interval: "1 year 2 months"
-std/monthDropsDays	*	error	ERR 22007: invalid input syntax for type interval: "1 year 2 months 3 days"
-std/hourDropsMinutes	*	error	ERR 22007: invalid input syntax for type interval: "1 day 02:30:45"
+std/dayDropsTime	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 day 2 hours 3 minutes" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+std/yearDropsMonths	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 2 months" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+std/monthDropsDays	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 2 months 3 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+std/hourDropsMinutes	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 day 02:30:45" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 std/yearFrac	*	error	ERR 42601: syntax error at or near "YEAR"
 std/dayFrac	*	error	ERR 42601: syntax error at or near "DAY"
 std/hourNeg	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 std/yearOver	*	pg-error	ERR 22008: interval out of range
 std/dayOver	*	pg-error	ERR 22015: interval field value out of range: "2147483648 days"
-prec/iv3	*	error	ERR 22007: invalid input syntax for type interval: "1.123456 seconds"
-prec/iv0	*	error	ERR 22007: invalid input syntax for type interval: "1.5 seconds"
+prec/iv3	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.123456 seconds" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+prec/iv0	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.5 seconds" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 prec/literal3	*	error	ERR 42601: syntax error at or near "("
 prec/second3	*	error	ERR 42601: syntax error at or near "SECOND"
 prec/ds2	*	error	ERR 42601: syntax error at or near "TO"
-prec/iv6	*	error	ERR 22007: invalid input syntax for type interval: "1.1234567 seconds"
+prec/iv6	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.1234567 seconds" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 prec/iv7	*	refusal	ERR 0A000 {typmod}: an interval precision or field qualifier (interval(7)) is not supported
-prec/castDay	*	error	ERR 22007: invalid input syntax for type interval: "1 day 02:00:00"
-prec/castYear	*	error	ERR 22007: invalid input syntax for type interval: "14 months 3 days"
-prec/castMonthTyp	*	error	ERR 22007: invalid input syntax for type interval: "14 months 3 days"
+prec/castDay	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 day 02:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+prec/castYear	*	refusal	ERR 0A000 {interval-input-form}: interval literal "14 months 3 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+prec/castMonthTyp	*	refusal	ERR 0A000 {interval-input-form}: interval literal "14 months 3 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 cast/fromText	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 cast/colon	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-cast/toText	*	error	ERR 22007: invalid input syntax for type interval: "1 day 2 hours"
+cast/toText	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 day 2 hours" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 cast/toVarchar	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 cast/toChar	*	refusal	ERR 0A000 {char-display}: an interval cast to char(10) is not supported: only TEXT and VARCHAR display an interval (PostgreSQL blank-pads a character(n) value this engine does not)
 cast/toTextNull	*	agree	a:text | NULL

@@ -64,6 +64,15 @@ var iv80Reasons = map[string]string{
 	"timestamp-date-difference": "timestamp - date / date - timestamp, an interval in PostgreSQL the engine does not compute (the binder's named refusal)",
 	"interval-extract":          "EXTRACT over an interval argument (the interim's refusal; stage C admits it)",
 	"interval-opaque-value":     "an interval value the engine cannot hold or apply, decided at run time from the row (the interim's refusal)",
+	// The rulings on 1680c r4 (rule 4: an untruthful code at an existing
+	// raise point becomes the named refusal; rule 2: the earliest truthful
+	// rule):
+	"function-age":            "age(...), a function PostgreSQL has and this engine does not (raised where unknown function was; age is not declared an interval producer)",
+	"interval-input-form":     "an INTERVAL literal PostgreSQL accepts in a form the literal reader cannot read (raised where 22007 was, at the parse)",
+	"interval-numeric-factor": "interval * / a NUMERIC value (raised where operator does not exist: interval * text was)",
+	"dml-values-subquery":     "a subquery in an INSERT ... VALUES expression (the write door's statement-shape refusal)",
+	"dml-set-subquery":        "a subquery in an UPDATE's SET list (the write door's statement-shape refusal)",
+	"merge-on-equality":       "a MERGE ON that is not an equality between two columns (the write door's statement-shape refusal)",
 }
 
 // iv80InternalFailure: an engine answer no outcome may accept, decided by

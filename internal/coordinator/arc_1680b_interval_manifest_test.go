@@ -9,9 +9,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-
-	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
-	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // The stage manifest (#1680b round 2; the judge's correction 3, the
@@ -39,9 +36,10 @@ import (
 // TestArc1680bStageManifest. A stage that lands adds its letter to
 // iv80LandedStages; from then on every cell it owns must be met.
 
-// iv80LandedStages are the stages that have landed (none: this item writes
-// no engine code).
-const iv80LandedStages = ""
+// iv80LandedStages are the stages that have landed: A (#1680c, declared
+// lineage and default-deny guards, nothing admitted), every cell it owns met
+// on every arm.
+const iv80LandedStages = "A"
 
 // iv80Stages are the stages of the definition's §9. B owns no corpus cell
 // (its gates are the carrier's and the transport's own tests); F owns none
@@ -354,12 +352,18 @@ func iv80Meets(outcome, engine, pg string, x iv80Check) bool {
 		return ok && strings.HasPrefix(engine, "ERR ") && code == "0A000" && iv80ErrIdentity(engine) == arg
 	case "rep-divergence":
 		return x.rep != nil && iv80SameAnswer(engine, iv80RepAnswer(pg, *x.rep), x.ordered)
-	case "not-accepted":
-		// Outside the program (the rulings on 1680c r3): the statement form
-		// is refused with that SQLSTATE before any interval rule, so the
-		// answer carries no refusal identity of the program.
+	case "not-accepted", "no-capability":
+		// Outside the program (rule 6 of the rulings on 1680c): the
+		// statement form, or a capability missing for every type, is refused
+		// with that SQLSTATE before any interval rule, so the answer carries
+		// no refusal identity of the program. Pinned at that SQLSTATE: a
+		// change that lets it answer, or refuses it otherwise, shows.
 		code, _ := iv80ErrCode(engine)
 		return strings.HasPrefix(engine, "ERR ") && code == arg && iv80ErrIdentity(engine) == ""
+	case "not-interval":
+		// Rule 6, third kind: not an interval operation, pinned answering
+		// (its exact answer, wrong on main, is the engine baseline's).
+		return !strings.HasPrefix(engine, "ERR ") && !strings.HasPrefix(engine, "PANIC")
 	}
 	return false
 }
@@ -427,127 +431,166 @@ func iv80Manifest(t *testing.T, sec iv80Section) []string {
 }
 
 // iv80OutsideStage is the owner of a cell outside the program: no stage
-// owns it and no stage's landing requires it (ruling 2 of 1680c r3).
+// owns it and no stage's landing requires it (rule 6 of the architect's
+// rulings on 1680c, 1680c_rulings.md).
 const iv80OutsideStage = "-"
 
-// iv80Ruled applies the architect's three rulings on 1680c's conflicts (r3)
-// to a cell the rules gave an A refusal that today's baseline does not meet,
-// decided by the baseline when the manifest is recorded:
+// The architect's rulings on 1680c (complete and binding; ADR-0052 §8, the
+// record's §9). The principle, rules 1 to 7:
 //
-//  1. right on main: every arm already answers PostgreSQL's value and type,
-//     so the cell's outcome is supported (owned by A: nothing it needs waits
-//     for a later stage) and stage A must keep it right;
-//  2. not parsed: this engine's SQL parser (plansql.Parse, the statement's
-//     first boundary on every arm, the interval literal reader included)
-//     rejects the statement, so it is outside the program: outcome
-//     "not-parsed <SQLSTATE>" with no owning stage. It is "met" while every
-//     arm still refuses it with the parser's SQLSTATE, so a later change that
-//     lets it answer, or answers it differently, shows;
-//  3. the TIME cells (TIME - TIME, DATE ± TIME): unchanged, an A refusal
-//     time-type (they answer wrong on main).
+//  1. a statement that returns PostgreSQL's value AND declared type on main,
+//     on every arm, stays answering: its cell is supported, owned by A;
+//  2. a statement that must be refused names the reason of the EARLIEST rule
+//     that TRUTHFULLY applies to it, by measurement;
+//  3. where PostgreSQL itself errors, its SQLSTATE is the outcome, and no
+//     capability refusal may pre-empt it;
+//  4. "operator does not exist", "function does not exist" / "unknown
+//     function", or an out-of-range / invalid-value error raised for
+//     something PostgreSQL accepts and answers is untruthful: at the same
+//     raise point it becomes the named capability refusal (a change of
+//     message and code, never a lifted check);
+//  5. a statement refused on main stays refused, its SQLSTATE moving only to
+//     the outcome rules 2 to 4 give;
+//  6. a statement outside the interval program leaves the stage manifest,
+//     pinned at its current behaviour on every arm and owned by no stage, of
+//     one of three kinds: not accepted as a statement form (a 42601 raised at
+//     or after the parse: "not-accepted 42601"); a capability the engine
+//     lacks for EVERY type ("no-capability <SQLSTATE>"); not an interval
+//     operation ("not-interval", met while every arm answers; its answer is
+//     the engine baseline's);
+//  7. a later-stage cell keeps its recorded disposition, except where rule 4
+//     at a shared raise point moves it from one refusal to another (listed
+//     in the result note, its later-stage outcome unchanged).
 //
-// An IntervalStyle cell is decided at the door (the SET), never by its
-// statement, so neither ruling touches it. Every other cell is unchanged.
+// iv80Ruled applies them to a cell, decided by the baseline when the manifest
+// is recorded, in this order: a cell the rulings name (iv80Rulings); then,
+// for a cell the rules (iv80ManifestOutcome) give an A refusal, rule 6's
+// first kind (every arm a 42601 without a refusal identity), rule 3
+// (PostgreSQL errors: pg-error, owned by A where today's baseline already
+// meets it, else by the earliest stage that admits what it needs), rule 1
+// (right on main), and rule 2 for a refusal raised at an earlier boundary
+// than the rules' reason (iv80EarlierRules: every arm carries that one
+// identity). An IntervalStyle cell is decided at the door (the SET) and is
+// never touched.
 func iv80Ruled(key string, c iv80Cell, outcome, stage, now string, eng []string, pg string, x iv80Check) (string, string, string) {
-	if r, ok := iv80R4Rulings[key]; ok {
-		return iv80ApplyR4(r, eng, pg, x)
+	if r, ok := iv80Rulings[key]; ok {
+		return iv80ApplyRuling(r, eng, pg, x)
 	}
-	if stage != "A" || !strings.HasPrefix(outcome, "refusal ") || now == "met" || iv80CellStyle(c) != "" || len(eng) == 0 {
+	if stage != "A" || !strings.HasPrefix(outcome, "refusal ") || iv80CellStyle(c) != "" || len(eng) == 0 {
 		return outcome, stage, now
 	}
-	right := true
+	answers := make([]string, 0, len(eng))
 	for _, l := range eng {
 		f := strings.SplitN(l, "\t", 3)
-		if len(f) != 3 || !iv80Meets("supported", iv80Unescape(f[2]), pg, x) {
-			right = false
+		if len(f) != 3 {
+			return outcome, stage, now
 		}
+		answers = append(answers, iv80Unescape(f[2]))
 	}
-	if right {
+	every := func(o string) bool {
+		for _, a := range answers {
+			if !iv80Meets(o, a, pg, x) {
+				return false
+			}
+		}
+		return true
+	}
+	// Rule 6, first kind: not accepted as a statement form.
+	if now != "met" && every("not-accepted 42601") {
+		return "not-accepted 42601", iv80OutsideStage, "met"
+	}
+	// Rule 3: PostgreSQL's own error is the outcome.
+	if body, _ := iv80Notice(pg); strings.HasPrefix(body, "ERR ") {
+		code, _ := iv80ErrCode(body)
+		o := "pg-error " + code
+		if every(o) {
+			return o, "A", "met"
+		}
+		return o, iv80EarliestStage(c.sql), "unmet"
+	}
+	if now == "met" {
+		return outcome, stage, now
+	}
+	// Rule 1: right on main.
+	if every("supported") {
 		return "supported", "A", "met"
 	}
-	if _, err := plansql.Parse(c.sql); err != nil {
-		code := sqlerr.StateOf(err)
-		now = "met"
-		for _, l := range eng {
-			f := strings.SplitN(l, "\t", 3)
-			if len(f) != 3 {
-				now = "unmet"
-				continue
-			}
-			a := iv80Unescape(f[2])
-			if got, _ := iv80ErrCode(a); !strings.HasPrefix(a, "ERR ") || got != code {
-				now = "unmet"
-			}
+	// Rule 2: the earliest truthful rule, raised at an earlier boundary.
+	for reason := range iv80EarlierRules {
+		if o := "refusal " + reason; every(o) {
+			return o, "A", "met"
 		}
-		return "not-parsed " + code, iv80OutsideStage, now
 	}
 	return outcome, stage, now
 }
 
-// iv80R4Ruling is the architect's ruling on one of the A cells 1680c r3 could
-// not meet: the outcome the principle gives it, and the ruling class.
-type iv80R4Ruling struct {
-	outcome, class string
+// iv80EarlierRules are the named refusals raised at a boundary before the
+// rules' reason can be judged, each with that boundary. Where every arm of
+// an A cell carries one of them, it is the cell's earliest truthful rule
+// (rule 2).
+var iv80EarlierRules = map[string]string{
+	// The INTERVAL literal reader, at the parse: a literal PostgreSQL accepts
+	// in a form the reader cannot read (rule 4 at its 22007).
+	"interval-input-form": "the INTERVAL literal reader (plansql.parseIntervalLiteral), at the parse",
 }
 
-// The principle of the rulings on 1680c r3 (ADR-0052 §8): a cell's outcome
-// is the EARLIEST TRUTHFUL rule that decides it; PostgreSQL's own error is
-// never pre-empted; a code that is untrue of PostgreSQL (42883 for a
-// function or operator it has) becomes a named refusal. A statement the
-// engine does not accept as a statement form (a later parse of a literal it
-// cannot read, a write door's statement-shape refusal) is outside the
-// program: "not-accepted <SQLSTATE>", owned by no stage, met while every arm
-// refuses it with that SQLSTATE and no refusal identity.
+// iv80Ruling is the architect's ruling on a cell: its outcome, its owner and
+// the ruling it applies.
+type iv80Ruling struct {
+	outcome, stage, class string
+}
+
+// The rulings by class and by cell (1680c_rulings.md).
 const (
-	iv80ClassTypmodBare    = "R1 typmod, bare: the qualifier is implemented; the bare result is the truthful rule"
-	iv80ClassTypmodPGError = "R2 typmod, PostgreSQL's own error: never pre-empted"
-	iv80ClassAge           = "R3 age: declared an interval producer; a bare age(...) is a query result column, first in column order"
-	iv80ClassTsDate        = "R4 date - timestamp / timestamp - date: the binder's untrue 42883 becomes the named refusal timestamp-date-difference"
-	iv80ClassTstz          = "R5 timestamptz pairs: the binder's untrue 42883 becomes the timestamptz refusal"
-	iv80ClassNotAccepted   = "R6 not accepted as a statement form"
-	iv80ClassEarliest      = "R7 an earlier named refusal already decides the cell"
+	iv80ClassTypmodBare  = "bare INTERVAL '5' YEAR-style cells: refused as a bare interval result"
+	iv80ClassTypmodPGErr = "std/yearOver, std/dayOver: PostgreSQL's own 22008 / 22015"
+	iv80ClassAge         = "age: every call is the named capability refusal function-age (rule 4), raised where unknown function was, age not declared an interval producer"
+	iv80ClassTsDate      = "date minus timestamp: the binder's check is not lifted; what it says changes (rule 4)"
+	iv80ClassNumericInf  = "numeric-infinity cells that need stage C's EXTRACT: reassigned to C"
+	iv80ClassDMLShape    = "DML-shape write refusals that precede the interval rule: the earlier refusal, which is truthful"
+	iv80ClassRuntime     = "cells decided only at run time from data: the runtime guard's named refusal"
+	iv80ClassNoCapabilty = "rule 6, second kind: a capability the engine lacks for every type (its error is untruthful)"
+	iv80ClassNotInterval = "rule 6, third kind: not an interval operation (wrong on main: a silent wrong answer outside the program)"
 )
 
-// iv80R4Rulings are the cells the rulings decide whose outcome differs from
-// the rules' (iv80ManifestOutcome). The age cells (R3) and the timestamptz
-// cells (R5) whose outcome the rules already give are met by the engine
-// change alone and need no entry; they are listed in 1680c_r4.md.
-var iv80R4Rulings = map[string]iv80R4Ruling{
-	"01_input:std/year":                   {"refusal bare-interval-result", iv80ClassTypmodBare},
-	"01_input:std/month":                  {"refusal bare-interval-result", iv80ClassTypmodBare},
-	"01_input:std/day":                    {"refusal bare-interval-result", iv80ClassTypmodBare},
-	"01_input:std/hour":                   {"refusal bare-interval-result", iv80ClassTypmodBare},
-	"01_input:std/minute":                 {"refusal bare-interval-result", iv80ClassTypmodBare},
-	"01_input:std/second":                 {"refusal bare-interval-result", iv80ClassTypmodBare},
-	"01_input:std/hourNeg":                {"refusal bare-interval-result", iv80ClassTypmodBare},
-	"10_definitions:typmod/minute":        {"refusal bare-interval-result", iv80ClassTypmodBare},
-	"01_input:std/yearOver":               {"pg-error 22008", iv80ClassTypmodPGError},
-	"01_input:std/dayOver":                {"pg-error 22015", iv80ClassTypmodPGError},
-	"06_calendar:age/time":                {"refusal bare-interval-result", iv80ClassAge},
-	"10_definitions:age/timeBorrow":       {"refusal bare-interval-result", iv80ClassAge},
-	"10_definitions:types/tsMinusDate":    {"refusal timestamp-date-difference", iv80ClassTsDate},
-	"10_definitions:types/dateMinusTs":    {"refusal timestamp-date-difference", iv80ClassTsDate},
-	"10_definitions:closure/tsMinusDate":  {"refusal timestamp-date-difference", iv80ClassTsDate},
-	"10_definitions:closure/dateMinusTs":  {"refusal timestamp-date-difference", iv80ClassTsDate},
-	"11_relational:tsdate/bare":           {"refusal timestamp-date-difference", iv80ClassTsDate},
-	"04_keys:setLit/exceptAll/default":    {"not-accepted 42601", iv80ClassNotAccepted},
-	"04_keys:setLit/intersectAll/default": {"not-accepted 42601", iv80ClassNotAccepted},
-	"04_keys:setLit/exceptAll/sortagg":    {"not-accepted 42601", iv80ClassNotAccepted},
-	"04_keys:setLit/intersectAll/sortagg": {"not-accepted 42601", iv80ClassNotAccepted},
-	"12_writes:w/insertSubquery":          {"not-accepted 0A000", iv80ClassNotAccepted},
-	"12_writes:w/updateDerived":           {"not-accepted 0A000", iv80ClassNotAccepted},
-	"12_writes:w/merge":                   {"not-accepted 0A000", iv80ClassNotAccepted},
-	"11_relational:rt/extractDay":         {"refusal interval-extract", iv80ClassEarliest},
-	"11_relational:rt/extractEpoch":       {"refusal interval-extract", iv80ClassEarliest},
-	"06_calendar:rows/plus":               {"refusal interval-opaque-value", iv80ClassEarliest},
+// iv80Rulings are the cells the rulings decide whose outcome or owner
+// differs from what iv80ManifestOutcome / iv80CellStage give.
+var iv80Rulings = map[string]iv80Ruling{
+	"01_input:std/year":                  {"refusal bare-interval-result", "A", iv80ClassTypmodBare},
+	"01_input:std/month":                 {"refusal bare-interval-result", "A", iv80ClassTypmodBare},
+	"01_input:std/day":                   {"refusal bare-interval-result", "A", iv80ClassTypmodBare},
+	"01_input:std/hour":                  {"refusal bare-interval-result", "A", iv80ClassTypmodBare},
+	"01_input:std/minute":                {"refusal bare-interval-result", "A", iv80ClassTypmodBare},
+	"01_input:std/second":                {"refusal bare-interval-result", "A", iv80ClassTypmodBare},
+	"01_input:std/hourNeg":               {"refusal bare-interval-result", "A", iv80ClassTypmodBare},
+	"10_definitions:typmod/minute":       {"refusal bare-interval-result", "A", iv80ClassTypmodBare},
+	"01_input:std/yearOver":              {"pg-error 22008", "A", iv80ClassTypmodPGErr},
+	"01_input:std/dayOver":               {"pg-error 22015", "A", iv80ClassTypmodPGErr},
+	"06_calendar:age/basic":              {"refusal function-age", "A", iv80ClassAge},
+	"10_definitions:age/borrow":          {"refusal function-age", "A", iv80ClassAge},
+	"10_definitions:age/null":            {"refusal function-age", "A", iv80ClassAge},
+	"10_definitions:age/infLeft":         {"refusal function-age", "A", iv80ClassAge},
+	"10_definitions:age/infRight":        {"refusal function-age", "A", iv80ClassAge},
+	"10_definitions:age/infOpposed":      {"refusal function-age", "A", iv80ClassAge},
+	"10_definitions:age/bc":              {"refusal function-age", "A", iv80ClassAge},
+	"10_definitions:types/tsMinusDate":   {"refusal timestamp-date-difference", "A", iv80ClassTsDate},
+	"10_definitions:types/dateMinusTs":   {"refusal timestamp-date-difference", "A", iv80ClassTsDate},
+	"10_definitions:closure/tsMinusDate": {"refusal timestamp-date-difference", "A", iv80ClassTsDate},
+	"10_definitions:closure/dateMinusTs": {"refusal timestamp-date-difference", "A", iv80ClassTsDate},
+	"11_relational:tsdate/bare":          {"refusal timestamp-date-difference", "A", iv80ClassTsDate},
+	"11_relational:rt/extractDay":        {"refusal numeric-infinity", "C", iv80ClassNumericInf},
+	"11_relational:rt/extractEpoch":      {"refusal numeric-infinity", "C", iv80ClassNumericInf},
+	"12_writes:w/insertSubquery":         {"refusal dml-values-subquery", "A", iv80ClassDMLShape},
+	"12_writes:w/updateDerived":          {"refusal dml-set-subquery", "A", iv80ClassDMLShape},
+	"12_writes:w/merge":                  {"refusal merge-on-equality", "A", iv80ClassDMLShape},
+	"06_calendar:rows/plus":              {"refusal interval-opaque-value", "A", iv80ClassRuntime},
+	"07_functions:widthBucketArray":      {"no-capability 42883", iv80OutsideStage, iv80ClassNoCapabilty},
+	"10_definitions:dst/gapInput":        {"not-interval", iv80OutsideStage, iv80ClassNotInterval},
 }
 
-// iv80ApplyR4 is a ruled cell's outcome, owner and whether every arm meets it.
-func iv80ApplyR4(r iv80R4Ruling, eng []string, pg string, x iv80Check) (string, string, string) {
-	stage := "A"
-	if strings.HasPrefix(r.outcome, "not-accepted ") {
-		stage = iv80OutsideStage
-	}
+// iv80ApplyRuling is a ruled cell's outcome, owner and whether every arm
+// meets it.
+func iv80ApplyRuling(r iv80Ruling, eng []string, pg string, x iv80Check) (string, string, string) {
 	now := "met"
 	if len(eng) == 0 {
 		now = "unmet"
@@ -558,7 +601,7 @@ func iv80ApplyR4(r iv80R4Ruling, eng []string, pg string, x iv80Check) (string, 
 			now = "unmet"
 		}
 	}
-	return r.outcome, stage, now
+	return r.outcome, r.stage, now
 }
 
 // iv80SQL is a section's statement by cell name ("" when none).
@@ -602,12 +645,17 @@ func TestArc1680bStageManifest(t *testing.T) {
 		for _, l := range lines {
 			f := strings.Split(l, "\t")
 			name, stage, outcome, now := f[0], f[1], f[2], f[3]
-			if strings.HasPrefix(outcome, "refusal ") && stage != "A" {
-				t.Errorf("%s:%s: a refusal owned by %s, not A", sec.stem, name, stage)
+			key := iv80BaseStem(sec.stem) + ":" + name
+			if r, ruled := iv80Rulings[key]; strings.HasPrefix(outcome, "refusal ") && stage != "A" && !(ruled && r.stage == stage) {
+				t.Errorf("%s:%s: a refusal owned by %s, not A, without a ruling", sec.stem, name, stage)
 			}
 			kind, arg, _ := strings.Cut(outcome, " ")
-			if _, ok := iv80Stages[stage]; !ok && !(stage == iv80OutsideStage && (kind == "not-parsed" || kind == "not-accepted")) {
+			outside := kind == "not-accepted" || kind == "no-capability" || kind == "not-interval"
+			if _, ok := iv80Stages[stage]; !ok && !(stage == iv80OutsideStage && outside) {
 				t.Errorf("%s:%s: unknown stage %q", sec.stem, name, stage)
+			}
+			if outside && stage != iv80OutsideStage {
+				t.Errorf("%s:%s: %s owned by %q: outside the program, owned by no stage", sec.stem, name, kind, stage)
 			}
 			body, _ := iv80Notice(pg[name][0])
 			pgCode, _ := iv80ErrCode(body)
@@ -624,24 +672,16 @@ func TestArc1680bStageManifest(t *testing.T) {
 				if _, ok := iv80Reasons[arg]; !ok {
 					t.Errorf("%s:%s: refusal without a known reason: %q", sec.stem, name, arg)
 				}
-			case "not-parsed":
-				// Outside the program (ruling 2 of 1680c r3): the parser
-				// rejects a statement PostgreSQL parses (it may still raise
-				// its own error running it).
-				if stage != iv80OutsideStage {
-					t.Errorf("%s:%s: not-parsed owned by %q", sec.stem, name, stage)
-				}
-				if _, err := plansql.Parse(iv80SQL(sec, name)); err == nil || sqlerr.StateOf(err) != arg {
-					t.Errorf("%s:%s: not-parsed %s, but the parser answers %v", sec.stem, name, arg, err)
-				}
 			case "not-accepted":
-				// Outside the program (the rulings on 1680c r3), only where
-				// the rulings name the cell and PostgreSQL answered it.
-				if r, ok := iv80R4Rulings[iv80BaseStem(sec.stem)+":"+name]; !ok || r.class != iv80ClassNotAccepted {
-					t.Errorf("%s:%s: not-accepted without a ruling", sec.stem, name)
+				// Rule 6, first kind: a 42601 raised at or after the parse,
+				// the engine's own (no refusal identity), on every arm.
+				if arg != "42601" {
+					t.Errorf("%s:%s: not-accepted %s: only a 42601 is not accepted as a statement form", sec.stem, name, arg)
 				}
-				if stage != iv80OutsideStage || strings.HasPrefix(body, "ERR ") {
-					t.Errorf("%s:%s: not-accepted owned by %q, PostgreSQL %s", sec.stem, name, stage, body)
+			case "no-capability", "not-interval":
+				// Rule 6, second and third kinds: named by the rulings.
+				if r, ok := iv80Rulings[key]; !ok || r.outcome != outcome {
+					t.Errorf("%s:%s: %s without a ruling", sec.stem, name, outcome)
 				}
 			default:
 				t.Errorf("%s:%s: outcome %q is none of the four", sec.stem, name, outcome)

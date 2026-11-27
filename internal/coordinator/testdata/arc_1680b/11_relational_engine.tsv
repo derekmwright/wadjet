@@ -5,7 +5,7 @@ ddl/insert/iv80_r	writer	ok	ok
 rt/mul	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be applied: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported in arithmetic
 rt/div	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be applied: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported in arithmetic
 rt/neg	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be applied: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported in arithmetic
-rt/plus	*	error	ERR 22007: invalid input syntax for type interval: "1 day 01:00:00"
+rt/plus	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 day 01:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 rt/justify	*	refusal	ERR 0A000 {interval-function-argument}: justify_interval over an interval argument is not supported
 rt/cmp	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
 rt/lt	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported

@@ -4,22 +4,22 @@ fields/0/1 mon	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval 
 fields/1/30 days	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
 fields/2/720:00:00	*	error	ERR 42601: syntax error at or near ")"
 fields/3/36 hours	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
-fields/4/1 day 12:00:00	*	error	ERR 22007: invalid input syntax for type interval: "1 day 12:00:00"
-fields/5/1 year 2 mons 3 days 04:05:06.789	*	error	ERR 22007: invalid input syntax for type interval: "1 year 2 mons 3 days 04:05:06.789"
-fields/6/-1 year -2 mons +3 days -04:05:06	*	error	ERR 22007: invalid input syntax for type interval: "-1 year -2 mons +3 days -04:05:06"
-fields/7/1 mon -30 days	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -30 days"
+fields/4/1 day 12:00:00	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 day 12:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+fields/5/1 year 2 mons 3 days 04:05:06.789	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 2 mons 3 days 04:05:06.789" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+fields/6/-1 year -2 mons +3 days -04:05:06	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1 year -2 mons +3 days -04:05:06" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+fields/7/1 mon -30 days	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon -30 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 fields/8/0	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
 fields/9/-1 day	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
 fields/10/00:00:00.000001	*	error	ERR 42601: syntax error at or near ")"
 fields/11/-00:00:00.000001	*	error	ERR 42601: syntax error at or near ")"
-fields/12/178956970 years 7 mons	*	error	ERR 22007: invalid input syntax for type interval: "178956970 years 7 mons"
-fields/13/-178956970 years -8 mons	*	error	ERR 22007: invalid input syntax for type interval: "-178956970 years -8 mons"
+fields/12/178956970 years 7 mons	*	refusal	ERR 0A000 {interval-input-form}: interval literal "178956970 years 7 mons" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+fields/13/-178956970 years -8 mons	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-178956970 years -8 mons" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 fields/14/2147483647 days	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
 fields/15/2562047788:00:54.775807	*	error	ERR 42601: syntax error at or near ")"
-fields/16/1.5 months	*	error	ERR 22007: invalid input syntax for type interval: "1.5 months"
-fields/17/-1 day +02:03:04.5	*	error	ERR 22007: invalid input syntax for type interval: "-1 day +02:03:04.5"
+fields/16/1.5 months	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.5 months" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+fields/17/-1 day +02:03:04.5	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1 day +02:03:04.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 fields/18/14 months	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
-fields/19/1 year -1 second	*	error	ERR 22007: invalid input syntax for type interval: "1 year -1 second"
+fields/19/1 year -1 second	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year -1 second" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 fields/20/infinity	*	error	ERR 42601: syntax error at or near ")"
 fields/21/-infinity	*	error	ERR 42601: syntax error at or near ")"
 fields/22/NULL	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
@@ -35,25 +35,25 @@ text/0/1 mon	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not sup
 text/1/30 days	*	agree	t:text | 30 days
 text/2/720:00:00	*	error	ERR 42601: syntax error at or near "AS"
 text/3/36 hours	*	agree	t:text | 36:00:00
-text/4/1 day 12:00:00	*	error	ERR 22007: invalid input syntax for type interval: "1 day 12:00:00"
-text/5/1 year 2 mons 3 days 04:05:06.789	*	error	ERR 22007: invalid input syntax for type interval: "1 year 2 mons 3 days 04:05:06.789"
-text/6/-1 year -2 mons +3 days -04:05:06	*	error	ERR 22007: invalid input syntax for type interval: "-1 year -2 mons +3 days -04:05:06"
-text/7/1 mon -30 days	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -30 days"
+text/4/1 day 12:00:00	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 day 12:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+text/5/1 year 2 mons 3 days 04:05:06.789	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 2 mons 3 days 04:05:06.789" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+text/6/-1 year -2 mons +3 days -04:05:06	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1 year -2 mons +3 days -04:05:06" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+text/7/1 mon -30 days	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon -30 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 text/8/0	*	agree	t:text | 00:00:00
 text/9/-1 day	*	agree	t:text | -1 days
 text/10/00:00:00.000001	*	error	ERR 42601: syntax error at or near "AS"
 text/11/-00:00:00.000001	*	error	ERR 42601: syntax error at or near "AS"
-text/12/178956970 years 7 mons	*	error	ERR 22007: invalid input syntax for type interval: "178956970 years 7 mons"
-text/13/-178956970 years -8 mons	*	error	ERR 22007: invalid input syntax for type interval: "-178956970 years -8 mons"
+text/12/178956970 years 7 mons	*	refusal	ERR 0A000 {interval-input-form}: interval literal "178956970 years 7 mons" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+text/13/-178956970 years -8 mons	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-178956970 years -8 mons" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 text/14/2147483647 days	*	agree	t:text | 2147483647 days
 text/15/2562047788:00:54.775807	*	error	ERR 42601: syntax error at or near "AS"
-text/16/1.5 months	*	error	ERR 22007: invalid input syntax for type interval: "1.5 months"
-text/17/-1 day +02:03:04.5	*	error	ERR 22007: invalid input syntax for type interval: "-1 day +02:03:04.5"
+text/16/1.5 months	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.5 months" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+text/17/-1 day +02:03:04.5	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1 day +02:03:04.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 text/18/14 months	*	agree	t:text | 1 year 2 mons
-text/19/1 year -1 second	*	error	ERR 22007: invalid input syntax for type interval: "1 year -1 second"
+text/19/1 year -1 second	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year -1 second" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 text/20/infinity	*	error	ERR 42601: syntax error at or near "AS"
 text/21/-infinity	*	error	ERR 42601: syntax error at or near "AS"
 text/22/NULL	*	agree	t:text | NULL
 input/sqlstd/mixed	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
 input/postgres/mixed	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
-print/dateStyleSQL	*	error	ERR 22007: invalid input syntax for type interval: "1 year 2 mons 3 days 04:05:06"
+print/dateStyleSQL	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 2 mons 3 days 04:05:06" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)

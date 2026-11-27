@@ -629,7 +629,9 @@ func TestArc1713cMeasure(t *testing.T) {
 //   - key/joinMixed on the three DAG arms (not the fast path): the ON
 //     condition of a join between a CAST expression and a derived column is
 //     lost, so every pair with a.id < b.id joins (a separate defect).
-//   - box/subsecond: this engine refuses a sub-second interval (22007);
+//   - box/subsecond: this engine refuses a sub-second interval literal
+//     (22007 until the rulings on 1680c r4; the literal PostgreSQL accepts is
+//     now the reader's named refusal interval-input-form, 0A000);
 //     box/multifield: input the single-unit fields cannot hold is OPAQUE text
 //     here (IntervalValue.text) and keeps the text order.
 //   - arith/justifyDays: justify_days does not exist (42883).
@@ -704,7 +706,9 @@ func TestArc1713cMeasure(t *testing.T) {
 // result (r29). PostgreSQL answers each of them.
 //
 // The rest, each with its reason:
-//   - box/subsecond: a sub-second interval is 22007 here (r29's class).
+//   - box/subsecond: a sub-second interval literal is refused here (r29's
+//     class): 22007 until 1680c r5, 0A000 interval-input-form since (rule 4:
+//     PostgreSQL accepts the text, so "invalid input syntax" was untrue).
 //   - sweep/rowCtor: the ROW(...) constructor spelling is 42601 here, every
 //     type alike. pos/rangeFrame: an offset RANGE frame is 42601 here, 0A000
 //     there; value-offset RANGE was never supported (pinned, unchanged).
@@ -741,8 +745,9 @@ func TestArc1713cMeasure(t *testing.T) {
 //     rulings on 1680c r3 (timestamp - date is an interval in PostgreSQL,
 //     so its 42883 was untrue: the binder's refusal is named,
 //     timestamp-date-difference).
-//   - lp/multiField: a multi-field interval literal is 22007 here, accepted
-//     there (1713c's literal grammar, unchanged).
+//   - lp/multiField: a multi-field interval literal is refused here, accepted
+//     there (1713c's literal grammar, unchanged): 22007 until 1680c r5, the
+//     reader's named refusal interval-input-form (0A000) since (rule 4).
 //   - fam/opaqueEmpty@dag*, pos/divZeroEmpty@dag*: a row-dependent error
 //     under a conjunct that rejects every row. The stage DAG evaluates the
 //     conjuncts in another order than the single-process plan and raises the
@@ -758,7 +763,7 @@ var ivKnown = map[string]string{
 	// rule's families.
 	"ar/textColPlus":                "id,a | 1,NULL; 6,NULL",
 	"ar/plusUnknownDate":            "a | 1704153600000",
-	"box/subsecond":                 "ERR 22007",
+	"box/subsecond":                 "ERR 0A000",
 	"ex/secondTimestamp":            "a | 5",
 	"obs/timeBucket":                "a | 1704153600000",
 	"obs/timeBucketLit":             "a | 1704153600000",
@@ -780,7 +785,7 @@ var ivKnown = map[string]string{
 	"tsub/tsDate":                   "ERR 0A000",
 	"tsub/tsDateVsInterval":         "ERR 0A000",
 	"tsub/tsMinusDiff":              "ERR 42883",
-	"lp/multiField":                 "ERR 22007",
+	"lp/multiField":                 "ERR 0A000",
 	"ddl/intervalArray":             "ERR 42601",
 }
 

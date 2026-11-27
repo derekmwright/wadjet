@@ -11,8 +11,9 @@ import (
 	"github.com/derekmwright/wadjet/internal/optswitch"
 )
 
-// TestArc1680cRefusalsUnderEveryKillSwitch: every refusal stage A owns (an
-// A refusal and every not-parsed and not-accepted cell of the interval corpus) is decided
+// TestArc1680cRefusalsUnderEveryKillSwitch: every refusal of the interval
+// corpus (every refusal outcome, every pg-error cell A owns, and every cell
+// outside the program that is refused: not-accepted, no-capability) is decided
 // before any optimization, so turning any one kill switch off changes
 // neither whether the statement is refused nor its SQLSTATE nor its
 // identity, on the single and the DAG arm (#1680c; docs/testing/GATES.md,
@@ -50,7 +51,8 @@ func TestArc1680cRefusalsUnderEveryKillSwitch(t *testing.T) {
 				continue
 			}
 			f := strings.Split(m[0], "\t")
-			if len(f) < 2 || !(f[0] == "A" && strings.HasPrefix(f[1], "refusal ") || strings.HasPrefix(f[1], "not-parsed ") || strings.HasPrefix(f[1], "not-accepted ")) {
+			if len(f) < 2 || !(strings.HasPrefix(f[1], "refusal ") || f[0] == "A" && strings.HasPrefix(f[1], "pg-error ") ||
+				strings.HasPrefix(f[1], "not-accepted ") || strings.HasPrefix(f[1], "no-capability ")) {
 				continue
 			}
 			cells = append(cells, cell{sec.stem + ":" + c.name, c.sql})

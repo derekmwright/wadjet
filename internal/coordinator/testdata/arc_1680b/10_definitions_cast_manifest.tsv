@@ -3,7 +3,7 @@ in/usMinUnit~text	C	supported	unmet	-
 in/usMaxUnit~text	C	supported	unmet	-
 in/usMinUnitAgo~text	C	supported	unmet	-
 in/allMin~text	C	supported	unmet	-
-in/allMinNear~text	-	not-parsed 22007	met	-
+in/allMinNear~text	A	refusal interval-input-form	met	-
 in/allMaxUnits~text	C	supported	unmet	-
 in/allMaxNear~text	C	supported	unmet	-
 in/allMinCastText~text	C	supported	unmet	-
@@ -28,18 +28,18 @@ ago/-1 day +02:00:00 ago~text	C	supported	unmet	-
 ago/2147483647 days ago~text	C	supported	unmet	-
 ago/@ 1 mon ago~text	C	supported	unmet	-
 typmod/bareHM~text	C	supported	unmet	-
-typmod/hm~text	-	not-parsed 42601	met	-
-typmod/ms~text	-	not-parsed 42601	met	-
-typmod/dm~text	-	not-parsed 42601	met	-
+typmod/hm~text	-	not-accepted 42601	met	-
+typmod/ms~text	-	not-accepted 42601	met	-
+typmod/dm~text	-	not-accepted 42601	met	-
 typmod/bareNumber~text	C	supported	met	-
 typmod/minute~text	A	supported	met	-
-typmod/dayToHour~text	-	not-parsed 42601	met	-
-typmod/yearToMonth~text	-	not-parsed 42601	met	-
-typmod/hourFrac~text	-	not-parsed 42601	met	-
-typmod/secondTyp5~text	-	not-parsed 42601	met	-
-typmod/prec7~text	-	not-parsed 22007	met	-
-typmod/prec7Literal~text	-	not-parsed 42601	met	-
-typmod/prec7Half~text	-	not-parsed 22007	met	-
+typmod/dayToHour~text	-	not-accepted 42601	met	-
+typmod/yearToMonth~text	-	not-accepted 42601	met	-
+typmod/hourFrac~text	-	not-accepted 42601	met	-
+typmod/secondTyp5~text	-	not-accepted 42601	met	-
+typmod/prec7~text	A	refusal interval-input-form	met	-
+typmod/prec7Literal~text	-	not-accepted 42601	met	-
+typmod/prec7Half~text	A	refusal interval-input-form	met	-
 ar/mulMixed~text	C	supported	unmet	-
 ar/divMixed2~text	C	supported	unmet	-
 ar/divMixed3~text	C	supported	unmet	-
@@ -62,7 +62,7 @@ justify/negMonPlus25h~text	C	supported	unmet	-
 justify/negMonPlus25h/hoursOfDays~text	C	supported	unmet	-
 justify/negMonPlus25h/daysOfHours~text	C	supported	unmet	-
 infop/ivInfMinusNegInf~text	C	supported	unmet	-
-sentinel/negOfNearMax~text	-	not-parsed 22007	met	-
+sentinel/negOfNearMax~text	A	refusal interval-input-form	met	-
 sentinel/negOfInfinityTriple~text	C	supported	unmet	-
 sentinel/mulNegInfinityTriple~text	C	supported	unmet	-
 age/borrow~text	C	supported	unmet	-
@@ -95,4 +95,4 @@ closure/dateMinusTs~text	C	supported	unmet	-
 closure/coalesce~text	C	supported	unmet	-
 closure/case~text	C	supported	unmet	-
 closure/nullif~text	C	supported	unmet	-
-fn/truncMixedSign~text	-	not-parsed 22007	met	-
+fn/truncMixedSign~text	A	refusal interval-input-form	met	-

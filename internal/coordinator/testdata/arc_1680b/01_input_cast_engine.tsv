@@ -1,21 +1,21 @@
 # This engine's disposition of the #1680b interval corpus, section 01_input_cast, per arm (TestArc1680bRecordEngine; held by TestArc1680bEngineBaseline).
 # Settings are PostgreSQL's only: the engine runs each statement as written. A TIMESTAMP value is printed as text (iv80EngineText). name<TAB>arms<TAB>class<TAB>answer
 lit/0/1 day~text	*	agree	a:text | 1 day
-lit/1/1 day 2 hours~text	*	error	ERR 22007: invalid input syntax for type interval: "1 day 2 hours"
-lit/2/1 year 2 months 3 days 4 hours 5 minutes 6 seconds~text	*	error	ERR 22007: invalid input syntax for type interval: "1 year 2 months 3 days 4 hours 5 minutes 6 seconds"
+lit/1/1 day 2 hours~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 day 2 hours" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/2/1 year 2 months 3 days 4 hours 5 minutes 6 seconds~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 2 months 3 days 4 hours 5 minutes 6 seconds" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 lit/3/1-2~text	*	error	ERR 42601: syntax error at or near "AS"
 lit/4/-1-2~text	*	error	ERR 42601: syntax error at or near "AS"
 lit/5/3 4:05:06~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "4:05:06" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 lit/6/-3 -4:05:06~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "-4:05:06" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-lit/7/1-2 3 4:05:06~text	*	error	ERR 22007: invalid input syntax for type interval: "1-2 3 4:05:06"
+lit/7/1-2 3 4:05:06~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1-2 3 4:05:06" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 lit/8/4:05:06~text	*	error	ERR 42601: syntax error at or near "AS"
 lit/9/4:05~text	*	error	ERR 42601: syntax error at or near "AS"
 lit/10/-4:05:06~text	*	error	ERR 42601: syntax error at or near "AS"
-lit/11/1 day 25:00:00~text	*	error	ERR 22007: invalid input syntax for type interval: "1 day 25:00:00"
-lit/12/-1 day +25:00:00~text	*	error	ERR 22007: invalid input syntax for type interval: "-1 day +25:00:00"
-lit/13/1 mon -30 days~text	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -30 days"
-lit/14/-1 year -2 mons +3 days~text	*	error	ERR 22007: invalid input syntax for type interval: "-1 year -2 mons +3 days"
-lit/15/1 year -1 second~text	*	error	ERR 22007: invalid input syntax for type interval: "1 year -1 second"
+lit/11/1 day 25:00:00~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 day 25:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/12/-1 day +25:00:00~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1 day +25:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/13/1 mon -30 days~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon -30 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/14/-1 year -2 mons +3 days~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1 year -2 mons +3 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/15/1 year -1 second~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year -1 second" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 lit/16/P1Y2M3DT4H5M6S~text	*	error	ERR 42601: syntax error at or near "AS"
 lit/17/P1Y2M3DT4H5M6.5S~text	*	error	ERR 42601: syntax error at or near "AS"
 lit/18/PT36H~text	*	error	ERR 42601: syntax error at or near "AS"
@@ -25,35 +25,35 @@ lit/21/P1W~text	*	error	ERR 42601: syntax error at or near "AS"
 lit/23/P-1DT-1H~text	*	error	ERR 42601: syntax error at or near "AS"
 lit/24/P0001-02-03T04:05:06~text	*	error	ERR 42601: syntax error at or near "AS"
 lit/25/PT0S~text	*	error	ERR 42601: syntax error at or near "AS"
-lit/26/@ 1 year 2 mons~text	*	error	ERR 22007: invalid input syntax for type interval: "@ 1 year 2 mons"
-lit/27/@ 1 year 2 mons ago~text	*	error	ERR 22007: invalid input syntax for type interval: "@ 1 year 2 mons ago"
-lit/28/1 day ago~text	*	error	ERR 22007: invalid input syntax for type interval: "1 day ago"
-lit/29/-1 day ago~text	*	error	ERR 22007: invalid input syntax for type interval: "-1 day ago"
-lit/30/@ 3 days 4 hours 5 mins 6 secs~text	*	error	ERR 22007: invalid input syntax for type interval: "@ 3 days 4 hours 5 mins 6 secs"
-lit/31/1.5 months~text	*	error	ERR 22007: invalid input syntax for type interval: "1.5 months"
-lit/32/1.5 days~text	*	error	ERR 22007: invalid input syntax for type interval: "1.5 days"
-lit/33/1.5 years~text	*	error	ERR 22007: invalid input syntax for type interval: "1.5 years"
-lit/34/0.5 weeks~text	*	error	ERR 22007: invalid input syntax for type interval: "0.5 weeks"
-lit/35/1.5 hours~text	*	error	ERR 22007: invalid input syntax for type interval: "1.5 hours"
-lit/36/1.5 minutes~text	*	error	ERR 22007: invalid input syntax for type interval: "1.5 minutes"
-lit/37/0.1 months~text	*	error	ERR 22007: invalid input syntax for type interval: "0.1 months"
-lit/38/1.0333333 months~text	*	error	ERR 22007: invalid input syntax for type interval: "1.0333333 months"
-lit/39/-1.5 months~text	*	error	ERR 22007: invalid input syntax for type interval: "-1.5 months"
-lit/40/-1.5 days~text	*	error	ERR 22007: invalid input syntax for type interval: "-1.5 days"
-lit/41/1.5 centuries~text	*	error	ERR 22007: invalid input syntax for type interval: "1.5 centuries"
+lit/26/@ 1 year 2 mons~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "@ 1 year 2 mons" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/27/@ 1 year 2 mons ago~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "@ 1 year 2 mons ago" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/28/1 day ago~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 day ago" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/29/-1 day ago~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1 day ago" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/30/@ 3 days 4 hours 5 mins 6 secs~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "@ 3 days 4 hours 5 mins 6 secs" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/31/1.5 months~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.5 months" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/32/1.5 days~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.5 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/33/1.5 years~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.5 years" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/34/0.5 weeks~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "0.5 weeks" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/35/1.5 hours~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.5 hours" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/36/1.5 minutes~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.5 minutes" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/37/0.1 months~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "0.1 months" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/38/1.0333333 months~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.0333333 months" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/39/-1.5 months~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1.5 months" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/40/-1.5 days~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1.5 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/41/1.5 centuries~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.5 centuries" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 lit/42/1 decade~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "decade" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 lit/43/1 century~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "century" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 lit/44/1 millennium~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "millennium" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 lit/45/10 weeks~text	*	agree	a:text | 70 days
-lit/46/1.000001 seconds~text	*	error	ERR 22007: invalid input syntax for type interval: "1.000001 seconds"
-lit/47/0.0000005 seconds~text	*	error	ERR 22007: invalid input syntax for type interval: "0.0000005 seconds"
-lit/48/0.0000015 seconds~text	*	error	ERR 22007: invalid input syntax for type interval: "0.0000015 seconds"
-lit/49/0.0000025 seconds~text	*	error	ERR 22007: invalid input syntax for type interval: "0.0000025 seconds"
+lit/46/1.000001 seconds~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.000001 seconds" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/47/0.0000005 seconds~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "0.0000005 seconds" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/48/0.0000015 seconds~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "0.0000015 seconds" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/49/0.0000025 seconds~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "0.0000025 seconds" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 lit/50/1 microsecond~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "microsecond" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 lit/51/1 millisecond~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "millisecond" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-lit/52/1.5 microseconds~text	*	error	ERR 22007: invalid input syntax for type interval: "1.5 microseconds"
+lit/52/1.5 microseconds~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.5 microseconds" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 lit/53/1:2:3.123456789~text	*	error	ERR 42601: syntax error at or near "AS"
-lit/54/-0.000001 seconds~text	*	error	ERR 22007: invalid input syntax for type interval: "-0.000001 seconds"
+lit/54/-0.000001 seconds~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-0.000001 seconds" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 lit/55/00:00:00.000001~text	*	error	ERR 42601: syntax error at or near "AS"
 lit/56/0~text	*	agree	a:text | 00:00:00
 lit/57/0 seconds~text	*	agree	a:text | 00:00:00
@@ -62,14 +62,14 @@ lit/59/-0 days~text	*	agree	a:text | 00:00:00
 lit/60/100~text	*	agree	a:text | 00:01:40
 lit/61/1.5~text	*	error	ERR 42601: syntax error at or near "AS"
 lit/62/-100~text	*	agree	a:text | -00:01:40
-lit/63/178956970 years 7 months~text	*	error	ERR 22007: invalid input syntax for type interval: "178956970 years 7 months"
-lit/65/-178956970 years -8 months~text	*	error	ERR 22007: invalid input syntax for type interval: "-178956970 years -8 months"
+lit/63/178956970 years 7 months~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "178956970 years 7 months" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+lit/65/-178956970 years -8 months~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-178956970 years -8 months" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 lit/67/2147483647 months~text	*	agree	a:text | 178956970 years 7 mons
 lit/69/-2147483648 months~text	*	agree	a:text | -178956970 years -8 mons
 lit/71/2147483647 days~text	*	agree	a:text | 2147483647 days
 lit/73/-2147483648 days~text	*	agree	a:text | -2147483648 days
 lit/75/2562047788:00:54.775807~text	*	error	ERR 42601: syntax error at or near "AS"
-lit/79/2147483647 months 2147483647 days 2562047788:00:54.775807~text	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 months 2147483647 days 2562047788:00:54.775807"
+lit/79/2147483647 months 2147483647 days 2562047788:00:54.775807~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "2147483647 months 2147483647 days 2562047788:00:54.775807" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 lit/81/infinity~text	*	error	ERR 42601: syntax error at or near "AS"
 lit/82/-infinity~text	*	error	ERR 42601: syntax error at or near "AS"
 lit/83/+infinity~text	*	error	ERR 42601: syntax error at or near "AS"
@@ -91,23 +91,23 @@ std/dm~text	*	error	ERR 42601: syntax error at or near "DAY"
 std/hm~text	*	error	ERR 42601: syntax error at or near "HOUR"
 std/ms~text	*	error	ERR 42601: syntax error at or near "MINUTE"
 std/hs~text	*	error	ERR 42601: syntax error at or near "HOUR"
-std/dayDropsTime~text	*	error	ERR 22007: invalid input syntax for type interval: "1 day 2 hours 3 minutes"
-std/yearDropsMonths~text	*	error	ERR 22007: invalid input syntax for type interval: "1 year 2 months"
-std/monthDropsDays~text	*	error	ERR 22007: invalid input syntax for type interval: "1 year 2 months 3 days"
-std/hourDropsMinutes~text	*	error	ERR 22007: invalid input syntax for type interval: "1 day 02:30:45"
+std/dayDropsTime~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 day 2 hours 3 minutes" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+std/yearDropsMonths~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 2 months" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+std/monthDropsDays~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 2 months 3 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+std/hourDropsMinutes~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 day 02:30:45" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 std/yearFrac~text	*	error	ERR 42601: syntax error at or near "YEAR"
 std/dayFrac~text	*	error	ERR 42601: syntax error at or near "DAY"
 std/hourNeg~text	*	agree	a:text | -25:00:00
-prec/iv3~text	*	error	ERR 22007: invalid input syntax for type interval: "1.123456 seconds"
-prec/iv0~text	*	error	ERR 22007: invalid input syntax for type interval: "1.5 seconds"
+prec/iv3~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.123456 seconds" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+prec/iv0~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.5 seconds" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 prec/literal3~text	*	error	ERR 42601: syntax error at or near "("
 prec/second3~text	*	error	ERR 42601: syntax error at or near "SECOND"
 prec/ds2~text	*	error	ERR 42601: syntax error at or near "DAY"
-prec/iv6~text	*	error	ERR 22007: invalid input syntax for type interval: "1.1234567 seconds"
+prec/iv6~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1.1234567 seconds" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 prec/iv7~text	*	refusal	ERR 0A000 {typmod}: an interval precision or field qualifier (interval(7)) is not supported
-prec/castDay~text	*	error	ERR 22007: invalid input syntax for type interval: "1 day 02:00:00"
-prec/castYear~text	*	error	ERR 22007: invalid input syntax for type interval: "14 months 3 days"
-prec/castMonthTyp~text	*	error	ERR 22007: invalid input syntax for type interval: "14 months 3 days"
+prec/castDay~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 day 02:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+prec/castYear~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "14 months 3 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+prec/castMonthTyp~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "14 months 3 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 cast/fromText~text	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 day 02:00:00" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
 cast/colon~text	*	agree	a:text | 1 day
 cast/fromTime~text	*	refusal	ERR 0A000 {time-type}: a cast of TIME to interval is not supported: this engine has no TIME type, and a TIME operand is not read as a time of day (ADR-0012 temporal r23)

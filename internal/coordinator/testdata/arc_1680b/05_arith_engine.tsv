@@ -1,28 +1,28 @@
 # This engine's disposition of the #1680b interval corpus, section 05_arith, per arm (TestArc1680bRecordEngine; held by TestArc1680bEngineBaseline).
 # Settings are PostgreSQL's only: the engine runs each statement as written. A TIMESTAMP value is printed as text (iv80EngineText). name<TAB>arms<TAB>class<TAB>answer
-plus/fields	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 2 days 03:00:00"
+plus/fields	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon 2 days 03:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 plus/noCarry	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 plus/subsec	*	error	ERR 42601: syntax error at or near "+"
 minus/fields	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 minus/zero	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 plus/null	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-plus/overflowMonths	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "178956970 years 7 mons"
+plus/overflowMonths	*	refusal	ERR 0A000 {interval-input-form}: interval literal "178956970 years 7 mons" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 plus/overflowDays	*	pg-error	ERR 22008: interval out of range
 plus/overflowTime	*	wrong-sqlstate	ERR 42601: syntax error at or near "+"
-plus/toInfinityFields	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "2147483647 months 2147483647 days 2562047788:00:54.775806"
+plus/toInfinityFields	*	refusal	ERR 0A000 {interval-input-form}: interval literal "2147483647 months 2147483647 days 2562047788:00:54.775806" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 plus/inf	*	error	ERR 42601: syntax error at or near "+"
 plus/infMinusInf	*	wrong-sqlstate	ERR 42601: syntax error at or near "-"
 plus/infPlusNegInf	*	wrong-sqlstate	ERR 42601: syntax error at or near "+"
-neg/basic	*	error	ERR 22007: invalid input syntax for type interval: "1 year -2 mons 3 days -04:05:06"
+neg/basic	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year -2 mons 3 days -04:05:06" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 neg/inf	*	error	ERR 42601: syntax error at or near "AS"
 neg/minMonths	*	pg-error	ERR 22008: interval out of range
 neg/minDays	*	pg-error	ERR 22008: interval out of range
 neg/minTime	*	wrong-sqlstate	ERR 42601: syntax error at or near "AS"
 neg/minTimeBuilt	*	wrong-sqlstate	ERR 42601: syntax error at or near "-"
 neg/minTimeBuiltAlone	*	error	ERR 42601: syntax error at or near "-"
-mul/int	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 1 day 01:00:00"
-mul/zero	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 1 day 01:00:00"
-mul/neg	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 1 day 01:00:00"
+mul/int	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon 1 day 01:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+mul/zero	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon 1 day 01:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+mul/neg	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon 1 day 01:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 mul/halfMonth	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 mul/thirdMonth	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 mul/monthCascade	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
@@ -30,7 +30,7 @@ mul/monthToTime	*	refusal	ERR 0A000 {bare-interval-result}: interval values cann
 mul/dayFrac	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 mul/dayCascade	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 mul/yearFrac	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-mul/mixedSign	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -1 day"
+mul/mixedSign	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon -1 day" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 mul/negFrac	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 mul/timeOver24	*	error	ERR 42601: syntax error at or near "*"
 mul/usHalfEven1	*	error	ERR 42601: syntax error at or near "*"
@@ -41,7 +41,7 @@ mul/tinyMonth	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot
 mul/float8	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 mul/real	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 mul/bigint	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-mul/numeric	*	error	ERR 42883: operator does not exist: interval * text
+mul/numeric	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 mul/unknown	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 mul/null	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 mul/overflowDays	*	pg-error	ERR 22008: interval out of range
@@ -54,8 +54,8 @@ mul/negInfFactor	*	refusal	ERR 0A000 {bare-interval-result}: interval values can
 mul/zeroTimesInf	*	pg-error	ERR 22008: interval out of range
 mul/infTimesZero	*	wrong-sqlstate	ERR 42601: syntax error at or near "*"
 mul/infTimesNeg	*	error	ERR 42601: syntax error at or near "*"
-mul/commuted	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 1 day"
-div/int	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 1 day 01:00:00"
+mul/commuted	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon 1 day" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+div/int	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon 1 day 01:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 div/thirdMonth	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 div/thirdDay	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 div/monthCascade	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
@@ -76,17 +76,17 @@ div/infByInf	*	wrong-sqlstate	ERR 42601: syntax error at or near "/"
 div/unknown	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 div/null	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 div/roundTrip	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-justify/pos	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 35 days 27:00:00"
-justify/neg	*	error	ERR 22007: invalid input syntax for type interval: "-1 mon -35 days -27:00:00"
-justify/mixed1	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -1 day"
-justify/mixed2	*	error	ERR 22007: invalid input syntax for type interval: "-1 mon 35 days"
-justify/mixed3	*	error	ERR 22007: invalid input syntax for type interval: "1 day -25:00:00"
-justify/mixed4	*	error	ERR 22007: invalid input syntax for type interval: "-1 day 25:00:00"
+justify/pos	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon 35 days 27:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+justify/neg	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1 mon -35 days -27:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+justify/mixed1	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon -1 day" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+justify/mixed2	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1 mon 35 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+justify/mixed3	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 day -25:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+justify/mixed4	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1 day 25:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 justify/zero	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 justify/us	*	error	ERR 42601: syntax error at or near ")"
 justify/bigHours	*	error	ERR 42601: syntax error at or near ")"
-justify/bigDays	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "2147483647 days 24:00:00"
-justify/monthOverflow	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "178956970 years 7 mons 30 days"
+justify/bigDays	*	refusal	ERR 0A000 {interval-input-form}: interval literal "2147483647 days 24:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+justify/monthOverflow	*	refusal	ERR 0A000 {interval-input-form}: interval literal "178956970 years 7 mons 30 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 justify/inf	*	error	ERR 42601: syntax error at or near ")"
 justify/null	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 ddl/create/iv80_m	writer	ok	ok

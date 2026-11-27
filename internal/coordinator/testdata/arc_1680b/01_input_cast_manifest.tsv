@@ -74,39 +74,39 @@ lit/82/-infinity~text	C	supported	unmet	-
 lit/83/+infinity~text	C	supported	unmet	-
 lit/84/INFINITY~text	C	supported	unmet	-
 lit/null~text	C	supported	met	-
-std/ym~text	-	not-parsed 42601	met	-
-std/ymNeg~text	-	not-parsed 42601	met	-
-std/ds~text	-	not-parsed 42601	met	-
-std/dsFrac~text	-	not-parsed 42601	met	-
+std/ym~text	-	not-accepted 42601	met	-
+std/ymNeg~text	-	not-accepted 42601	met	-
+std/ds~text	-	not-accepted 42601	met	-
+std/dsFrac~text	-	not-accepted 42601	met	-
 std/year~text	A	supported	met	-
 std/month~text	A	supported	met	-
 std/day~text	A	supported	met	-
 std/hour~text	A	supported	met	-
 std/minute~text	A	supported	met	-
 std/second~text	A	supported	met	-
-std/secondFrac~text	-	not-parsed 42601	met	-
-std/dh~text	-	not-parsed 42601	met	-
-std/dm~text	-	not-parsed 42601	met	-
-std/hm~text	-	not-parsed 42601	met	-
-std/ms~text	-	not-parsed 42601	met	-
-std/hs~text	-	not-parsed 42601	met	-
-std/dayDropsTime~text	-	not-parsed 22007	met	-
-std/yearDropsMonths~text	-	not-parsed 22007	met	-
-std/monthDropsDays~text	-	not-parsed 22007	met	-
-std/hourDropsMinutes~text	-	not-parsed 22007	met	-
-std/yearFrac~text	-	not-parsed 42601	met	-
-std/dayFrac~text	-	not-parsed 42601	met	-
+std/secondFrac~text	-	not-accepted 42601	met	-
+std/dh~text	-	not-accepted 42601	met	-
+std/dm~text	-	not-accepted 42601	met	-
+std/hm~text	-	not-accepted 42601	met	-
+std/ms~text	-	not-accepted 42601	met	-
+std/hs~text	-	not-accepted 42601	met	-
+std/dayDropsTime~text	A	refusal interval-input-form	met	-
+std/yearDropsMonths~text	A	refusal interval-input-form	met	-
+std/monthDropsDays~text	A	refusal interval-input-form	met	-
+std/hourDropsMinutes~text	A	refusal interval-input-form	met	-
+std/yearFrac~text	-	not-accepted 42601	met	-
+std/dayFrac~text	-	not-accepted 42601	met	-
 std/hourNeg~text	A	supported	met	-
-prec/iv3~text	-	not-parsed 22007	met	-
-prec/iv0~text	-	not-parsed 22007	met	-
-prec/literal3~text	-	not-parsed 42601	met	-
-prec/second3~text	-	not-parsed 42601	met	-
-prec/ds2~text	-	not-parsed 42601	met	-
-prec/iv6~text	-	not-parsed 22007	met	-
+prec/iv3~text	A	refusal interval-input-form	met	-
+prec/iv0~text	A	refusal interval-input-form	met	-
+prec/literal3~text	-	not-accepted 42601	met	-
+prec/second3~text	-	not-accepted 42601	met	-
+prec/ds2~text	-	not-accepted 42601	met	-
+prec/iv6~text	A	refusal interval-input-form	met	-
 prec/iv7~text	A	refusal typmod	met	-
-prec/castDay~text	-	not-parsed 22007	met	-
-prec/castYear~text	-	not-parsed 22007	met	-
-prec/castMonthTyp~text	-	not-parsed 22007	met	-
+prec/castDay~text	A	refusal interval-input-form	met	-
+prec/castYear~text	A	refusal interval-input-form	met	-
+prec/castMonthTyp~text	A	refusal interval-input-form	met	-
 cast/fromText~text	C	supported	unmet	-
 cast/colon~text	C	supported	met	-
 cast/fromTime~text	A	refusal time-type	met	-

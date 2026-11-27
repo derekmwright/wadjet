@@ -5,7 +5,7 @@ extract/decade	C	supported	unmet	-
 extract/year	C	supported	unmet	-
 extract/quarter	C	supported	unmet	-
 extract/month	C	supported	unmet	-
-extract/week	C	pg-error 0A000	unmet	-
+extract/week	C	pg-error 0A000	met	-
 extract/day	C	supported	unmet	-
 extract/hour	C	supported	unmet	-
 extract/minute	C	supported	unmet	-
@@ -13,64 +13,64 @@ extract/second	C	supported	unmet	-
 extract/millisecond	C	supported	unmet	-
 extract/microsecond	C	supported	unmet	-
 extract/epoch	C	supported	unmet	-
-extract/dow	C	pg-error 0A000	unmet	-
-extract/doy	C	pg-error 0A000	unmet	-
-extract/isoyear	C	pg-error 0A000	unmet	-
-extract/julian	C	pg-error 0A000	unmet	-
-extract/timezone	C	pg-error 0A000	unmet	-
-extract/inf	-	not-parsed 42601	met	-
+extract/dow	C	pg-error 0A000	met	-
+extract/doy	C	pg-error 0A000	met	-
+extract/isoyear	C	pg-error 0A000	met	-
+extract/julian	C	pg-error 0A000	met	-
+extract/timezone	C	pg-error 0A000	met	-
+extract/inf	-	not-accepted 42601	met	-
 extract/null	C	supported	unmet	-
-extract/bigEpoch	-	not-parsed 22007	met	-
-trunc/millennium	-	not-parsed 22007	met	-
-trunc/century	-	not-parsed 22007	met	-
-trunc/decade	-	not-parsed 22007	met	-
-trunc/year	-	not-parsed 22007	met	-
-trunc/quarter	-	not-parsed 22007	met	-
-trunc/month	-	not-parsed 22007	met	-
-trunc/week	-	not-parsed 22007	met	-
-trunc/day	-	not-parsed 22007	met	-
-trunc/hour	-	not-parsed 22007	met	-
-trunc/minute	-	not-parsed 22007	met	-
-trunc/second	-	not-parsed 22007	met	-
-trunc/milliseconds	-	not-parsed 22007	met	-
-trunc/microseconds	-	not-parsed 22007	met	-
-trunc/inf	-	not-parsed 42601	met	-
-trunc/bogus	A	refusal function-date_trunc	met	-
+extract/bigEpoch	A	refusal interval-input-form	met	-
+trunc/millennium	A	refusal interval-input-form	met	-
+trunc/century	A	refusal interval-input-form	met	-
+trunc/decade	A	refusal interval-input-form	met	-
+trunc/year	A	refusal interval-input-form	met	-
+trunc/quarter	A	refusal interval-input-form	met	-
+trunc/month	A	refusal interval-input-form	met	-
+trunc/week	A	pg-error 0A000	met	-
+trunc/day	A	refusal interval-input-form	met	-
+trunc/hour	A	refusal interval-input-form	met	-
+trunc/minute	A	refusal interval-input-form	met	-
+trunc/second	A	refusal interval-input-form	met	-
+trunc/milliseconds	A	refusal interval-input-form	met	-
+trunc/microseconds	A	refusal interval-input-form	met	-
+trunc/inf	-	not-accepted 42601	met	-
+trunc/bogus	C	pg-error 22023	unmet	-
 bin/15min	C	supported	unmet	-
 bin/days	C	supported	unmet	-
 bin/month	C	pg-error 0A000	met	-
 bin/zero	C	pg-error 22008	unmet	-
 bin/neg	C	pg-error 22008	unmet	-
-bin/us	-	not-parsed 42601	met	-
+bin/us	-	not-accepted 42601	met	-
 series/month	A	refusal function-generate_series	met	-
-series/mixed	-	not-parsed 22007	met	-
+series/mixed	A	refusal interval-input-form	met	-
 series/neg	A	refusal function-generate_series	met	-
 series/date	A	refusal function-generate_series	met	-
-series/zero	A	refusal function-generate_series	met	-
-series/zeroNormalized	-	not-parsed 22007	met	-
-series/inf	-	not-parsed 42601	met	-
+series/zero	C	pg-error 22023	unmet	-
+series/zeroNormalized	C	pg-error 22023	unmet	-
+series/inf	-	not-accepted 42601	met	-
 series/tzDst	A	refusal timestamptz	met	-
-tochar/hms	-	not-parsed 22007	met	-
-tochar/days	-	not-parsed 22007	met	-
-tochar/us	-	not-parsed 42601	met	-
-tochar/inf	-	not-parsed 42601	met	-
+tochar/hms	A	refusal interval-input-form	met	-
+tochar/days	A	refusal interval-input-form	met	-
+tochar/us	-	not-accepted 42601	met	-
+tochar/inf	-	not-accepted 42601	met	-
 inf/isfinite	C	supported	unmet	-
-inf/order	-	not-parsed 42601	met	-
-inf/fields	-	not-parsed 42601	met	-
-overlaps/interval	-	not-parsed 42601	met	-
-overlaps/null	-	not-parsed 42601	met	-
-frame/tsDay	-	not-parsed 42601	met	-
-frame/tsMonth	-	not-parsed 42601	met	-
-frame/tsFollowing	-	not-parsed 42601	met	-
-frame/interval	-	not-parsed 42601	met	-
-frame/negOffset	-	not-parsed 42601	met	-
-frame/date	-	not-parsed 42601	met	-
+inf/order	-	not-accepted 42601	met	-
+inf/fields	-	not-accepted 42601	met	-
+overlaps/interval	-	not-accepted 42601	met	-
+overlaps/null	-	not-accepted 42601	met	-
+frame/tsDay	-	not-accepted 42601	met	-
+frame/tsMonth	-	not-accepted 42601	met	-
+frame/tsFollowing	-	not-accepted 42601	met	-
+frame/interval	-	not-accepted 42601	met	-
+frame/negOffset	-	not-accepted 42601	met	-
+frame/date	-	not-accepted 42601	met	-
 widthBucket	C	pg-error 42883	unmet	-
-widthBucketArray	A	refusal container	unmet	-
-agg/all	-	not-parsed 22007	met	-
-agg/stringAgg	-	not-parsed 42601	met	-
-agg/arrayAgg	-	not-parsed 42601	met	-
-agg/modeTie	-	not-parsed 42601	met	-
+widthBucketArray	-	no-capability 42883	met	-
+agg/all	A	refusal interval-input-form	met	-
+agg/stringAgg	-	not-accepted 42601	met	-
+agg/arrayAgg	-	not-accepted 42601	met	-
+agg/modeTie	-	not-accepted 42601	met	-
 operand/eqInt	C	pg-error 42883	met	-
 operand/plusInt	C	pg-error 42883	met	-
 operand/plusNumeric	C	pg-error 42883	met	-
@@ -89,7 +89,7 @@ operand/abs	C	pg-error 42883	unmet	-
 operand/greatestTs	C	pg-error 42804	met	-
 operand/coalesceText	C	pg-error 42804	met	-
 operand/eqText	C	pg-error 42883	met	-
-operand/eqTime	-	not-parsed 42601	met	-
+operand/eqTime	-	not-accepted 42601	met	-
 operand/minusFromDate	C	pg-error 42883	met	-
 operand/unaryPlus	C	pg-error 42883	unmet	-
 operand/castBool	C	pg-error 42846	met	-

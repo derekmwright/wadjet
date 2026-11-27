@@ -3,32 +3,32 @@
 cmp/1 mon~30 days	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 cmp/1 mon~720:00:00	*	error	ERR 42601: syntax error at or near "AS"
 cmp/30 days~720:00:00	*	error	ERR 42601: syntax error at or near "AS"
-cmp/1 mon -30 days~0	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -30 days"
+cmp/1 mon -30 days~0	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon -30 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 cmp/1 year~360 days	*	agree	eq:boolean,ne:boolean,lt:boolean,le:boolean,gt:boolean,ge:boolean,dist:boolean | true,false,false,true,false,true,false
 cmp/1 year~12 mons	*	refusal	ERR 0A000 {interval-unit}: interval unit "mons" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 cmp/1 day~24:00:00	*	error	ERR 42601: syntax error at or near "AS"
 cmp/-1 day~-24:00:00	*	error	ERR 42601: syntax error at or near "AS"
-cmp/1 mon~29 days 24:00:00.000001	*	error	ERR 22007: invalid input syntax for type interval: "29 days 24:00:00.000001"
-cmp/1 mon~30 days -00:00:00.000001	*	error	ERR 22007: invalid input syntax for type interval: "30 days -00:00:00.000001"
+cmp/1 mon~29 days 24:00:00.000001	*	refusal	ERR 0A000 {interval-input-form}: interval literal "29 days 24:00:00.000001" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+cmp/1 mon~30 days -00:00:00.000001	*	refusal	ERR 0A000 {interval-input-form}: interval literal "30 days -00:00:00.000001" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 cmp/00:00:00.000001~0	*	error	ERR 42601: syntax error at or near "="
 cmp/-00:00:00.000001~0	*	error	ERR 42601: syntax error at or near "="
-cmp/1 day -1 second~23:59:59	*	error	ERR 22007: invalid input syntax for type interval: "1 day -1 second"
-cmp/-1 mon 1 day~-29 days	*	error	ERR 22007: invalid input syntax for type interval: "-1 mon 1 day"
-cmp/1 year -1 day~359 days	*	error	ERR 22007: invalid input syntax for type interval: "1 year -1 day"
-cmp/178956970 years 7 mons~178956970 years 6 mons 30 days	*	error	ERR 22007: invalid input syntax for type interval: "178956970 years 7 mons"
-cmp/178956970 years 7 mons~2147483647 days	*	error	ERR 22007: invalid input syntax for type interval: "178956970 years 7 mons"
-cmp/178956970 years 7 mons~-178956970 years -8 mons	*	error	ERR 22007: invalid input syntax for type interval: "178956970 years 7 mons"
-cmp/2147483647 days 2562047788:00:54.775807~178956970 years 7 mons	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 days 2562047788:00:54.775807"
-cmp/106751991 days 04:00:54.775808~0	*	error	ERR 22007: invalid input syntax for type interval: "106751991 days 04:00:54.775808"
-cmp/106751991 days 04:00:54.775807~106751991 days 04:00:54.775808	*	error	ERR 22007: invalid input syntax for type interval: "106751991 days 04:00:54.775807"
-cmp/213503982 days 08:01:49.551616~0	*	error	ERR 22007: invalid input syntax for type interval: "213503982 days 08:01:49.551616"
-cmp/213503982 days 08:01:49.551616~00:00:00.000001	*	error	ERR 22007: invalid input syntax for type interval: "213503982 days 08:01:49.551616"
-cmp/-213503982 days -08:01:49.551616~0	*	error	ERR 22007: invalid input syntax for type interval: "-213503982 days -08:01:49.551616"
+cmp/1 day -1 second~23:59:59	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 day -1 second" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+cmp/-1 mon 1 day~-29 days	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1 mon 1 day" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+cmp/1 year -1 day~359 days	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year -1 day" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+cmp/178956970 years 7 mons~178956970 years 6 mons 30 days	*	refusal	ERR 0A000 {interval-input-form}: interval literal "178956970 years 7 mons" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+cmp/178956970 years 7 mons~2147483647 days	*	refusal	ERR 0A000 {interval-input-form}: interval literal "178956970 years 7 mons" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+cmp/178956970 years 7 mons~-178956970 years -8 mons	*	refusal	ERR 0A000 {interval-input-form}: interval literal "178956970 years 7 mons" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+cmp/2147483647 days 2562047788:00:54.775807~178956970 years 7 mons	*	refusal	ERR 0A000 {interval-input-form}: interval literal "2147483647 days 2562047788:00:54.775807" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+cmp/106751991 days 04:00:54.775808~0	*	refusal	ERR 0A000 {interval-input-form}: interval literal "106751991 days 04:00:54.775808" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+cmp/106751991 days 04:00:54.775807~106751991 days 04:00:54.775808	*	refusal	ERR 0A000 {interval-input-form}: interval literal "106751991 days 04:00:54.775807" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+cmp/213503982 days 08:01:49.551616~0	*	refusal	ERR 0A000 {interval-input-form}: interval literal "213503982 days 08:01:49.551616" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+cmp/213503982 days 08:01:49.551616~00:00:00.000001	*	refusal	ERR 0A000 {interval-input-form}: interval literal "213503982 days 08:01:49.551616" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+cmp/-213503982 days -08:01:49.551616~0	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-213503982 days -08:01:49.551616" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 cmp/infinity~178956970 years 7 mons	*	error	ERR 42601: syntax error at or near "="
 cmp/-infinity~-178956970 years -8 mons	*	error	ERR 42601: syntax error at or near "="
 cmp/infinity~infinity	*	error	ERR 42601: syntax error at or near "="
 cmp/infinity~-infinity	*	error	ERR 42601: syntax error at or near "="
-cmp/2147483647 months 2147483647 days 2562047788:00:54.775807~infinity	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 months 2147483647 days 2562047788:00:54.775807"
+cmp/2147483647 months 2147483647 days 2562047788:00:54.775807~infinity	*	refusal	ERR 0A000 {interval-input-form}: interval literal "2147483647 months 2147483647 days 2562047788:00:54.775807" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 cmp/null	*	agree	eq:boolean,ne:boolean,lt:boolean,le:boolean,gt:boolean,ge:boolean,dist:boolean,nn:boolean | NULL,NULL,NULL,NULL,NULL,NULL,true,true
 between	*	error	ERR 42601: syntax error at or near "AS"
 in	*	error	ERR 42601: syntax error at or near "IN"

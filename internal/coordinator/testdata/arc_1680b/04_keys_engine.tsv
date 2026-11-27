@@ -87,9 +87,9 @@ setLit/except/sortagg	*	refusal	ERR 0A000 {bare-interval-result}: interval value
 setLit/exceptAll/sortagg	*	error	ERR 42601: syntax error at or near ")"
 setLit/intersectAll/sortagg	*	error	ERR 42601: syntax error at or near ")"
 setLit/valuesDistinct/sortagg	*	error	ERR 42601: syntax error at or near ")"
-wrap/group	*	error	ERR 22007: invalid input syntax for type interval: "213503982 days 08:01:49.551616"
-wrap/join	*	error	ERR 22007: invalid input syntax for type interval: "213503982 days 08:01:49.551616"
-wrap/hashCollide	*	error	ERR 22007: invalid input syntax for type interval: "213503982 days 08:01:49.551616"
+wrap/group	*	refusal	ERR 0A000 {interval-input-form}: interval literal "213503982 days 08:01:49.551616" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+wrap/join	*	refusal	ERR 0A000 {interval-input-form}: interval literal "213503982 days 08:01:49.551616" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+wrap/hashCollide	*	refusal	ERR 0A000 {interval-input-form}: interval literal "213503982 days 08:01:49.551616" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 adr0024/intersectNumericSort	*	differs	k:numeric | 1.00; 2.00; 3.00; 4.00; 5.00; 6.00
 explain/adr0024/intersectNumericSort	*	pg-only	-
 adr0024/intersectNumericHash	*	agree	k:numeric | 1.00; 2.00; 3.00; 4.00; 5.00; 6.00

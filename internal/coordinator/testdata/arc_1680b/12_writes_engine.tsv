@@ -6,12 +6,12 @@ w/insertSelect	writer	refusal	ERR 0A000 {interval-write}: interval values cannot
 w/insertDerived	writer	refusal	ERR 0A000 {interval-write}: interval values cannot yet be used as a written value: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 w/insertValues	writer	refusal	ERR 0A000 {interval-write}: interval values cannot yet be used as a written value: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 w/insertZero	writer	refusal	ERR 0A000 {interval-write}: interval values cannot yet be used as a written value: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-w/insertSubquery	writer	refusal	ERR 0A000: a subquery in an INSERT ... VALUES expression is not supported
+w/insertSubquery	writer	refusal	ERR 0A000 {dml-values-subquery}: a subquery in an INSERT ... VALUES expression is not supported
 w/insertTsDiff	writer	refusal	ERR 0A000 {interval-write}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a written value: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts + INTER…
 w/update	writer	refusal	ERR 0A000 {interval-write}: interval values cannot yet be used as a written value: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-w/updateDerived	writer	refusal	ERR 0A000: SET s: a subquery in an UPDATE's SET list is not supported
+w/updateDerived	writer	refusal	ERR 0A000 {dml-set-subquery}: SET s: a subquery in an UPDATE's SET list is not supported
 w/updateZero	writer	refusal	ERR 0A000 {interval-write}: interval values cannot yet be used as a written value: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-w/merge	writer	refusal	ERR 0A000: MERGE ON supports only equality between two columns, not "t.id = r.id + 1000"
+w/merge	writer	refusal	ERR 0A000 {merge-on-equality}: MERGE ON supports only equality between two columns, not "t.id = r.id + 1000"
 w/ctas	writer	refusal	ERR 0A000 {interval-write}: interval values cannot yet be used as a written value: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 w/ctasDerived	writer	refusal	ERR 0A000 {interval-write}: interval values cannot yet be used as a written value: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 w/ctasNoData	writer	refusal	ERR 0A000 {interval-write}: interval values cannot yet be used as a written value: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration

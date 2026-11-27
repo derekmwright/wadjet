@@ -1,19 +1,19 @@
 # The stage manifest of section 07_functions_cast (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet; an IntervalStyle cell by the door's SET answer)<TAB>legal alternatives (ADR-0013; ruling 11 pending).
-trunc/millennium~text	-	not-parsed 22007	met	-
-trunc/century~text	-	not-parsed 22007	met	-
-trunc/decade~text	-	not-parsed 22007	met	-
-trunc/year~text	-	not-parsed 22007	met	-
-trunc/quarter~text	-	not-parsed 22007	met	-
-trunc/month~text	-	not-parsed 22007	met	-
-trunc/day~text	-	not-parsed 22007	met	-
-trunc/hour~text	-	not-parsed 22007	met	-
-trunc/minute~text	-	not-parsed 22007	met	-
-trunc/second~text	-	not-parsed 22007	met	-
-trunc/milliseconds~text	-	not-parsed 22007	met	-
-trunc/microseconds~text	-	not-parsed 22007	met	-
-trunc/inf~text	-	not-parsed 42601	met	-
+trunc/millennium~text	A	refusal interval-input-form	met	-
+trunc/century~text	A	refusal interval-input-form	met	-
+trunc/decade~text	A	refusal interval-input-form	met	-
+trunc/year~text	A	refusal interval-input-form	met	-
+trunc/quarter~text	A	refusal interval-input-form	met	-
+trunc/month~text	A	refusal interval-input-form	met	-
+trunc/day~text	A	refusal interval-input-form	met	-
+trunc/hour~text	A	refusal interval-input-form	met	-
+trunc/minute~text	A	refusal interval-input-form	met	-
+trunc/second~text	A	refusal interval-input-form	met	-
+trunc/milliseconds~text	A	refusal interval-input-form	met	-
+trunc/microseconds~text	A	refusal interval-input-form	met	-
+trunc/inf~text	-	not-accepted 42601	met	-
 inf/fields~text	C	supported	unmet	-
 agg/all~text	E	rep-divergence	unmet	-
-agg/arrayAgg~text	-	not-parsed 42601	met	-
-agg/modeTie~text	-	not-parsed 42601	met	-
+agg/arrayAgg~text	-	not-accepted 42601	met	-
+agg/modeTie~text	-	not-accepted 42601	met	-
 operand/timesUnknown~text	C	supported	met	-

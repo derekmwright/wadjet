@@ -10,8 +10,8 @@ ts/orderDT	C	supported	unmet	-
 ts/mixedSign	C	supported	unmet	-
 ts/mixedSign2	C	supported	unmet	-
 ts/hours36	C	supported	met	-
-ts/us	-	not-parsed 42601	met	-
-ts/usNeg	-	not-parsed 42601	met	-
+ts/us	-	not-accepted 42601	met	-
+ts/usNeg	-	not-accepted 42601	met	-
 ts/zero	C	supported	met	-
 ts/1monVs30d	C	supported	met	-
 ts/overflow	C	pg-error 22008	met	-
@@ -38,9 +38,9 @@ tz/America/New_York/minus	A	refusal timestamptz	met	-
 tz/America/New_York/roundTrip	A	refusal timestamptz	met	-
 tz/America/New_York/age	A	refusal timestamptz	met	-
 tz/America/New_York/addFn	A	refusal timestamptz	met	-
-time/plus	-	not-parsed 22007	met	-
+time/plus	A	refusal interval-input-form	met	-
 time/minusTime	A	refusal time-type	met	-
-time/timetz	-	not-parsed 42601	met	-
+time/timetz	-	not-accepted 42601	met	-
 tsdiff/days	A	refusal bare-interval-result	met	-
 tsdiff/time	A	refusal bare-interval-result	met	-
 tsdiff/over24	A	refusal bare-interval-result	met	-
@@ -49,10 +49,10 @@ tsdiff/year	A	refusal bare-interval-result	met	-
 tsdiff/us	A	refusal timestamp-millisecond-carrier	met	-
 tsdiff/mixedNeg	A	refusal bare-interval-result	met	-
 tsdiff/huge	C	pg-error 22008	unmet	-
-tsdiff/inf	A	refusal bare-interval-result	unmet	-
+tsdiff/inf	A	refusal bare-interval-result	met	-
 tsdiff/infInf	C	pg-error 22008	met	-
-age/basic	A	refusal bare-interval-result	met	-
-age/time	A	refusal bare-interval-result	met	-
+age/basic	A	refusal function-age	met	-
+age/time	A	refusal timestamp-millisecond-carrier	met	-
 trip/monthEnd	C	supported	unmet	-
 trip/diff	C	supported	unmet	-
 trip/age	C	supported	unmet	-

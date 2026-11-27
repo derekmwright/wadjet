@@ -1,18 +1,18 @@
 # This engine's disposition of the #1680b interval corpus, section 05_arith_cast, per arm (TestArc1680bRecordEngine; held by TestArc1680bEngineBaseline).
 # Settings are PostgreSQL's only: the engine runs each statement as written. A TIMESTAMP value is printed as text (iv80EngineText). name<TAB>arms<TAB>class<TAB>answer
-plus/fields~text	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 2 days 03:00:00"
+plus/fields~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon 2 days 03:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 plus/noCarry~text	*	agree	a:text,b:text | 40:00:00,35 days
 plus/subsec~text	*	error	ERR 42601: syntax error at or near "+"
 minus/fields~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 minus/zero~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 plus/null~text	*	agree	a:text,b:text | NULL,NULL
 plus/inf~text	*	error	ERR 42601: syntax error at or near "+"
-neg/basic~text	*	error	ERR 22007: invalid input syntax for type interval: "1 year -2 mons 3 days -04:05:06"
+neg/basic~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year -2 mons 3 days -04:05:06" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 neg/inf~text	*	error	ERR 42601: syntax error at or near "AS"
 neg/minTimeBuiltAlone~text	*	error	ERR 42601: syntax error at or near "-"
-mul/int~text	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 1 day 01:00:00"
-mul/zero~text	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 1 day 01:00:00"
-mul/neg~text	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 1 day 01:00:00"
+mul/int~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon 1 day 01:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+mul/zero~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon 1 day 01:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+mul/neg~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon 1 day 01:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 mul/halfMonth~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 mul/thirdMonth~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 mul/monthCascade~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "mons" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
@@ -20,7 +20,7 @@ mul/monthToTime~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is
 mul/dayFrac~text	*	agree	a:text,t:text | 1 day 12:00:00,1 day 12:00:00
 mul/dayCascade~text	*	agree	a:text,t:text | 1 day 12:00:00,1 day 12:00:00
 mul/yearFrac~text	*	agree	a:text,t:text | 1 year 1 mon 6 days,1 year 1 mon 6 days
-mul/mixedSign~text	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -1 day"
+mul/mixedSign~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon -1 day" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 mul/negFrac~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 mul/timeOver24~text	*	error	ERR 42601: syntax error at or near "*"
 mul/usHalfEven1~text	*	error	ERR 42601: syntax error at or near "*"
@@ -31,14 +31,14 @@ mul/tinyMonth~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is n
 mul/float8~text	*	agree	a:text,t:text | 2 days 12:00:00,2 days 12:00:00
 mul/real~text	*	refusal	ERR 0A000 {interval-subsecond}: interval multiplication has a fractional-second result; only whole seconds are supported in an interval
 mul/bigint~text	*	agree	a:text,t:text | 3 days,3 days
-mul/numeric~text	*	error	ERR 42883: operator does not exist: interval * text
+mul/numeric~text	*	refusal	ERR 0A000 {interval-numeric-factor}: an interval multiplied by a NUMERIC value is not supported: cast the factor to double precision, for example INTERVAL '1 day' * CAST(x AS DOUBLE PRECISION)
 mul/unknown~text	*	agree	a:text,t:text | 2 days,2 days
 mul/null~text	*	agree	a:text,t:text | NULL,NULL
 mul/infFactor~text	*	refusal	ERR 0A000 {interval-infinity}: interval multiplication has an infinite result; an infinite interval is not supported
 mul/negInfFactor~text	*	refusal	ERR 0A000 {interval-infinity}: interval multiplication has an infinite result; an infinite interval is not supported
 mul/infTimesNeg~text	*	error	ERR 42601: syntax error at or near "*"
-mul/commuted~text	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 1 day"
-div/int~text	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 1 day 01:00:00"
+mul/commuted~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon 1 day" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+div/int~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon 1 day 01:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 div/thirdMonth~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 div/thirdDay~text	*	agree	a:text,t:text | 08:00:00,08:00:00
 div/monthCascade~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "mons" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
@@ -54,12 +54,12 @@ div/infDividend~text	*	error	ERR 42601: syntax error at or near "/"
 div/unknown~text	*	agree	a:text,t:text | 12:00:00,12:00:00
 div/null~text	*	agree	a:text,t:text | NULL,NULL
 div/roundTrip~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-justify/pos~text	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 35 days 27:00:00"
-justify/neg~text	*	error	ERR 22007: invalid input syntax for type interval: "-1 mon -35 days -27:00:00"
-justify/mixed1~text	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -1 day"
-justify/mixed2~text	*	error	ERR 22007: invalid input syntax for type interval: "-1 mon 35 days"
-justify/mixed3~text	*	error	ERR 22007: invalid input syntax for type interval: "1 day -25:00:00"
-justify/mixed4~text	*	error	ERR 22007: invalid input syntax for type interval: "-1 day 25:00:00"
+justify/pos~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon 35 days 27:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+justify/neg~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1 mon -35 days -27:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+justify/mixed1~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon -1 day" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+justify/mixed2~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1 mon 35 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+justify/mixed3~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 day -25:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+justify/mixed4~text	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1 day 25:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 justify/zero~text	*	refusal	ERR 0A000 {interval-function-argument}: justify_days over an interval argument is not supported
 justify/us~text	*	error	ERR 42601: syntax error at or near ")"
 justify/bigHours~text	*	error	ERR 42601: syntax error at or near ")"

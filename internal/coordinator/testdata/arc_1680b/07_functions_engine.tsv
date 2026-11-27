@@ -1,58 +1,58 @@
 # This engine's disposition of the #1680b interval corpus, section 07_functions, per arm (TestArc1680bRecordEngine; held by TestArc1680bEngineBaseline).
 # Settings are PostgreSQL's only: the engine runs each statement as written. A TIMESTAMP value is printed as text (iv80EngineText). name<TAB>arms<TAB>class<TAB>answer
-extract/millennium	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-extract/century	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-extract/decade	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-extract/year	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-extract/quarter	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-extract/month	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-extract/week	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-extract/day	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-extract/hour	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-extract/minute	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-extract/second	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-extract/millisecond	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-extract/microsecond	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-extract/epoch	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-extract/dow	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-extract/doy	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-extract/isoyear	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-extract/julian	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-extract/timezone	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
+extract/millennium	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+extract/century	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+extract/decade	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+extract/year	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+extract/quarter	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+extract/month	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+extract/week	*	pg-error	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+extract/day	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+extract/hour	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+extract/minute	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+extract/second	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+extract/millisecond	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+extract/microsecond	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+extract/epoch	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+extract/dow	*	pg-error	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+extract/doy	*	pg-error	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+extract/isoyear	*	pg-error	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+extract/julian	*	pg-error	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+extract/timezone	*	pg-error	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 extract/inf	*	error	ERR 42601: syntax error at or near ")"
 extract/null	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
-extract/bigEpoch	*	error	ERR 22007: invalid input syntax for type interval: "178956970 years 7 mons 2147483647 days 2562047788:00:54.775807"
-trunc/millennium	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-trunc/century	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-trunc/decade	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-trunc/year	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-trunc/quarter	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-trunc/month	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-trunc/week	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-trunc/day	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-trunc/hour	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-trunc/minute	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-trunc/second	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-trunc/milliseconds	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
-trunc/microseconds	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
+extract/bigEpoch	*	refusal	ERR 0A000 {interval-input-form}: interval literal "178956970 years 7 mons 2147483647 days 2562047788:00:54.775807" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+trunc/millennium	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+trunc/century	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+trunc/decade	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+trunc/year	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+trunc/quarter	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+trunc/month	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+trunc/week	*	pg-error	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+trunc/day	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+trunc/hour	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+trunc/minute	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+trunc/second	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+trunc/milliseconds	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+trunc/microseconds	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 14 mons 40 days 26:07:08.5" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 trunc/inf	*	error	ERR 42601: syntax error at or near ")"
 trunc/bogus	*	refusal	ERR 0A000 {function-date_trunc}: date_trunc over an interval argument is not supported
 bin/15min	*	refusal	ERR 0A000 {interval-function-argument}: date_bin over an interval argument is not supported
-bin/days	*	error	ERR 22007: invalid input syntax for type interval: "2 days 12:00:00"
+bin/days	*	refusal	ERR 0A000 {interval-input-form}: interval literal "2 days 12:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 bin/month	*	pg-error	ERR 0A000 {interval-function-argument}: date_bin over an interval argument is not supported
 bin/zero	*	refusal	ERR 0A000 {interval-function-argument}: date_bin over an interval argument is not supported
 bin/neg	*	refusal	ERR 0A000 {interval-function-argument}: date_bin over an interval argument is not supported
 bin/us	*	error	ERR 42601: syntax error at or near ","
 series/month	*	refusal	ERR 0A000 {function-generate_series}: interval values cannot yet be used as a table function's argument (generate_series): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-series/mixed	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 1 day"
+series/mixed	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon 1 day" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 series/neg	*	refusal	ERR 0A000 {function-generate_series}: interval values cannot yet be used as a table function's argument (generate_series): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 series/date	*	refusal	ERR 0A000 {function-generate_series}: interval values cannot yet be used as a table function's argument (generate_series): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 series/zero	*	refusal	ERR 0A000 {function-generate_series}: interval values cannot yet be used as a table function's argument (generate_series): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-series/zeroNormalized	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "1 mon -30 days"
+series/zeroNormalized	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 mon -30 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 series/inf	*	wrong-sqlstate	ERR 42601: syntax error at or near ")"
 series/tzDst	*	refusal	ERR 0A000 {timestamptz}: generate_series over timestamptz bounds with an interval step is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
-tochar/hms	*	error	ERR 22007: invalid input syntax for type interval: "15 hours 2 minutes 12 seconds"
-tochar/days	*	error	ERR 22007: invalid input syntax for type interval: "1 year 2 mons 3 days"
+tochar/hms	*	refusal	ERR 0A000 {interval-input-form}: interval literal "15 hours 2 minutes 12 seconds" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
+tochar/days	*	refusal	ERR 0A000 {interval-input-form}: interval literal "1 year 2 mons 3 days" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 tochar/us	*	error	ERR 42601: syntax error at or near ","
 tochar/inf	*	error	ERR 42601: syntax error at or near ","
 inf/isfinite	*	error	ERR 42601: syntax error at or near ")"
@@ -70,7 +70,7 @@ frame/negOffset	*	wrong-sqlstate	ERR 42601: syntax error at or near "INTERVAL"
 frame/date	*	error	ERR 42601: syntax error at or near "INTERVAL"
 widthBucket	*	refusal	ERR 0A000 {function-width_bucket}: width_bucket over an interval argument is not supported
 widthBucketArray	*	error	ERR 42883: function width_bucket(unknown, array) does not exist
-agg/all	*	error	ERR 22007: invalid input syntax for type interval: "-1 day 02:00:00"
+agg/all	*	refusal	ERR 0A000 {interval-input-form}: interval literal "-1 day 02:00:00" is not supported: this engine reads an interval literal only as a whole number with at most one unit (INTERVAL '30 days', INTERVAL '1' YEAR)
 agg/stringAgg	*	error	ERR 42601: syntax error at or near "ORDER"
 agg/arrayAgg	*	error	ERR 42601: syntax error at or near "ORDER"
 agg/modeTie	*	error	ERR 42601: syntax error at or near "("
