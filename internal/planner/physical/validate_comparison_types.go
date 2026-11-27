@@ -185,9 +185,6 @@ func (c *comparisonTyper) pair(a, b plansql.Node, op string) error {
 // pairOf is pair, and for a membership test against a SUBQUERY (IN, = ANY /
 // ALL) when subquery is set.
 func (c *comparisonTyper) pairOf(a, b plansql.Node, op string, subquery bool) error {
-	if err := zonedLiteralBesideTimestamptz(a, b); err != nil {
-		return err
-	}
 	ta, ok := c.operand(a)
 	if !ok {
 		return nil
@@ -525,33 +522,6 @@ func (c *comparisonTyper) temporalArithmetic(n *plansql.BinaryOp) error {
 			"instead, for example ts > CAST(d AS TIMESTAMP) + INTERVAL '30 days'", pgTypeName(lt), pgTypeName(rt))
 	}
 	return sqlerr.New("42883", "operator does not exist: %s %s %s", pgTypeName(lt), n.Op, pgTypeName(rt))
-}
-
-// zonedLiteralBesideTimestamptz refuses a comparison of a timestamptz value
-// (a TIMESTAMPTZ literal or cast) with a quoted literal that spells a nonzero
-// zone offset (#1680 line d). PostgreSQL types the quoted literal from the
-// other side and reads it as a timestamptz — the instant wall − offset — so
-// `TIMESTAMPTZ '2024-07-01 12:00:00+00' = '2024-07-01 17:30:00+05:30'` is
-// true there. The engine holds a timestamptz in its TIMESTAMP carrier, and
-// the comparison reads the quoted side by the TIMESTAMP input rule, which
-// discards the offset: it answered false. A literal with no zone, or a zero
-// offset, names the same instant under both readings and is not refused; a
-// TIMESTAMPTZ literal written on both sides is read as an instant on both.
-func zonedLiteralBesideTimestamptz(a, b plansql.Node) error {
-	zoned := func(n plansql.Node) bool {
-		lit, ok := plansql.Unparen(n).(*plansql.Lit)
-		if !ok || lit.Kind != plansql.LitString {
-			return false
-		}
-		_, off, hasZone, ok := parquet.ParseTimestampZone(lit.Value)
-		return ok && hasZone && off != 0
-	}
-	if isTimestamptzOperand(a) && zoned(b) || isTimestamptzOperand(b) && zoned(a) {
-		return sqlerr.Refuse("timestamptz-zoned-literal", "comparing a timestamptz with a quoted literal that "+
-			"carries a time zone offset is not supported: this engine reads the literal as a timestamp and "+
-			"would discard its offset; write it as TIMESTAMPTZ '…'")
-	}
-	return nil
 }
 
 // isTemporalDifference reports `a - b` over two operands typed by their

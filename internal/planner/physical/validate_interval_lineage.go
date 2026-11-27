@@ -137,8 +137,20 @@ func (s *colScope) mergeIntervalLineage(o *colScope) {
 	if s.ivLineage == nil {
 		s.ivLineage = map[string]bool{}
 	}
-	for k := range o.ivLineage {
-		if _, own := s.ivLineage[k]; own {
+	s.mergeLineageSet(s.ivLineage, o.ivLineage)
+	if o.ivUnresolved {
+		s.ivUnresolved = true
+	}
+}
+
+// mergeLineageSet adds src's names to dst for the names s does not resolve
+// itself — an inner scope's own column shadows an outer one of that name —
+// and that dst does not hold already. It is the one forwarding rule of every
+// lineage property a scope carries: interval (ivLineage) and the timestamp
+// family's declared kind (tzLineage, tsLineage; #1680 line d).
+func (s *colScope) mergeLineageSet(dst, src map[string]bool) {
+	for k := range src {
+		if _, own := dst[k]; own {
 			continue
 		}
 		if q, n, dotted := strings.Cut(k, "."); dotted {
@@ -148,10 +160,7 @@ func (s *colScope) mergeIntervalLineage(o *colScope) {
 		} else if s.cols[k] {
 			continue
 		}
-		s.ivLineage[k] = true
-	}
-	if o.ivUnresolved {
-		s.ivUnresolved = true
+		dst[k] = true
 	}
 }
 

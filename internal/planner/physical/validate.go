@@ -122,7 +122,13 @@ type colScope struct {
 	// enumerate and an interval was published below it.
 	ivLineage    map[string]bool
 	ivUnresolved bool
-	open         bool
+	// tzLineage and tsLineage hold the names (bare and qualified, folded)
+	// whose TIMESTAMP slot is declared timestamptz, or plain timestamp, by
+	// lineage (validate_timestamptz_lineage.go, #1680 line d). A TIMESTAMP
+	// slot in neither — a stored column — is of unknown declaration.
+	tzLineage map[string]bool
+	tsLineage map[string]bool
+	open      bool
 	// sourceOpen says WHY the scope is open: a FROM SOURCE this binder cannot
 	// enumerate (a table function, a table the catalog does not have, a
 	// derived body it could not read). `open` alone — without this — means a
@@ -390,6 +396,7 @@ func (s *colScope) merge(o *colScope) {
 	}
 	// Before the names: a name s already resolves itself shadows o's lineage.
 	s.mergeIntervalLineage(o)
+	s.mergeTimestampLineage(o)
 	if o.open {
 		s.open = true
 	}
@@ -803,6 +810,16 @@ type binder struct {
 	// intervalBelow says an interval was published in a block or below it.
 	intervalOut   map[*plansql.SelectInfo][]bool
 	intervalBelow map[*plansql.SelectInfo]bool
+	// tzOut and tsOut are, per block output column, whether its slot is
+	// declared timestamptz, or plain timestamp, by lineage
+	// (validate_timestamptz_lineage.go, #1680 line d), forwarded where
+	// intervalOut is.
+	tzOut map[*plansql.SelectInfo][]bool
+	tsOut map[*plansql.SelectInfo][]bool
+	// tzRewrites counts the quoted literals the timestamptz rule rewrote
+	// (zonedLiteralRule): a clause whose count moved is re-rendered into the
+	// text the planners also read.
+	tzRewrites int
 	// root is the statement's own block: its result columns (and its set
 	// operation arms') are the statement's result.
 	root *plansql.SelectInfo
@@ -934,6 +951,7 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 			b.setTimestampOut(info, ts)
 		}
 		b.reconcileIntervalOut(info)
+		b.reconcileTimestampOut(info)
 		return nil
 	}
 
@@ -1125,8 +1143,12 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	if err := refuseMisplacedCallInOrder(info.WhereExpr, resolve, "WHERE", from); err != nil {
 		return err
 	}
+	rewrites := b.tzRewrites
 	if err := b.checkExpr(info.WhereExpr, resolve); err != nil {
 		return err
+	}
+	if b.tzRewrites != rewrites {
+		info.Where = info.WhereExpr.String()
 	}
 	if err := checkBooleanContext(info.WhereExpr, resolve, "WHERE"); err != nil {
 		return err
@@ -1144,10 +1166,15 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 			onScope.merge(outer)
 		}
 		b.joinCond = true
+		rewrites := b.tzRewrites
 		err := b.checkExpr(info.Joins[i].CondExpr, onScope)
 		b.joinCond = false
 		if err != nil {
 			return err
+		}
+		if b.tzRewrites != rewrites {
+			// The planners read the ON clause's TEXT (#1680 line d).
+			info.Joins[i].Condition = info.Joins[i].CondExpr.String()
 		}
 		if err := checkBooleanContext(info.Joins[i].CondExpr, onScope, "JOIN/ON"); err != nil {
 			return err
@@ -1199,6 +1226,7 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		if col.Star || col.IsWindow {
 			continue
 		}
+		rewrites := b.tzRewrites
 		if err := b.checkExpr(col.ASTExpr, resolve); err != nil {
 			return err
 		}
@@ -1206,8 +1234,16 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		if err := checkCaseWhenContexts(col.ASTExpr, resolve); err != nil {
 			return err
 		}
+		if b.tzRewrites != rewrites {
+			// The stage planner reads the item's TEXT (#1680 line d).
+			info.Columns[i].Expr = col.ASTExpr.String()
+		}
+		rewrites = b.tzRewrites
 		if err := b.checkExpr(col.AggArgExpr, resolve); err != nil {
 			return err
+		}
+		if b.tzRewrites != rewrites && col.AggArgExpr != nil {
+			info.Columns[i].AggArg = col.AggArgExpr.String()
 		}
 	}
 	// A DATE or TIMESTAMP column this block publishes from a scalar subquery
@@ -1249,8 +1285,12 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	if err := checkBooleanContext(info.HavingExpr, withOut, "HAVING"); err != nil {
 		return err
 	}
+	rewrites = b.tzRewrites
 	if err := b.checkExpr(info.HavingExpr, withOut); err != nil {
 		return err
+	}
+	if b.tzRewrites != rewrites {
+		info.Having = info.HavingExpr.String()
 	}
 	// A window call's own terms read the INPUT relation wherever the call
 	// sits: the SELECT list's output names are not visible inside OVER (…)
@@ -1265,8 +1305,12 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 			return err
 		}
 	}
+	rewrites = b.tzRewrites
 	if err := b.checkExpr(info.QualifyExpr, withOut); err != nil {
 		return err
+	}
+	if b.tzRewrites != rewrites {
+		info.Qualify = info.QualifyExpr.String()
 	}
 	// ORDER BY — items are raw expression strings; parse and check what parses.
 	// A term that holds an expression subquery is checked as the parsed tree
@@ -1293,6 +1337,7 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	// until the whole statement has bound; and the block's output lineage
 	// (#1680c), which the scopes that read it are given.
 	b.intervalBlock(info, from, resolve)
+	b.timestampKindBlock(info, from, resolve)
 
 	// Every participant's binding, recorded when every one of them binds.
 	bound := b.stampBlock(info, resolve)
@@ -1484,6 +1529,18 @@ func (b *binder) checkExpr(expr plansql.Node, scope *colScope) error {
 				}
 			}
 			return structural(n)
+		}
+		// A quoted literal with a zone offset beside a timestamp: read as a
+		// timestamptz beside one by lineage, refused beside a stored column
+		// whose declaration is unknown (validate_timestamptz_lineage.go,
+		// #1680 line d). Before the input-function refusal, which reads the
+		// rewritten text.
+		kinder := b.newTsKinder(scope, typeOf)
+		if err := zonedLiteralWalk(expr, kinder); err != nil {
+			return err
+		}
+		if err := refuseTimezoneUnit(expr, kinder); err != nil {
+			return err
 		}
 		if err := RefuseTemporalTextBesideTypedOperand(expr, typeOf); err != nil {
 			return err
@@ -1956,6 +2013,7 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 			if iv := b.intervalOut[inner]; i < len(iv) && iv[i] && !expr.IntervalLineageDisabledAt(expr.LineageDerived) {
 				into.addIntervalLineage(qual, n)
 			}
+			into.addTimestampLineage(qual, n, b.tzOut[inner], b.tsOut[inner], i)
 		}
 		into.noteSourceDuplicates(qual, names)
 		into.addInst(b, tr, qual, names)
@@ -1980,6 +2038,9 @@ func (b *binder) resolveSource(ctx context.Context, tr *plansql.TableRef, latera
 			}
 			if iv := b.intervalOut[e.body]; e.body != nil && i < len(iv) && iv[i] && !expr.IntervalLineageDisabledAt(expr.LineageCTE) {
 				into.addIntervalLineage(qual, n)
+			}
+			if e.body != nil {
+				into.addTimestampLineage(qual, n, b.tzOut[e.body], b.tsOut[e.body], i)
 			}
 		}
 		into.noteSourceDuplicates(qual, e.cols)
