@@ -760,11 +760,17 @@ var zeroOffset = regexp.MustCompile(`^[+-]?0+(\.0+)?(:00(:00)?)?$`)
 // `TIMESTAMPTZ '2024-03-10 02:30:00'` under America/New_York answered 02:30
 // where PostgreSQL answers 03:30-04 — so it is refused, as an IntervalStyle
 // other than postgres is. UTC, its synonyms, a zero offset and DEFAULT /
-// LOCAL (the server default, UTC) are accepted.
+// LOCAL (the server default, UTC) are accepted. A value PostgreSQL does not
+// accept as a TimeZone at all (an unknown name, `Z`, an offset past its
+// range) is PostgreSQL's own 22023, not the capability refusal: the refusal
+// says the zone exists and this engine cannot run in it.
 func refuseTimeZone(val string) error {
 	v := strings.TrimSpace(val)
 	if strings.EqualFold(v, "default") || utcZoneNames[strings.ToLower(v)] || zeroOffset.MatchString(v) {
 		return nil
+	}
+	if !validTimeZone(val) {
+		return sqlerr.New("22023", `invalid value for parameter "TimeZone": "%s"`, val)
 	}
 	return sqlerr.Refuse("timezone", "TimeZone %s is not supported: every session runs at UTC "+
 		"(timestamptz values are read and printed at UTC)", sqlerr.Quote(val))
