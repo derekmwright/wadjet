@@ -943,14 +943,14 @@ func parseOnKeys(onCond, targetAlias, sourceAlias string) ([]onKeyPair, error) {
 		}
 		cmp, ok := n.(*plansql.CmpExpr)
 		if !ok || cmp.Op != "=" {
-			return sqlerr.New("0A000",
+			return sqlerr.Refuse("merge-on-equality",
 				"MERGE ON supports only equality between the target and the source, not %q", n.String())
 		}
 
 		left, lok := unwrapDMLParens(cmp.Left).(*plansql.ColRef)
 		right, rok := unwrapDMLParens(cmp.Right).(*plansql.ColRef)
 		if !lok || !rok {
-			return sqlerr.New("0A000",
+			return sqlerr.Refuse("merge-on-equality",
 				"MERGE ON supports only equality between two columns, not %q", n.String())
 		}
 		lAlias, rAlias := strings.ToLower(left.Table), strings.ToLower(right.Table)
@@ -3107,7 +3107,7 @@ func assignInsertValue(text string, col parquet.Column, opts ...expr.CompileOpti
 // rather than answered.
 func refuseNonConstantValuesExpr(node plansql.Node) error {
 	if dmlClauseHasSubquery(node) {
-		return sqlerr.New("0A000",
+		return sqlerr.Refuse("dml-values-subquery",
 			"a subquery in an INSERT ... VALUES expression is not supported")
 	}
 	refs, err := plansql.ColumnRefsOutsideSubqueries(node)
@@ -3951,7 +3951,7 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget,
 		// UPDATE reported success and wrote nothing — so the refusal is
 		// stated rather than inherited.
 		if dmlClauseHasSubquery(node) {
-			return nil, sqlerr.New("0A000",
+			return nil, sqlerr.Refuse("dml-set-subquery",
 				"SET %s: a subquery in an UPDATE's SET list is not supported", name)
 		}
 		compiled, err := expr.Compile(node, opts...)
