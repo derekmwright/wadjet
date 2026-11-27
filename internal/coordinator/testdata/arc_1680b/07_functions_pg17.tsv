@@ -1,0 +1,99 @@
+# PostgreSQL 17.11 answers for the #1680b interval corpus, section 07_functions (TestArc1680bMeasure; postgres:17-alpine, initdb --locale=C --encoding=UTF8, --memory=4g).
+# PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit; datcollate=C datctype=C server_encoding=UTF8; defaults IntervalStyle=postgres DateStyle=ISO, MDY TimeZone=UTC; a cell's settings column overrides them for that cell only.
+# name<TAB>answer: ok | (0 rows) | ERR <SQLSTATE>: message | col:type(oid),... | row; row
+extract/millennium	e:numeric(1700),p:double precision(701),n:numeric(1700) | 0,0,0
+extract/century	e:numeric(1700),p:double precision(701),n:numeric(1700) | 0,0,0
+extract/decade	e:numeric(1700),p:double precision(701),n:numeric(1700) | 0,0,0
+extract/year	e:numeric(1700),p:double precision(701),n:numeric(1700) | 2,2,-1
+extract/quarter	e:numeric(1700),p:double precision(701),n:numeric(1700) | 1,1,1
+extract/month	e:numeric(1700),p:double precision(701),n:numeric(1700) | 2,2,-1
+extract/week	ERR 0A000: unit "week" not supported for type interval
+extract/day	e:numeric(1700),p:double precision(701),n:numeric(1700) | 40,40,-1
+extract/hour	e:numeric(1700),p:double precision(701),n:numeric(1700) | 26,26,0
+extract/minute	e:numeric(1700),p:double precision(701),n:numeric(1700) | 7,7,0
+extract/second	e:numeric(1700),p:double precision(701),n:numeric(1700) | 8.500000,8.5,-1.500000
+extract/millisecond	e:numeric(1700),p:double precision(701),n:numeric(1700) | 8500.000,8500,-1500.000
+extract/microsecond	e:numeric(1700),p:double precision(701),n:numeric(1700) | 8500000,8500000,-1500000
+extract/epoch	e:numeric(1700),p:double precision(701),n:numeric(1700) | 71849228.500000,71849228.5,-34236001.500000
+extract/dow	ERR 0A000: unit "dow" not supported for type interval
+extract/doy	ERR 0A000: unit "doy" not supported for type interval
+extract/isoyear	ERR 0A000: unit "isoyear" not supported for type interval
+extract/julian	ERR 0A000: unit "julian" not supported for type interval
+extract/timezone	ERR 0A000: unit "timezone" not supported for type interval
+extract/inf	e:numeric(1700),d:numeric(1700),y:numeric(1700),h:double precision(701) | Infinity,Infinity,-Infinity,Infinity
+extract/null	e:numeric(1700) | NULL
+extract/bigEpoch	e:numeric(1700) | Infinity
+trunc/millennium	a:interval(1186),b:interval(1186) | 00:00:00,00:00:00
+trunc/century	a:interval(1186),b:interval(1186) | 00:00:00,00:00:00
+trunc/decade	a:interval(1186),b:interval(1186) | 00:00:00,00:00:00
+trunc/year	a:interval(1186),b:interval(1186) | 2 years,-2 years
+trunc/quarter	a:interval(1186),b:interval(1186) | 2 years,-2 years
+trunc/month	a:interval(1186),b:interval(1186) | 2 years 2 mons,-2 years -2 mons
+trunc/week	ERR 0A000: unit "week" not supported for type interval
+trunc/day	a:interval(1186),b:interval(1186) | 2 years 2 mons 40 days,-2 years -2 mons -40 days
+trunc/hour	a:interval(1186),b:interval(1186) | 2 years 2 mons 40 days 26:00:00,-2 years -2 mons -40 days -26:00:00
+trunc/minute	a:interval(1186),b:interval(1186) | 2 years 2 mons 40 days 26:07:00,-2 years -2 mons -40 days -26:07:00
+trunc/second	a:interval(1186),b:interval(1186) | 2 years 2 mons 40 days 26:07:08,-2 years -2 mons -40 days -26:07:08
+trunc/milliseconds	a:interval(1186),b:interval(1186) | 2 years 2 mons 40 days 26:07:08.5,-2 years -2 mons -40 days -26:07:08.5
+trunc/microseconds	a:interval(1186),b:interval(1186) | 2 years 2 mons 40 days 26:07:08.5,-2 years -2 mons -40 days -26:07:08.5
+trunc/inf	a:interval(1186) | infinity
+trunc/bogus	ERR 22023: unit "bogus" not recognized for type interval
+bin/15min	a:timestamp(1114),b:timestamp(1114) | 2024-01-01 10:30:00,2023-12-31 23:45:00
+bin/days	a:timestamp(1114) | 2024-01-06 00:00:00
+bin/month	ERR 0A000: timestamps cannot be binned into intervals containing months or years
+bin/zero	ERR 22008: stride must be greater than zero
+bin/neg	ERR 22008: stride must be greater than zero
+bin/us	a:timestamp(1114) | 2024-01-01 00:00:00.000003
+series/month	g:timestamp(1114) | 2024-01-31 00:00:00; 2024-02-29 00:00:00; 2024-03-29 00:00:00; 2024-04-29 00:00:00; 2024-05-29 00:00:00; 2024-06-29 00:00:00
+series/mixed	g:timestamp(1114) | 2024-01-30 00:00:00; 2024-03-01 00:00:00; 2024-04-02 00:00:00
+series/neg	g:timestamp(1114) | 2024-01-01 00:00:00; 2024-01-01 12:00:00; 2024-01-02 00:00:00
+series/date	g:timestamp with time zone(1184) | 2024-02-27 00:00:00+00; 2024-02-28 00:00:00+00; 2024-02-29 00:00:00+00; 2024-03-01 00:00:00+00
+series/zero	ERR 22023: step size cannot equal zero
+series/zeroNormalized	ERR 22023: step size cannot equal zero
+series/inf	ERR 22023: step size cannot be infinite
+series/tzDst	g:timestamp with time zone(1184) | 2024-03-09 12:00:00-05; 2024-03-10 12:00:00-04; 2024-03-11 12:00:00-04
+tochar/hms	a:text(25),b:text(25),c:text(25) | 15:02:12,40,04
+tochar/days	a:text(25),b:text(25) | 0001 02 03,-1 -02
+tochar/us	a:text(25),b:text(25) | 01.123456,123
+tochar/inf	a:text(25) | NULL
+inf/isfinite	a:boolean(16),b:boolean(16),c:boolean(16),d:boolean(16) | t,f,f,NULL
+inf/order	v:interval(1186) | -infinity; 00:00:00; 178956970 years 7 mons; infinity
+inf/fields	m:numeric(1700),j:interval(1186),t:text(25) | NULL,infinity,infinity
+overlaps/interval	a:boolean(16),b:boolean(16),c:boolean(16) | t,f,t
+overlaps/null	a:boolean(16) | NULL
+ddl/create/iv80_tz	ok
+ddl/insert/iv80_tz	ok
+frame/tsDay	id:bigint(20),n:bigint(20) | 1,1; 2,2; 3,3; 4,1; 5,1; 6,1
+frame/tsMonth	id:bigint(20),n:bigint(20) | 1,1; 2,2; 3,3; 4,4; 5,1; 6,1
+frame/tsFollowing	id:bigint(20),n:bigint(20) | 1,2; 2,2; 3,1; 4,1; 5,1; 6,1
+frame/interval	id:bigint(20),n:bigint(20) | 1,2; 2,2; 3,2; 4,2; 5,3; 6,1
+frame/negOffset	ERR 22013: invalid preceding or following size in window function
+frame/date	d:date(1082),n:bigint(20) | 2024-01-01,1; 2024-01-02,2; 2024-01-04,1
+widthBucket	ERR 42883: function width_bucket(interval, interval, interval, integer) does not exist
+widthBucketArray	a:integer(23) | 1
+agg/all	c:bigint(20),lo:interval(1186),hi:interval(1186),s:interval(1186),a:interval(1186) | 3,-1 days +02:00:00,1 mon,1 mon -1 days +02:00:00.000001,10 days -07:20:00
+agg/stringAgg	a:text(25) | 29 days,1 mon
+agg/arrayAgg	a:interval[](1187) | {"29 days","1 mon"}
+agg/modeTie	a:interval(1186) | 30 days
+operand/eqInt	ERR 42883: operator does not exist: interval = integer
+operand/plusInt	ERR 42883: operator does not exist: interval + integer
+operand/plusNumeric	ERR 42883: operator does not exist: interval + numeric
+operand/timesInterval	ERR 42883: operator does not exist: interval * interval
+operand/divInterval	ERR 42883: operator does not exist: interval / interval
+operand/numberDiv	ERR 42883: operator does not exist: integer / interval
+operand/mod	ERR 42883: operator does not exist: interval % integer
+operand/plusDate	a:timestamp(1114) | 2024-01-02 00:00:00
+operand/plusTime	a:time(1083) | 00:30:00
+operand/plusTimestamptz	a:timestamp with time zone(1184) | 2024-01-02 00:00:00+00
+operand/eqUnknown	a:boolean(16) | t
+operand/eqUnknownBad	ERR 22007: invalid input syntax for type interval: "abc"
+operand/timesUnknown	a:interval(1186) | 2 days
+operand/concatText	a:text(25) | x1 day
+operand/abs	ERR 42883: function abs(interval) does not exist
+operand/greatestTs	ERR 42804: GREATEST types interval and timestamp without time zone cannot be matched
+operand/coalesceText	ERR 42804: COALESCE types interval and text cannot be matched
+operand/eqText	ERR 42883: operator does not exist: interval = text
+operand/eqTime	a:boolean(16) | t
+operand/minusFromDate	ERR 42883: operator does not exist: interval - date
+operand/unaryPlus	ERR 42883: operator does not exist: + interval
+operand/castBool	ERR 42846: cannot cast type interval to boolean

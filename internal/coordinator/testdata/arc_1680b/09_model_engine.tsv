@@ -1,0 +1,9 @@
+# This engine's disposition of the #1680b interval corpus, section 09_model, per arm (TestArc1680bRecordEngine; held by TestArc1680bEngineBaseline).
+# Settings are PostgreSQL's only: the engine runs each statement as written. A TIMESTAMP value is printed as text (iv80EngineText). name<TAB>arms<TAB>class<TAB>answer
+ddl/create/iv80_mv	writer	ok	ok
+ddl/insert/iv80_mv	writer	ok	ok
+model/fields	*	refused	ERR 0A000
+model/order	*	refused	ERR 0A000
+model/groups	*	refused	ERR 42601
+model/groupsSort	*	refused	ERR 42601
+model/hash	*	refused	ERR 0A000

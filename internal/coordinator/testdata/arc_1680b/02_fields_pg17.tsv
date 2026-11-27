@@ -1,0 +1,60 @@
+# PostgreSQL 17.11 answers for the #1680b interval corpus, section 02_fields (TestArc1680bMeasure; postgres:17-alpine, initdb --locale=C --encoding=UTF8, --memory=4g).
+# PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit; datcollate=C datctype=C server_encoding=UTF8; defaults IntervalStyle=postgres DateStyle=ISO, MDY TimeZone=UTC; a cell's settings column overrides them for that cell only.
+# name<TAB>answer: ok | (0 rows) | ERR <SQLSTATE>: message | col:type(oid),... | row; row
+fields/0/1 mon	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | 0,1,0,0,0,0.000000,0,2592000.000000
+fields/1/30 days	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | 0,0,30,0,0,0.000000,0,2592000.000000
+fields/2/720:00:00	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | 0,0,0,720,0,0.000000,0,2592000.000000
+fields/3/36 hours	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | 0,0,0,36,0,0.000000,0,129600.000000
+fields/4/1 day 12:00:00	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | 0,0,1,12,0,0.000000,0,129600.000000
+fields/5/1 year 2 mons 3 days 04:05:06.789	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | 1,2,3,4,5,6.789000,6789000,37015506.789000
+fields/6/-1 year -2 mons +3 days -04:05:06	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | -1,-2,3,-4,-5,-6.000000,-6000000,-36497106.000000
+fields/7/1 mon -30 days	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | 0,1,-30,0,0,0.000000,0,0.000000
+fields/8/0	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | 0,0,0,0,0,0.000000,0,0.000000
+fields/9/-1 day	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | 0,0,-1,0,0,0.000000,0,-86400.000000
+fields/10/00:00:00.000001	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | 0,0,0,0,0,0.000001,1,0.000001
+fields/11/-00:00:00.000001	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | 0,0,0,0,0,-0.000001,-1,-0.000001
+fields/12/178956970 years 7 mons	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | 178956970,7,0,0,0,0.000000,0,5647452494616000.000000
+fields/13/-178956970 years -8 mons	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | -178956970,-8,0,0,0,0.000000,0,-5647452497208000.000000
+fields/14/2147483647 days	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | 0,0,2147483647,0,0,0.000000,0,185542587100800.000000
+fields/15/2562047788:00:54.775807	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | 0,0,0,2562047788,0,54.775807,54775807,9223372036854.775807
+fields/16/1.5 months	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | 0,1,15,0,0,0.000000,0,3888000.000000
+fields/17/-1 day +02:03:04.5	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | 0,0,-1,2,3,4.500000,4500000,-79015.500000
+fields/18/14 months	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | 1,2,0,0,0,0.000000,0,36741600.000000
+fields/19/1 year -1 second	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | 1,0,0,0,0,-1.000000,-1000000,31557599.000000
+fields/20/infinity	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | Infinity,NULL,Infinity,Infinity,NULL,NULL,NULL,Infinity
+fields/21/-infinity	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | -Infinity,NULL,-Infinity,-Infinity,NULL,NULL,NULL,-Infinity
+fields/22/NULL	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL
+print/postgres	id:integer(23),v:interval(1186) | 0,1 mon; 1,30 days; 2,720:00:00; 3,36:00:00; 4,1 day 12:00:00; 5,1 year 2 mons 3 days 04:05:06.789; 6,-1 years -2 mons +3 days -04:05:06; 7,1 mon -30 days; 8,00:00:00; 9,-1 days; 10,00:00:00.000001; 11,-00:00:00.000001; 12,178956970 years 7 mons; 13,-178956970 years -8 mons; 14,2147483647 days; 15,2562047788:00:54.775807; 16,1 mon 15 days; 17,-1 days +02:03:04.5; 18,1 year 2 mons; 19,1 year -00:00:01; 20,infinity; 21,-infinity; 22,NULL
+print/text/postgres	id:integer(23),t:text(25) | 0,1 mon; 1,30 days; 2,720:00:00; 3,36:00:00; 4,1 day 12:00:00; 5,1 year 2 mons 3 days 04:05:06.789; 6,-1 years -2 mons +3 days -04:05:06; 7,1 mon -30 days; 8,00:00:00; 9,-1 days; 10,00:00:00.000001; 11,-00:00:00.000001; 12,178956970 years 7 mons; 13,-178956970 years -8 mons; 14,2147483647 days; 15,2562047788:00:54.775807; 16,1 mon 15 days; 17,-1 days +02:03:04.5; 18,1 year 2 mons; 19,1 year -00:00:01; 20,infinity; 21,-infinity; 22,NULL
+print/postgres_verbose	id:integer(23),v:interval(1186) | 0,@ 1 mon; 1,@ 30 days; 2,@ 720 hours; 3,@ 36 hours; 4,@ 1 day 12 hours; 5,@ 1 year 2 mons 3 days 4 hours 5 mins 6.789 secs; 6,@ 1 year 2 mons -3 days 4 hours 5 mins 6 secs ago; 7,@ 1 mon -30 days; 8,@ 0; 9,@ 1 day ago; 10,@ 0.000001 secs; 11,@ 0.000001 secs ago; 12,@ 178956970 years 7 mons; 13,@ 178956970 years 8 mons ago; 14,@ 2147483647 days; 15,@ 2562047788 hours 54.775807 secs; 16,@ 1 mon 15 days; 17,@ 1 day -2 hours -3 mins -4.5 secs ago; 18,@ 1 year 2 mons; 19,@ 1 year -1 sec; 20,infinity; 21,-infinity; 22,NULL
+print/text/postgres_verbose	id:integer(23),t:text(25) | 0,@ 1 mon; 1,@ 30 days; 2,@ 720 hours; 3,@ 36 hours; 4,@ 1 day 12 hours; 5,@ 1 year 2 mons 3 days 4 hours 5 mins 6.789 secs; 6,@ 1 year 2 mons -3 days 4 hours 5 mins 6 secs ago; 7,@ 1 mon -30 days; 8,@ 0; 9,@ 1 day ago; 10,@ 0.000001 secs; 11,@ 0.000001 secs ago; 12,@ 178956970 years 7 mons; 13,@ 178956970 years 8 mons ago; 14,@ 2147483647 days; 15,@ 2562047788 hours 54.775807 secs; 16,@ 1 mon 15 days; 17,@ 1 day -2 hours -3 mins -4.5 secs ago; 18,@ 1 year 2 mons; 19,@ 1 year -1 sec; 20,infinity; 21,-infinity; 22,NULL
+print/sql_standard	id:integer(23),v:interval(1186) | 0,0-1; 1,30 0:00:00; 2,720:00:00; 3,36:00:00; 4,1 12:00:00; 5,+1-2 +3 +4:05:06.789; 6,-1-2 +3 -4:05:06; 7,+0-1 -30 +0:00:00; 8,0; 9,-1 0:00:00; 10,0:00:00.000001; 11,-0:00:00.000001; 12,178956970-7; 13,-178956970-8; 14,2147483647 0:00:00; 15,2562047788:00:54.775807; 16,+0-1 +15 +0:00:00; 17,+0-0 -1 +2:03:04.5; 18,1-2; 19,+1-0 +0 -0:00:01; 20,infinity; 21,-infinity; 22,NULL
+print/text/sql_standard	id:integer(23),t:text(25) | 0,0-1; 1,30 0:00:00; 2,720:00:00; 3,36:00:00; 4,1 12:00:00; 5,+1-2 +3 +4:05:06.789; 6,-1-2 +3 -4:05:06; 7,+0-1 -30 +0:00:00; 8,0; 9,-1 0:00:00; 10,0:00:00.000001; 11,-0:00:00.000001; 12,178956970-7; 13,-178956970-8; 14,2147483647 0:00:00; 15,2562047788:00:54.775807; 16,+0-1 +15 +0:00:00; 17,+0-0 -1 +2:03:04.5; 18,1-2; 19,+1-0 +0 -0:00:01; 20,infinity; 21,-infinity; 22,NULL
+print/iso_8601	id:integer(23),v:interval(1186) | 0,P1M; 1,P30D; 2,PT720H; 3,PT36H; 4,P1DT12H; 5,P1Y2M3DT4H5M6.789S; 6,P-1Y-2M3DT-4H-5M-6S; 7,P1M-30D; 8,PT0S; 9,P-1D; 10,PT0.000001S; 11,PT-0.000001S; 12,P178956970Y7M; 13,P-178956970Y-8M; 14,P2147483647D; 15,PT2562047788H54.775807S; 16,P1M15D; 17,P-1DT2H3M4.5S; 18,P1Y2M; 19,P1YT-1S; 20,infinity; 21,-infinity; 22,NULL
+print/text/iso_8601	id:integer(23),t:text(25) | 0,P1M; 1,P30D; 2,PT720H; 3,PT36H; 4,P1DT12H; 5,P1Y2M3DT4H5M6.789S; 6,P-1Y-2M3DT-4H-5M-6S; 7,P1M-30D; 8,PT0S; 9,P-1D; 10,PT0.000001S; 11,PT-0.000001S; 12,P178956970Y7M; 13,P-178956970Y-8M; 14,P2147483647D; 15,PT2562047788H54.775807S; 16,P1M15D; 17,P-1DT2H3M4.5S; 18,P1Y2M; 19,P1YT-1S; 20,infinity; 21,-infinity; 22,NULL
+text/0/1 mon	t:text(25) | 1 mon
+text/1/30 days	t:text(25) | 30 days
+text/2/720:00:00	t:text(25) | 720:00:00
+text/3/36 hours	t:text(25) | 36:00:00
+text/4/1 day 12:00:00	t:text(25) | 1 day 12:00:00
+text/5/1 year 2 mons 3 days 04:05:06.789	t:text(25) | 1 year 2 mons 3 days 04:05:06.789
+text/6/-1 year -2 mons +3 days -04:05:06	t:text(25) | -1 years -2 mons +3 days -04:05:06
+text/7/1 mon -30 days	t:text(25) | 1 mon -30 days
+text/8/0	t:text(25) | 00:00:00
+text/9/-1 day	t:text(25) | -1 days
+text/10/00:00:00.000001	t:text(25) | 00:00:00.000001
+text/11/-00:00:00.000001	t:text(25) | -00:00:00.000001
+text/12/178956970 years 7 mons	t:text(25) | 178956970 years 7 mons
+text/13/-178956970 years -8 mons	t:text(25) | -178956970 years -8 mons
+text/14/2147483647 days	t:text(25) | 2147483647 days
+text/15/2562047788:00:54.775807	t:text(25) | 2562047788:00:54.775807
+text/16/1.5 months	t:text(25) | 1 mon 15 days
+text/17/-1 day +02:03:04.5	t:text(25) | -1 days +02:03:04.5
+text/18/14 months	t:text(25) | 1 year 2 mons
+text/19/1 year -1 second	t:text(25) | 1 year -00:00:01
+text/20/infinity	t:text(25) | infinity
+text/21/-infinity	t:text(25) | -infinity
+text/22/NULL	t:text(25) | NULL
+input/sqlstd/mixed	t:text(25),d:numeric(1700),h:numeric(1700) | -1 2:03:04,-1,-2
+input/postgres/mixed	t:text(25),d:numeric(1700),h:numeric(1700) | -1 days +02:03:04,-1,2
+print/dateStyleSQL	t:text(25) | 1 year 2 mons 3 days 04:05:06

@@ -1,0 +1,99 @@
+# This engine's disposition of the #1680b interval corpus, section 04_keys, per arm (TestArc1680bRecordEngine; held by TestArc1680bEngineBaseline).
+# Settings are PostgreSQL's only: the engine runs each statement as written. A TIMESTAMP value is printed as text (iv80EngineText). name<TAB>arms<TAB>class<TAB>answer
+ddl/create/iv80_k	writer	ok	ok
+ddl/insert/iv80_k	writer	ok	ok
+ddl/create/iv80_kr	writer	ok	ok
+ddl/insert/iv80_kr	writer	ok	ok
+group/iv80_k/default	*	refused	ERR 0A000
+explain/group/iv80_k/default	*	pg-only	-
+distinct/iv80_k/default	*	refused	ERR 0A000
+explain/distinct/iv80_k/default	*	pg-only	-
+union/iv80_k/default	*	refused	ERR 0A000
+intersect/iv80_k/default	*	refused	ERR 0A000
+exceptAll/iv80_k/default	*	refused	ERR 0A000
+group/iv80_k/sortagg	*	refused	ERR 0A000
+explain/group/iv80_k/sortagg	*	pg-only	-
+distinct/iv80_k/sortagg	*	refused	ERR 0A000
+explain/distinct/iv80_k/sortagg	*	pg-only	-
+union/iv80_k/sortagg	*	refused	ERR 0A000
+intersect/iv80_k/sortagg	*	refused	ERR 0A000
+exceptAll/iv80_k/sortagg	*	refused	ERR 0A000
+group/iv80_k/hashagg	*	refused	ERR 0A000
+explain/group/iv80_k/hashagg	*	pg-only	-
+distinct/iv80_k/hashagg	*	refused	ERR 0A000
+explain/distinct/iv80_k/hashagg	*	pg-only	-
+union/iv80_k/hashagg	*	refused	ERR 0A000
+intersect/iv80_k/hashagg	*	refused	ERR 0A000
+exceptAll/iv80_k/hashagg	*	refused	ERR 0A000
+groupCount/iv80_k	*	refused	ERR 0A000
+distinctCount/iv80_k	*	refused	ERR 0A000
+countDistinct/iv80_k	*	refused	ERR 0A000
+partition/iv80_k	*	refused	ERR 0A000
+peers/iv80_k	*	refused	ERR 0A000
+orderTie/iv80_k	*	refused	ERR 0A000
+withTies/iv80_k	*	refused	ERR 42601
+withTiesCount/iv80_k	*	refused	ERR 42601
+group/iv80_kr/default	*	refused	ERR 0A000
+explain/group/iv80_kr/default	*	pg-only	-
+distinct/iv80_kr/default	*	refused	ERR 0A000
+explain/distinct/iv80_kr/default	*	pg-only	-
+union/iv80_kr/default	*	refused	ERR 0A000
+intersect/iv80_kr/default	*	refused	ERR 0A000
+exceptAll/iv80_kr/default	*	refused	ERR 0A000
+group/iv80_kr/sortagg	*	refused	ERR 0A000
+explain/group/iv80_kr/sortagg	*	pg-only	-
+distinct/iv80_kr/sortagg	*	refused	ERR 0A000
+explain/distinct/iv80_kr/sortagg	*	pg-only	-
+union/iv80_kr/sortagg	*	refused	ERR 0A000
+intersect/iv80_kr/sortagg	*	refused	ERR 0A000
+exceptAll/iv80_kr/sortagg	*	refused	ERR 0A000
+group/iv80_kr/hashagg	*	refused	ERR 0A000
+explain/group/iv80_kr/hashagg	*	pg-only	-
+distinct/iv80_kr/hashagg	*	refused	ERR 0A000
+explain/distinct/iv80_kr/hashagg	*	pg-only	-
+union/iv80_kr/hashagg	*	refused	ERR 0A000
+intersect/iv80_kr/hashagg	*	refused	ERR 0A000
+exceptAll/iv80_kr/hashagg	*	refused	ERR 0A000
+groupCount/iv80_kr	*	refused	ERR 0A000
+distinctCount/iv80_kr	*	refused	ERR 0A000
+countDistinct/iv80_kr	*	refused	ERR 0A000
+partition/iv80_kr	*	refused	ERR 0A000
+peers/iv80_kr	*	refused	ERR 0A000
+orderTie/iv80_kr	*	refused	ERR 0A000
+withTies/iv80_kr	*	refused	ERR 42601
+withTiesCount/iv80_kr	*	refused	ERR 42601
+join/default	*	refused	ERR 0A000
+explain/join/default	*	pg-only	-
+join/hash	*	refused	ERR 0A000
+explain/join/hash	*	pg-only	-
+join/merge	*	refused	ERR 0A000
+explain/join/merge	*	pg-only	-
+join/nestloop	*	refused	ERR 0A000
+explain/join/nestloop	*	pg-only	-
+join/left	*	refused	ERR 0A000
+join/semi	*	refused	ERR 0A000
+join/anti	*	refused	ERR 0A000
+setLit/union/default	*	refused	ERR 42601
+setLit/unionRev/default	*	refused	ERR 42601
+setLit/intersect/default	*	refused	ERR 0A000
+setLit/except/default	*	refused	ERR 0A000
+setLit/exceptAll/default	*	refused	ERR 42601
+setLit/intersectAll/default	*	refused	ERR 42601
+setLit/valuesDistinct/default	*	refused	ERR 42601
+setLit/union/sortagg	*	refused	ERR 42601
+setLit/unionRev/sortagg	*	refused	ERR 42601
+setLit/intersect/sortagg	*	refused	ERR 0A000
+setLit/except/sortagg	*	refused	ERR 0A000
+setLit/exceptAll/sortagg	*	refused	ERR 42601
+setLit/intersectAll/sortagg	*	refused	ERR 42601
+setLit/valuesDistinct/sortagg	*	refused	ERR 42601
+wrap/group	*	refused	ERR 22007
+wrap/join	*	refused	ERR 22007
+wrap/hashCollide	*	refused	ERR 22007
+adr0024/intersectNumericSort	*	differs	k:numeric | 1.00; 2.00; 3.00; 4.00; 5.00; 6.00
+explain/adr0024/intersectNumericSort	*	pg-only	-
+adr0024/intersectNumericHash	*	agree	k:numeric | 1.00; 2.00; 3.00; 4.00; 5.00; 6.00
+explain/intersect/iv80_kr/sortagg	*	pg-only	-
+array/group	*	refused	ERR 0A000
+array/eq	*	refused	ERR 42601
+row/group	*	refused	ERR 0A000

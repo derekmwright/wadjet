@@ -1,0 +1,159 @@
+# PostgreSQL 17.11 answers for the #1680b interval corpus, section 01_input (TestArc1680bMeasure; postgres:17-alpine, initdb --locale=C --encoding=UTF8, --memory=4g).
+# PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit; datcollate=C datctype=C server_encoding=UTF8; defaults IntervalStyle=postgres DateStyle=ISO, MDY TimeZone=UTC; a cell's settings column overrides them for that cell only.
+# name<TAB>answer: ok | (0 rows) | ERR <SQLSTATE>: message | col:type(oid),... | row; row
+lit/0/1 day	a:interval(1186) | 1 day
+lit/1/1 day 2 hours	a:interval(1186) | 1 day 02:00:00
+lit/2/1 year 2 months 3 days 4 hours 5 minutes 6 seconds	a:interval(1186) | 1 year 2 mons 3 days 04:05:06
+lit/3/1-2	a:interval(1186) | 1 year 2 mons
+lit/4/-1-2	a:interval(1186) | -1 years -2 mons
+lit/5/3 4:05:06	a:interval(1186) | 3 days 04:05:06
+lit/6/-3 -4:05:06	a:interval(1186) | -3 days -04:05:06
+lit/7/1-2 3 4:05:06	a:interval(1186) | 1 year 2 mons 3 days 04:05:06
+lit/8/4:05:06	a:interval(1186) | 04:05:06
+lit/9/4:05	a:interval(1186) | 04:05:00
+lit/10/-4:05:06	a:interval(1186) | -04:05:06
+lit/11/1 day 25:00:00	a:interval(1186) | 1 day 25:00:00
+lit/12/-1 day +25:00:00	a:interval(1186) | -1 days +25:00:00
+lit/13/1 mon -30 days	a:interval(1186) | 1 mon -30 days
+lit/14/-1 year -2 mons +3 days	a:interval(1186) | -1 years -2 mons +3 days
+lit/15/1 year -1 second	a:interval(1186) | 1 year -00:00:01
+lit/16/P1Y2M3DT4H5M6S	a:interval(1186) | 1 year 2 mons 3 days 04:05:06
+lit/17/P1Y2M3DT4H5M6.5S	a:interval(1186) | 1 year 2 mons 3 days 04:05:06.5
+lit/18/PT36H	a:interval(1186) | 36:00:00
+lit/19/P1.5M	a:interval(1186) | 1 mon 15 days
+lit/20/P0.5Y	a:interval(1186) | 6 mons
+lit/21/P1W	a:interval(1186) | 7 days
+lit/22/-P1D	ERR 22007: invalid input syntax for type interval: "-P1D"
+lit/23/P-1DT-1H	a:interval(1186) | -1 days -01:00:00
+lit/24/P0001-02-03T04:05:06	a:interval(1186) | 1 year 2 mons 3 days 04:05:06
+lit/25/PT0S	a:interval(1186) | 00:00:00
+lit/26/@ 1 year 2 mons	a:interval(1186) | 1 year 2 mons
+lit/27/@ 1 year 2 mons ago	a:interval(1186) | -1 years -2 mons
+lit/28/1 day ago	a:interval(1186) | -1 days
+lit/29/-1 day ago	a:interval(1186) | 1 day
+lit/30/@ 3 days 4 hours 5 mins 6 secs	a:interval(1186) | 3 days 04:05:06
+lit/31/1.5 months	a:interval(1186) | 1 mon 15 days
+lit/32/1.5 days	a:interval(1186) | 1 day 12:00:00
+lit/33/1.5 years	a:interval(1186) | 1 year 6 mons
+lit/34/0.5 weeks	a:interval(1186) | 3 days 12:00:00
+lit/35/1.5 hours	a:interval(1186) | 01:30:00
+lit/36/1.5 minutes	a:interval(1186) | 00:01:30
+lit/37/0.1 months	a:interval(1186) | 3 days
+lit/38/1.0333333 months	a:interval(1186) | 1 mon 23:59:59.9136
+lit/39/-1.5 months	a:interval(1186) | -1 mons -15 days
+lit/40/-1.5 days	a:interval(1186) | -1 days -12:00:00
+lit/41/1.5 centuries	a:interval(1186) | 150 years
+lit/42/1 decade	a:interval(1186) | 10 years
+lit/43/1 century	a:interval(1186) | 100 years
+lit/44/1 millennium	a:interval(1186) | 1000 years
+lit/45/10 weeks	a:interval(1186) | 70 days
+lit/46/1.000001 seconds	a:interval(1186) | 00:00:01.000001
+lit/47/0.0000005 seconds	a:interval(1186) | 00:00:00
+lit/48/0.0000015 seconds	a:interval(1186) | 00:00:00.000001
+lit/49/0.0000025 seconds	a:interval(1186) | 00:00:00.000002
+lit/50/1 microsecond	a:interval(1186) | 00:00:00.000001
+lit/51/1 millisecond	a:interval(1186) | 00:00:00.001
+lit/52/1.5 microseconds	a:interval(1186) | 00:00:00.000001
+lit/53/1:2:3.123456789	a:interval(1186) | 01:02:03.123457
+lit/54/-0.000001 seconds	a:interval(1186) | -00:00:00.000001
+lit/55/00:00:00.000001	a:interval(1186) | 00:00:00.000001
+lit/56/0	a:interval(1186) | 00:00:00
+lit/57/0 seconds	a:interval(1186) | 00:00:00
+lit/58/00:00:00	a:interval(1186) | 00:00:00
+lit/59/-0 days	a:interval(1186) | 00:00:00
+lit/60/100	a:interval(1186) | 00:01:40
+lit/61/1.5	a:interval(1186) | 00:00:01.5
+lit/62/-100	a:interval(1186) | -00:01:40
+lit/63/178956970 years 7 months	a:interval(1186) | 178956970 years 7 mons
+lit/64/178956970 years 8 months	ERR 22008: interval out of range
+lit/65/-178956970 years -8 months	a:interval(1186) | -178956970 years -8 mons
+lit/66/-178956970 years -9 months	ERR 22008: interval out of range
+lit/67/2147483647 months	a:interval(1186) | 178956970 years 7 mons
+lit/68/2147483648 months	ERR 22015: interval field value out of range: "2147483648 months"
+lit/69/-2147483648 months	a:interval(1186) | -178956970 years -8 mons
+lit/70/-2147483649 months	ERR 22015: interval field value out of range: "-2147483649 months"
+lit/71/2147483647 days	a:interval(1186) | 2147483647 days
+lit/72/2147483648 days	ERR 22015: interval field value out of range: "2147483648 days"
+lit/73/-2147483648 days	a:interval(1186) | -2147483648 days
+lit/74/-2147483649 days	ERR 22015: interval field value out of range: "-2147483649 days"
+lit/75/2562047788:00:54.775807	a:interval(1186) | 2562047788:00:54.775807
+lit/76/2562047788:00:54.775808	ERR 22015: interval field value out of range: "2562047788:00:54.775808"
+lit/77/-2562047788:00:54.775808	ERR 22007: invalid input syntax for type interval: "-2562047788:00:54.775808"
+lit/78/-2562047788:00:54.775809	ERR 22007: invalid input syntax for type interval: "-2562047788:00:54.775809"
+lit/79/2147483647 months 2147483647 days 2562047788:00:54.775807	a:interval(1186) | infinity
+lit/80/-2147483648 months -2147483648 days -2562047788:00:54.775808	ERR 22007: invalid input syntax for type interval: "-2147483648 months -2147483648 days -2562047788:00:54.775808"
+lit/81/infinity	a:interval(1186) | infinity
+lit/82/-infinity	a:interval(1186) | -infinity
+lit/83/+infinity	a:interval(1186) | infinity
+lit/84/INFINITY	a:interval(1186) | infinity
+lit/85/	ERR 22007: invalid input syntax for type interval: ""
+lit/86/ 	ERR 22007: invalid input syntax for type interval: " "
+lit/87/garbage	ERR 22007: invalid input syntax for type interval: "garbage"
+lit/88/1 fortnight	ERR 22007: invalid input syntax for type interval: "1 fortnight"
+lit/89/1 day 1 day	ERR 22007: invalid input syntax for type interval: "1 day 1 day"
+lit/90/1 2 3	ERR 22007: invalid input syntax for type interval: "1 2 3"
+lit/91/P1Y2	ERR 22007: invalid input syntax for type interval: "P1Y2"
+lit/92/1 days 2 days	ERR 22007: invalid input syntax for type interval: "1 days 2 days"
+lit/null	a:interval(1186) | NULL
+std/ym	a:interval(1186) | 1 year 2 mons
+std/ymNeg	a:interval(1186) | -1 years -2 mons
+std/ds	a:interval(1186) | 3 days 04:05:06
+std/dsFrac	a:interval(1186) | 3 days 04:05:06.789
+std/year	a:interval(1186) | 5 years
+std/month	a:interval(1186) | 5 mons
+std/day	a:interval(1186) | 5 days
+std/hour	a:interval(1186) | 05:00:00
+std/minute	a:interval(1186) | 00:05:00
+std/second	a:interval(1186) | 00:00:05
+std/secondFrac	a:interval(1186) | 00:00:05.123456
+std/dh	a:interval(1186) | 1 day 02:00:00
+std/dm	a:interval(1186) | 1 day 02:03:00
+std/hm	a:interval(1186) | 01:30:00
+std/ms	a:interval(1186) | 00:01:30
+std/hs	a:interval(1186) | 01:30:15
+std/dayDropsTime	a:interval(1186) | 1 day
+std/yearDropsMonths	a:interval(1186) | 1 year
+std/monthDropsDays	a:interval(1186) | 1 year 2 mons
+std/hourDropsMinutes	a:interval(1186) | 1 day 02:00:00
+std/yearFrac	a:interval(1186) | 1 year
+std/dayFrac	a:interval(1186) | 1 day
+std/hourNeg	a:interval(1186) | -25:00:00
+std/yearOver	ERR 22008: interval out of range
+std/dayOver	ERR 22015: interval field value out of range: "2147483648"
+prec/iv3	a:interval(1186) | 00:00:01.123
+prec/iv0	a:interval(1186),b:interval(1186),c:interval(1186) | 00:00:02,00:00:03,-00:00:02
+prec/literal3	a:interval(1186) | 00:00:01.123
+prec/second3	a:interval(1186) | 00:00:01.123
+prec/ds2	a:interval(1186) | 1 day 02:03:04.57
+prec/iv6	a:interval(1186) | 00:00:01.123457
+prec/iv7	a:interval(1186) | 00:00:01
+prec/castDay	a:interval(1186) | 1 day
+prec/castYear	a:interval(1186) | 1 year
+prec/castMonthTyp	a:interval(1186) | 1 year 2 mons
+cast/fromText	a:interval(1186) | 1 day 02:00:00
+cast/colon	a:interval(1186) | 1 day
+cast/toText	a:text(25),b:text(25) | 1 day 02:00:00,-10 mons -3 days +04:05:06.7
+cast/toVarchar	a:character varying(1043) | 1 mon
+cast/toTextNull	a:text(25) | NULL
+cast/fromInt	ERR 42846: cannot cast type integer to interval
+cast/fromNumeric	ERR 42846: cannot cast type numeric to interval
+cast/fromTime	a:interval(1186) | 01:02:03.5
+cast/toTime	a:time(1083),b:time(1083) | 01:30:00,23:00:00
+cast/toBigint	ERR 42846: cannot cast type interval to bigint
+cast/fromDuration	ERR 42704: type "duration" does not exist
+make/all	a:interval(1186) | 1 year 2 mons 25 days 05:06:07.5
+make/days	a:interval(1186) | 10 days
+make/secs	a:interval(1186),b:interval(1186) | 00:00:01.5,00:00:00.000002
+make/negMins	a:interval(1186) | -01:30:00
+make/weeks	a:interval(1186) | 8 days
+make/zero	a:interval(1186) | 00:00:00
+make/yearsOver	ERR 22008: interval out of range
+make/secsInf	ERR 22008: interval out of range
+make/null	a:interval(1186) | NULL
+make/hoursOver	a:interval(1186) | 2147483647:00:00
+ddl/create/iv80_in	ok
+ddl/insert/iv80_in	ok
+row/cast	id:bigint(20),v:interval(1186) | 1,1 day; 2,1 day 02:00:00; 3,1 mon -30 days; 4,1 year 2 mons; 5,NULL; 6,-10 mons; 7,00:00:00.000001; 9,infinity
+row/castText	id:bigint(20),v:text(25) | 1,1 day; 2,1 day 02:00:00; 3,1 mon -30 days; 4,1 year 2 mons; 5,NULL; 6,-10 mons; 7,00:00:00.000001; 9,infinity
+row/bad	ERR 22007: invalid input syntax for type interval: "garbage"
+row/badUnreached	id:bigint(20) | 1

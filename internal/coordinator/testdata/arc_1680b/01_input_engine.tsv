@@ -1,0 +1,158 @@
+# This engine's disposition of the #1680b interval corpus, section 01_input, per arm (TestArc1680bRecordEngine; held by TestArc1680bEngineBaseline).
+# Settings are PostgreSQL's only: the engine runs each statement as written. A TIMESTAMP value is printed as text (iv80EngineText). name<TAB>arms<TAB>class<TAB>answer
+lit/0/1 day	*	refused	ERR 0A000
+lit/1/1 day 2 hours	*	refused	ERR 22007
+lit/2/1 year 2 months 3 days 4 hours 5 minutes 6 seconds	*	refused	ERR 22007
+lit/3/1-2	*	refused	ERR 42601
+lit/4/-1-2	*	refused	ERR 42601
+lit/5/3 4:05:06	*	refused	ERR 0A000
+lit/6/-3 -4:05:06	*	refused	ERR 0A000
+lit/7/1-2 3 4:05:06	*	refused	ERR 22007
+lit/8/4:05:06	*	refused	ERR 42601
+lit/9/4:05	*	refused	ERR 42601
+lit/10/-4:05:06	*	refused	ERR 42601
+lit/11/1 day 25:00:00	*	refused	ERR 22007
+lit/12/-1 day +25:00:00	*	refused	ERR 22007
+lit/13/1 mon -30 days	*	refused	ERR 22007
+lit/14/-1 year -2 mons +3 days	*	refused	ERR 22007
+lit/15/1 year -1 second	*	refused	ERR 22007
+lit/16/P1Y2M3DT4H5M6S	*	refused	ERR 42601
+lit/17/P1Y2M3DT4H5M6.5S	*	refused	ERR 42601
+lit/18/PT36H	*	refused	ERR 42601
+lit/19/P1.5M	*	refused	ERR 42601
+lit/20/P0.5Y	*	refused	ERR 42601
+lit/21/P1W	*	refused	ERR 42601
+lit/22/-P1D	*	refused	ERR 42601
+lit/23/P-1DT-1H	*	refused	ERR 42601
+lit/24/P0001-02-03T04:05:06	*	refused	ERR 42601
+lit/25/PT0S	*	refused	ERR 42601
+lit/26/@ 1 year 2 mons	*	refused	ERR 22007
+lit/27/@ 1 year 2 mons ago	*	refused	ERR 22007
+lit/28/1 day ago	*	refused	ERR 22007
+lit/29/-1 day ago	*	refused	ERR 22007
+lit/30/@ 3 days 4 hours 5 mins 6 secs	*	refused	ERR 22007
+lit/31/1.5 months	*	refused	ERR 22007
+lit/32/1.5 days	*	refused	ERR 22007
+lit/33/1.5 years	*	refused	ERR 22007
+lit/34/0.5 weeks	*	refused	ERR 22007
+lit/35/1.5 hours	*	refused	ERR 22007
+lit/36/1.5 minutes	*	refused	ERR 22007
+lit/37/0.1 months	*	refused	ERR 22007
+lit/38/1.0333333 months	*	refused	ERR 22007
+lit/39/-1.5 months	*	refused	ERR 22007
+lit/40/-1.5 days	*	refused	ERR 22007
+lit/41/1.5 centuries	*	refused	ERR 22007
+lit/42/1 decade	*	refused	ERR 0A000
+lit/43/1 century	*	refused	ERR 0A000
+lit/44/1 millennium	*	refused	ERR 0A000
+lit/45/10 weeks	*	refused	ERR 0A000
+lit/46/1.000001 seconds	*	refused	ERR 22007
+lit/47/0.0000005 seconds	*	refused	ERR 22007
+lit/48/0.0000015 seconds	*	refused	ERR 22007
+lit/49/0.0000025 seconds	*	refused	ERR 22007
+lit/50/1 microsecond	*	refused	ERR 0A000
+lit/51/1 millisecond	*	refused	ERR 0A000
+lit/52/1.5 microseconds	*	refused	ERR 22007
+lit/53/1:2:3.123456789	*	refused	ERR 42601
+lit/54/-0.000001 seconds	*	refused	ERR 22007
+lit/55/00:00:00.000001	*	refused	ERR 42601
+lit/56/0	*	refused	ERR 0A000
+lit/57/0 seconds	*	refused	ERR 0A000
+lit/58/00:00:00	*	refused	ERR 42601
+lit/59/-0 days	*	refused	ERR 0A000
+lit/60/100	*	refused	ERR 0A000
+lit/61/1.5	*	refused	ERR 42601
+lit/62/-100	*	refused	ERR 0A000
+lit/63/178956970 years 7 months	*	refused	ERR 22007
+lit/64/178956970 years 8 months	*	refused	ERR 22007
+lit/65/-178956970 years -8 months	*	refused	ERR 22007
+lit/66/-178956970 years -9 months	*	refused	ERR 22007
+lit/67/2147483647 months	*	refused	ERR 0A000
+lit/68/2147483648 months	*	refused	ERR 22015
+lit/69/-2147483648 months	*	refused	ERR 0A000
+lit/70/-2147483649 months	*	refused	ERR 22015
+lit/71/2147483647 days	*	refused	ERR 0A000
+lit/72/2147483648 days	*	refused	ERR 22015
+lit/73/-2147483648 days	*	refused	ERR 0A000
+lit/74/-2147483649 days	*	refused	ERR 22015
+lit/75/2562047788:00:54.775807	*	refused	ERR 42601
+lit/76/2562047788:00:54.775808	*	refused	ERR 42601
+lit/77/-2562047788:00:54.775808	*	refused	ERR 42601
+lit/78/-2562047788:00:54.775809	*	refused	ERR 42601
+lit/79/2147483647 months 2147483647 days 2562047788:00:54.775807	*	refused	ERR 22007
+lit/80/-2147483648 months -2147483648 days -2562047788:00:54.775808	*	refused	ERR 22007
+lit/81/infinity	*	refused	ERR 42601
+lit/82/-infinity	*	refused	ERR 42601
+lit/83/+infinity	*	refused	ERR 42601
+lit/84/INFINITY	*	refused	ERR 42601
+lit/85/	*	refused	ERR 22007
+lit/86/ 	*	refused	ERR 22007
+lit/87/garbage	*	refused	ERR 42601
+lit/88/1 fortnight	*	refused	ERR 0A000
+lit/89/1 day 1 day	*	refused	ERR 22007
+lit/90/1 2 3	*	refused	ERR 22007
+lit/91/P1Y2	*	refused	ERR 42601
+lit/92/1 days 2 days	*	refused	ERR 22007
+lit/null	*	refused	ERR 0A000
+std/ym	*	refused	ERR 42601
+std/ymNeg	*	refused	ERR 42601
+std/ds	*	refused	ERR 42601
+std/dsFrac	*	refused	ERR 42601
+std/year	*	refused	ERR 0A000
+std/month	*	refused	ERR 0A000
+std/day	*	refused	ERR 0A000
+std/hour	*	refused	ERR 0A000
+std/minute	*	refused	ERR 0A000
+std/second	*	refused	ERR 0A000
+std/secondFrac	*	refused	ERR 42601
+std/dh	*	refused	ERR 42601
+std/dm	*	refused	ERR 42601
+std/hm	*	refused	ERR 42601
+std/ms	*	refused	ERR 42601
+std/hs	*	refused	ERR 42601
+std/dayDropsTime	*	refused	ERR 22007
+std/yearDropsMonths	*	refused	ERR 22007
+std/monthDropsDays	*	refused	ERR 22007
+std/hourDropsMinutes	*	refused	ERR 22007
+std/yearFrac	*	refused	ERR 42601
+std/dayFrac	*	refused	ERR 42601
+std/hourNeg	*	refused	ERR 0A000
+std/yearOver	*	refused	ERR 22008
+std/dayOver	*	refused	ERR 22015
+prec/iv3	*	refused	ERR 22007
+prec/iv0	*	refused	ERR 22007
+prec/literal3	*	refused	ERR 42601
+prec/second3	*	refused	ERR 42601
+prec/ds2	*	refused	ERR 42601
+prec/iv6	*	refused	ERR 22007
+prec/iv7	*	refused	ERR 42704
+prec/castDay	*	refused	ERR 22007
+prec/castYear	*	refused	ERR 22007
+prec/castMonthTyp	*	refused	ERR 22007
+cast/fromText	*	refused	ERR 0A000
+cast/colon	*	refused	ERR 0A000
+cast/toText	*	refused	ERR 22007
+cast/toVarchar	*	refused	ERR 0A000
+cast/toTextNull	*	agree	a:text | NULL
+cast/fromInt	*	refused	ERR 42846
+cast/fromNumeric	*	refused	ERR 42846
+cast/fromTime	*	refused	ERR 0A000
+cast/toTime	*	refused	ERR 42601
+cast/toBigint	*	refused	ERR 42846
+cast/fromDuration	*	refused	ERR 42846
+make/all	*	refused	ERR 42883
+make/days	*	refused	ERR 42601
+make/secs	*	refused	ERR 42601
+make/negMins	*	refused	ERR 42601
+make/weeks	*	refused	ERR 42601
+make/zero	*	refused	ERR 42883
+make/yearsOver	*	refused	ERR 42601
+make/secsInf	*	refused	ERR 42601
+make/null	*	refused	ERR 42601
+make/hoursOver	*	refused	ERR 42601
+ddl/create/iv80_in	writer	ok	ok
+ddl/insert/iv80_in	writer	ok	ok
+row/cast	*	refused	ERR 0A000
+row/castText	*	refused	ERR 0A000
+row/bad	*	refused	ERR 0A000
+row/badUnreached	*	agree	id:bigint | 1

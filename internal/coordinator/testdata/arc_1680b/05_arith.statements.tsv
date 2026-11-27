@@ -1,0 +1,109 @@
+# #1680b interval corpus statements (arc_1680b_interval_corpus_cells_test.go). name<TAB>settings<TAB>kind<TAB>sql
+plus/fields	-	sql	SELECT INTERVAL '1 mon 2 days 03:00:00' + INTERVAL '1 year 1 day 23:00:00' AS a, INTERVAL '1 mon' + INTERVAL '-30 days' AS b
+plus/noCarry	-	sql	SELECT INTERVAL '20 hours' + INTERVAL '20 hours' AS a, INTERVAL '25 days' + INTERVAL '10 days' AS b
+plus/subsec	-	sql	SELECT INTERVAL '00:00:00.000001' + INTERVAL '00:00:00.999999' AS a, INTERVAL '-00:00:00.000001' + INTERVAL '0' AS b
+minus/fields	-	sql	SELECT INTERVAL '1 mon' - INTERVAL '1 day' AS a, INTERVAL '1 day' - INTERVAL '25 hours' AS b
+minus/zero	-	sql	SELECT INTERVAL '1 mon' - INTERVAL '30 days' AS a, (INTERVAL '1 mon' - INTERVAL '30 days') = INTERVAL '0' AS b
+plus/null	-	sql	SELECT INTERVAL '1 day' + CAST(NULL AS INTERVAL) AS a, CAST(NULL AS INTERVAL) - INTERVAL '1 day' AS b
+plus/overflowMonths	-	sql	SELECT INTERVAL '178956970 years 7 mons' + INTERVAL '1 mon' AS a
+plus/overflowDays	-	sql	SELECT INTERVAL '2147483647 days' + INTERVAL '1 day' AS a
+plus/overflowTime	-	sql	SELECT INTERVAL '2562047788:00:54.775807' + INTERVAL '00:00:00.000001' AS a
+plus/toInfinityFields	-	sql	SELECT INTERVAL '2147483647 months 2147483647 days 2562047788:00:54.775806' + INTERVAL '00:00:00.000001' AS a
+plus/inf	-	sql	SELECT INTERVAL 'infinity' + INTERVAL '1 day' AS a, INTERVAL '-infinity' - INTERVAL '1 day' AS b, INTERVAL 'infinity' + INTERVAL 'infinity' AS c
+plus/infMinusInf	-	sql	SELECT INTERVAL 'infinity' - INTERVAL 'infinity' AS a
+plus/infPlusNegInf	-	sql	SELECT INTERVAL 'infinity' + INTERVAL '-infinity' AS a
+neg/basic	-	sql	SELECT -INTERVAL '1 year -2 mons 3 days -04:05:06' AS a, -INTERVAL '0' AS b
+neg/inf	-	sql	SELECT -INTERVAL 'infinity' AS a, -INTERVAL '-infinity' AS b
+neg/minMonths	-	sql	SELECT -INTERVAL '-2147483648 months' AS a
+neg/minDays	-	sql	SELECT -INTERVAL '-2147483648 days' AS a
+neg/minTime	-	sql	SELECT -INTERVAL '-2562047788:00:54.775808' AS a
+neg/minTimeBuilt	-	sql	SELECT INTERVAL '-2562047788:00:54.775807' - INTERVAL '00:00:00.000001' AS a, -(INTERVAL '-2562047788:00:54.775807' - INTERVAL '00:00:00.000001') AS b
+neg/minTimeBuiltAlone	-	sql	SELECT INTERVAL '-2562047788:00:54.775807' - INTERVAL '00:00:00.000001' AS a
+mul/int	-	sql	SELECT INTERVAL '1 mon 1 day 01:00:00' * 3 AS a, CAST(INTERVAL '1 mon 1 day 01:00:00' * 3 AS TEXT) AS t
+mul/zero	-	sql	SELECT INTERVAL '1 mon 1 day 01:00:00' * 0 AS a, CAST(INTERVAL '1 mon 1 day 01:00:00' * 0 AS TEXT) AS t
+mul/neg	-	sql	SELECT INTERVAL '1 mon 1 day 01:00:00' * -2 AS a, CAST(INTERVAL '1 mon 1 day 01:00:00' * -2 AS TEXT) AS t
+mul/halfMonth	-	sql	SELECT INTERVAL '1 mon' * 0.5 AS a, CAST(INTERVAL '1 mon' * 0.5 AS TEXT) AS t
+mul/thirdMonth	-	sql	SELECT INTERVAL '1 mon' * 0.333333 AS a, CAST(INTERVAL '1 mon' * 0.333333 AS TEXT) AS t
+mul/monthCascade	-	sql	SELECT INTERVAL '7 mons' * 0.3 AS a, CAST(INTERVAL '7 mons' * 0.3 AS TEXT) AS t
+mul/monthToTime	-	sql	SELECT INTERVAL '1 mon' * 0.1 AS a, CAST(INTERVAL '1 mon' * 0.1 AS TEXT) AS t
+mul/dayFrac	-	sql	SELECT INTERVAL '1 day' * 1.5 AS a, CAST(INTERVAL '1 day' * 1.5 AS TEXT) AS t
+mul/dayCascade	-	sql	SELECT INTERVAL '5 days' * 0.3 AS a, CAST(INTERVAL '5 days' * 0.3 AS TEXT) AS t
+mul/yearFrac	-	sql	SELECT INTERVAL '1 year' * 1.1 AS a, CAST(INTERVAL '1 year' * 1.1 AS TEXT) AS t
+mul/mixedSign	-	sql	SELECT INTERVAL '1 mon -1 day' * 1.5 AS a, CAST(INTERVAL '1 mon -1 day' * 1.5 AS TEXT) AS t
+mul/negFrac	-	sql	SELECT INTERVAL '-1 mon' * 1.5 AS a, CAST(INTERVAL '-1 mon' * 1.5 AS TEXT) AS t
+mul/timeOver24	-	sql	SELECT INTERVAL '20:00:00' * 2 AS a, CAST(INTERVAL '20:00:00' * 2 AS TEXT) AS t
+mul/usHalfEven1	-	sql	SELECT INTERVAL '00:00:00.000001' * 1.5 AS a, CAST(INTERVAL '00:00:00.000001' * 1.5 AS TEXT) AS t
+mul/usHalfEven2	-	sql	SELECT INTERVAL '00:00:00.000001' * 2.5 AS a, CAST(INTERVAL '00:00:00.000001' * 2.5 AS TEXT) AS t
+mul/usHalfEven3	-	sql	SELECT INTERVAL '00:00:00.000001' * 0.5 AS a, CAST(INTERVAL '00:00:00.000001' * 0.5 AS TEXT) AS t
+mul/usNeg	-	sql	SELECT INTERVAL '-00:00:00.000001' * 1.5 AS a, CAST(INTERVAL '-00:00:00.000001' * 1.5 AS TEXT) AS t
+mul/tinyMonth	-	sql	SELECT INTERVAL '1 mon' * 0.0000001 AS a, CAST(INTERVAL '1 mon' * 0.0000001 AS TEXT) AS t
+mul/float8	-	sql	SELECT INTERVAL '1 day' * CAST(2.5 AS DOUBLE PRECISION) AS a, CAST(INTERVAL '1 day' * CAST(2.5 AS DOUBLE PRECISION) AS TEXT) AS t
+mul/real	-	sql	SELECT INTERVAL '1 day' * CAST(0.1 AS REAL) AS a, CAST(INTERVAL '1 day' * CAST(0.1 AS REAL) AS TEXT) AS t
+mul/bigint	-	sql	SELECT INTERVAL '1 day' * CAST(3 AS BIGINT) AS a, CAST(INTERVAL '1 day' * CAST(3 AS BIGINT) AS TEXT) AS t
+mul/numeric	-	sql	SELECT INTERVAL '1 day' * CAST(1.25 AS NUMERIC) AS a, CAST(INTERVAL '1 day' * CAST(1.25 AS NUMERIC) AS TEXT) AS t
+mul/unknown	-	sql	SELECT INTERVAL '1 day' * '2' AS a, CAST(INTERVAL '1 day' * '2' AS TEXT) AS t
+mul/null	-	sql	SELECT INTERVAL '1 day' * NULL AS a, CAST(INTERVAL '1 day' * NULL AS TEXT) AS t
+mul/overflowDays	-	sql	SELECT INTERVAL '2147483647 days' * 2 AS a, CAST(INTERVAL '2147483647 days' * 2 AS TEXT) AS t
+mul/overflowMonths	-	sql	SELECT INTERVAL '178956970 years' * 2 AS a, CAST(INTERVAL '178956970 years' * 2 AS TEXT) AS t
+mul/overflowTime	-	sql	SELECT INTERVAL '2562047788:00:00' * 2 AS a, CAST(INTERVAL '2562047788:00:00' * 2 AS TEXT) AS t
+mul/huge	-	sql	SELECT INTERVAL '1 day' * 1e300 AS a, CAST(INTERVAL '1 day' * 1e300 AS TEXT) AS t
+mul/nan	-	sql	SELECT INTERVAL '1 day' * CAST('NaN' AS DOUBLE PRECISION) AS a, CAST(INTERVAL '1 day' * CAST('NaN' AS DOUBLE PRECISION) AS TEXT) AS t
+mul/infFactor	-	sql	SELECT INTERVAL '1 day' * CAST('Infinity' AS DOUBLE PRECISION) AS a, CAST(INTERVAL '1 day' * CAST('Infinity' AS DOUBLE PRECISION) AS TEXT) AS t
+mul/negInfFactor	-	sql	SELECT INTERVAL '1 day' * CAST('-Infinity' AS DOUBLE PRECISION) AS a, CAST(INTERVAL '1 day' * CAST('-Infinity' AS DOUBLE PRECISION) AS TEXT) AS t
+mul/zeroTimesInf	-	sql	SELECT INTERVAL '0' * CAST('Infinity' AS DOUBLE PRECISION) AS a, CAST(INTERVAL '0' * CAST('Infinity' AS DOUBLE PRECISION) AS TEXT) AS t
+mul/infTimesZero	-	sql	SELECT INTERVAL 'infinity' * 0 AS a, CAST(INTERVAL 'infinity' * 0 AS TEXT) AS t
+mul/infTimesNeg	-	sql	SELECT INTERVAL 'infinity' * -1 AS a, CAST(INTERVAL 'infinity' * -1 AS TEXT) AS t
+mul/commuted	-	sql	SELECT 2 * INTERVAL '1 mon 1 day' AS a, 0.5 * INTERVAL '1 mon' AS b
+div/int	-	sql	SELECT INTERVAL '1 mon 1 day 01:00:00' / 2 AS a, CAST(INTERVAL '1 mon 1 day 01:00:00' / 2 AS TEXT) AS t
+div/thirdMonth	-	sql	SELECT INTERVAL '1 mon' / 3 AS a, CAST(INTERVAL '1 mon' / 3 AS TEXT) AS t
+div/thirdDay	-	sql	SELECT INTERVAL '1 day' / 3 AS a, CAST(INTERVAL '1 day' / 3 AS TEXT) AS t
+div/monthCascade	-	sql	SELECT INTERVAL '3 mons' / 2 AS a, CAST(INTERVAL '3 mons' / 2 AS TEXT) AS t
+div/yearBy7	-	sql	SELECT INTERVAL '1 year' / 7 AS a, CAST(INTERVAL '1 year' / 7 AS TEXT) AS t
+div/neg	-	sql	SELECT INTERVAL '3 days' / -2 AS a, CAST(INTERVAL '3 days' / -2 AS TEXT) AS t
+div/frac	-	sql	SELECT INTERVAL '1 day' / 1.5 AS a, CAST(INTERVAL '1 day' / 1.5 AS TEXT) AS t
+div/half	-	sql	SELECT INTERVAL '1 day' / 0.5 AS a, CAST(INTERVAL '1 day' / 0.5 AS TEXT) AS t
+div/us	-	sql	SELECT INTERVAL '00:00:00.000001' / 2 AS a, CAST(INTERVAL '00:00:00.000001' / 2 AS TEXT) AS t
+div/us3	-	sql	SELECT INTERVAL '00:00:00.000003' / 2 AS a, CAST(INTERVAL '00:00:00.000003' / 2 AS TEXT) AS t
+div/usNeg	-	sql	SELECT INTERVAL '-00:00:00.000001' / 2 AS a, CAST(INTERVAL '-00:00:00.000001' / 2 AS TEXT) AS t
+div/zero	-	sql	SELECT INTERVAL '1 day' / 0 AS a, CAST(INTERVAL '1 day' / 0 AS TEXT) AS t
+div/zeroFloat	-	sql	SELECT INTERVAL '1 day' / CAST(0 AS DOUBLE PRECISION) AS a, CAST(INTERVAL '1 day' / CAST(0 AS DOUBLE PRECISION) AS TEXT) AS t
+div/tiny	-	sql	SELECT INTERVAL '1 day' / 1e-300 AS a, CAST(INTERVAL '1 day' / 1e-300 AS TEXT) AS t
+div/nan	-	sql	SELECT INTERVAL '1 day' / CAST('NaN' AS DOUBLE PRECISION) AS a, CAST(INTERVAL '1 day' / CAST('NaN' AS DOUBLE PRECISION) AS TEXT) AS t
+div/infDivisor	-	sql	SELECT INTERVAL '1 day' / CAST('Infinity' AS DOUBLE PRECISION) AS a, CAST(INTERVAL '1 day' / CAST('Infinity' AS DOUBLE PRECISION) AS TEXT) AS t
+div/infDividend	-	sql	SELECT INTERVAL 'infinity' / 2 AS a, CAST(INTERVAL 'infinity' / 2 AS TEXT) AS t
+div/infByInf	-	sql	SELECT INTERVAL 'infinity' / CAST('Infinity' AS DOUBLE PRECISION) AS a, CAST(INTERVAL 'infinity' / CAST('Infinity' AS DOUBLE PRECISION) AS TEXT) AS t
+div/unknown	-	sql	SELECT INTERVAL '1 day' / '2' AS a, CAST(INTERVAL '1 day' / '2' AS TEXT) AS t
+div/null	-	sql	SELECT INTERVAL '1 day' / NULL AS a, CAST(INTERVAL '1 day' / NULL AS TEXT) AS t
+div/roundTrip	-	sql	SELECT (INTERVAL '1 mon' / 3) * 3 AS a, (INTERVAL '1 mon' / 3) * 3 = INTERVAL '1 mon' AS b, (INTERVAL '1 day' / 7) * 7 AS c
+justify/pos	-	sql	SELECT justify_days(INTERVAL '1 mon 35 days 27:00:00') AS d, justify_hours(INTERVAL '1 mon 35 days 27:00:00') AS h, justify_interval(INTERVAL '1 mon 35 days 27:00:00') AS i
+justify/neg	-	sql	SELECT justify_days(INTERVAL '-1 mon -35 days -27:00:00') AS d, justify_hours(INTERVAL '-1 mon -35 days -27:00:00') AS h, justify_interval(INTERVAL '-1 mon -35 days -27:00:00') AS i
+justify/mixed1	-	sql	SELECT justify_days(INTERVAL '1 mon -1 day') AS d, justify_hours(INTERVAL '1 mon -1 day') AS h, justify_interval(INTERVAL '1 mon -1 day') AS i
+justify/mixed2	-	sql	SELECT justify_days(INTERVAL '-1 mon 35 days') AS d, justify_hours(INTERVAL '-1 mon 35 days') AS h, justify_interval(INTERVAL '-1 mon 35 days') AS i
+justify/mixed3	-	sql	SELECT justify_days(INTERVAL '1 day -25:00:00') AS d, justify_hours(INTERVAL '1 day -25:00:00') AS h, justify_interval(INTERVAL '1 day -25:00:00') AS i
+justify/mixed4	-	sql	SELECT justify_days(INTERVAL '-1 day 25:00:00') AS d, justify_hours(INTERVAL '-1 day 25:00:00') AS h, justify_interval(INTERVAL '-1 day 25:00:00') AS i
+justify/zero	-	sql	SELECT justify_days(INTERVAL '0') AS d, justify_hours(INTERVAL '0') AS h, justify_interval(INTERVAL '0') AS i
+justify/us	-	sql	SELECT justify_days(INTERVAL '-00:00:00.000001') AS d, justify_hours(INTERVAL '-00:00:00.000001') AS h, justify_interval(INTERVAL '-00:00:00.000001') AS i
+justify/bigHours	-	sql	SELECT justify_days(INTERVAL '2562047788:00:54.775807') AS d, justify_hours(INTERVAL '2562047788:00:54.775807') AS h, justify_interval(INTERVAL '2562047788:00:54.775807') AS i
+justify/bigDays	-	sql	SELECT justify_days(INTERVAL '2147483647 days 24:00:00') AS d, justify_hours(INTERVAL '2147483647 days 24:00:00') AS h, justify_interval(INTERVAL '2147483647 days 24:00:00') AS i
+justify/monthOverflow	-	sql	SELECT justify_days(INTERVAL '178956970 years 7 mons 30 days') AS d, justify_hours(INTERVAL '178956970 years 7 mons 30 days') AS h, justify_interval(INTERVAL '178956970 years 7 mons 30 days') AS i
+justify/inf	-	sql	SELECT justify_days(INTERVAL 'infinity') AS d, justify_hours(INTERVAL 'infinity') AS h, justify_interval(INTERVAL 'infinity') AS i
+justify/null	-	sql	SELECT justify_days(CAST(NULL AS INTERVAL)) AS d, justify_hours(CAST(NULL AS INTERVAL)) AS h, justify_interval(CAST(NULL AS INTERVAL)) AS i
+ddl/create/iv80_m	-	ddl	CREATE TABLE iv80_m (id BIGINT, s TEXT)
+ddl/insert/iv80_m	-	ddl	INSERT INTO iv80_m VALUES (1, '1 mon'), (2, '30 days'), (3, '720:00:00'), (4, '-1 day'), (5, '00:00:00.000001'), (6, NULL), (7, '1 mon -30 days'), (8, '1 year 25:00:00')
+agg/sumAvg	-	sql	SELECT sum(CAST(s AS INTERVAL)) AS s, avg(CAST(s AS INTERVAL)) AS a, count(CAST(s AS INTERVAL)) AS n FROM iv80_m
+agg/sumAvgSubset	-	sql	SELECT sum(CAST(s AS INTERVAL)) AS s, avg(CAST(s AS INTERVAL)) AS a FROM iv80_m WHERE id IN (1, 4)
+agg/avgCascade	-	sql	SELECT avg(CAST(s AS INTERVAL)) AS a FROM iv80_m WHERE id IN (1, 5)
+agg/avgThirds	-	sql	SELECT avg(v) AS a FROM (VALUES (INTERVAL '1 mon'), (INTERVAL '0'), (INTERVAL '0')) t(v)
+agg/avgUs	-	sql	SELECT avg(v) AS a FROM (VALUES (INTERVAL '00:00:00.000001'), (INTERVAL '0')) t(v)
+agg/avgUs3	-	sql	SELECT avg(v) AS a FROM (VALUES (INTERVAL '00:00:00.000003'), (INTERVAL '0')) t(v)
+agg/sumEmpty	-	sql	SELECT sum(CAST(s AS INTERVAL)) AS s, avg(CAST(s AS INTERVAL)) AS a FROM iv80_m WHERE id < 0
+agg/sumNull	-	sql	SELECT sum(CAST(s AS INTERVAL)) AS s, avg(CAST(s AS INTERVAL)) AS a FROM iv80_m WHERE id = 6
+agg/sumGroup	-	sql	SELECT id % 2 AS g, sum(CAST(s AS INTERVAL)) AS s, avg(CAST(s AS INTERVAL)) AS a FROM iv80_m GROUP BY id % 2 ORDER BY g
+agg/sumOverflowDays	-	sql	SELECT sum(v) AS s FROM (VALUES (INTERVAL '2147483647 days'), (INTERVAL '1 day')) t(v)
+agg/sumOverflowThenBack	-	sql	SELECT sum(v) AS s FROM (VALUES (INTERVAL '2147483647 days'), (INTERVAL '1 day'), (INTERVAL '-1 day')) t(v)
+agg/avgBig	-	sql	SELECT avg(v) AS a FROM (VALUES (INTERVAL '2147483647 days'), (INTERVAL '2147483647 days')) t(v)
+agg/sumInf	-	sql	SELECT sum(v) AS s, avg(v) AS a FROM (VALUES (INTERVAL 'infinity'), (INTERVAL '1 day')) t(v)
+agg/sumInfNegInf	-	sql	SELECT sum(v) AS s FROM (VALUES (INTERVAL 'infinity'), (INTERVAL '-infinity')) t(v)
+agg/avgInfNegInf	-	sql	SELECT avg(v) AS a FROM (VALUES (INTERVAL 'infinity'), (INTERVAL '-infinity')) t(v)
+agg/sumWindow	-	sql	SELECT id, sum(CAST(s AS INTERVAL)) OVER (ORDER BY id) AS s FROM iv80_m WHERE id <= 4 ORDER BY id
+agg/avgWindowSliding	-	sql	SELECT id, avg(CAST(s AS INTERVAL)) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS a FROM iv80_m WHERE id <= 5 ORDER BY id

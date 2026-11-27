@@ -1,0 +1,100 @@
+# PostgreSQL 17.11 answers for the #1680b interval corpus, section 04_keys (TestArc1680bMeasure; postgres:17-alpine, initdb --locale=C --encoding=UTF8, --memory=4g).
+# PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit; datcollate=C datctype=C server_encoding=UTF8; defaults IntervalStyle=postgres DateStyle=ISO, MDY TimeZone=UTC; a cell's settings column overrides them for that cell only.
+# name<TAB>answer: ok | (0 rows) | ERR <SQLSTATE>: message | col:type(oid),... | row; row
+ddl/create/iv80_k	ok
+ddl/insert/iv80_k	ok
+ddl/create/iv80_kr	ok
+ddl/insert/iv80_kr	ok
+group/iv80_k/default	k:interval(1186),n:bigint(20),lo:bigint(20) | 1 mon,3,1; 1 mon -30 days,3,4; -1 days,2,7; NULL,2,9; 1 day,2,11; 213503982 days 08:01:49.551616,1,13; 106751991 days 04:00:54.775808,1,14; 1 year,3,15
+explain/group/iv80_k/default	QUERY PLAN:text(25) | Sort;   Sort Key: (min(id)) NULLS FIRST;   ->  HashAggregate;         Group Key: (s)::interval;         ->  Seq Scan on iv80_k
+distinct/iv80_k/default	k:interval(1186) | NULL; -1 days; 1 mon -30 days; 1 day; 1 mon; 1 year; 106751991 days 04:00:54.775808; 213503982 days 08:01:49.551616
+explain/distinct/iv80_k/default	QUERY PLAN:text(25) | Sort;   Sort Key: ((iv80_k.s)::interval) NULLS FIRST;   ->  HashAggregate;         Group Key: (iv80_k.s)::interval;         ->  Seq Scan on iv80_k
+union/iv80_k/default	k:interval(1186) | NULL; -1 days; 1 mon -30 days; 1 day; 1 mon; 1 year; 106751991 days 04:00:54.775808; 213503982 days 08:01:49.551616
+intersect/iv80_k/default	k:interval(1186) | -24:00:00; 00:00:00; 24:00:00; 30 days; 360 days
+exceptAll/iv80_k/default	k:interval(1186) | -1 days; -1 days; 1 mon -30 days; 1 mon -30 days; 1 mon; 1 mon
+group/iv80_k/sortagg	k:interval(1186),n:bigint(20),lo:bigint(20) | 30 days,3,1; 00:00:00,3,4; -24:00:00,2,7; NULL,2,9; 24:00:00,2,11; 213503982 days 08:01:49.551616,1,13; 106751991 days 04:00:54.775808,1,14; 1 year,3,15
+explain/group/iv80_k/sortagg	QUERY PLAN:text(25) | Sort;   Sort Key: (min(id)) NULLS FIRST;   ->  GroupAggregate;         Group Key: ((s)::interval);         ->  Sort;               Sort Key: ((s)::interval);               ->  Seq Scan on iv80_k
+distinct/iv80_k/sortagg	k:interval(1186) | NULL; -24:00:00; 00:00:00; 24:00:00; 30 days; 1 year; 106751991 days 04:00:54.775808; 213503982 days 08:01:49.551616
+explain/distinct/iv80_k/sortagg	QUERY PLAN:text(25) | Sort;   Sort Key: ((iv80_k.s)::interval) NULLS FIRST;   ->  Unique;         ->  Sort;               Sort Key: ((iv80_k.s)::interval);               ->  Seq Scan on iv80_k
+union/iv80_k/sortagg	k:interval(1186) | NULL; -1 days; 00:00:00; 1 day; 30 days; 1 year; 106751991 days 04:00:54.775808; 213503982 days 08:01:49.551616
+intersect/iv80_k/sortagg	k:interval(1186) | -24:00:00; 1 mon -30 days; 24:00:00; 30 days; 360 days
+exceptAll/iv80_k/sortagg	k:interval(1186) | -1 days; -1 days; 00:00:00; 00:00:00; 720:00:00; 720:00:00
+group/iv80_k/hashagg	k:interval(1186),n:bigint(20),lo:bigint(20) | 1 mon,3,1; 1 mon -30 days,3,4; -1 days,2,7; NULL,2,9; 1 day,2,11; 213503982 days 08:01:49.551616,1,13; 106751991 days 04:00:54.775808,1,14; 1 year,3,15
+explain/group/iv80_k/hashagg	QUERY PLAN:text(25) | Sort;   Sort Key: (min(id)) NULLS FIRST;   ->  HashAggregate;         Group Key: (s)::interval;         ->  Seq Scan on iv80_k
+distinct/iv80_k/hashagg	k:interval(1186) | NULL; -1 days; 1 mon -30 days; 1 day; 1 mon; 1 year; 106751991 days 04:00:54.775808; 213503982 days 08:01:49.551616
+explain/distinct/iv80_k/hashagg	QUERY PLAN:text(25) | Sort;   Sort Key: ((iv80_k.s)::interval) NULLS FIRST;   ->  HashAggregate;         Group Key: (iv80_k.s)::interval;         ->  Seq Scan on iv80_k
+union/iv80_k/hashagg	k:interval(1186) | NULL; -1 days; 1 mon -30 days; 1 day; 1 mon; 1 year; 106751991 days 04:00:54.775808; 213503982 days 08:01:49.551616
+intersect/iv80_k/hashagg	k:interval(1186) | -24:00:00; 00:00:00; 24:00:00; 30 days; 360 days
+exceptAll/iv80_k/hashagg	k:interval(1186) | -1 days; -1 days; 1 mon -30 days; 1 mon -30 days; 1 mon; 1 mon
+groupCount/iv80_k	g:bigint(20) | 8
+distinctCount/iv80_k	g:bigint(20) | 8
+countDistinct/iv80_k	n:bigint(20) | 7
+partition/iv80_k	id:bigint(20),n:bigint(20),f:bigint(20) | 1,3,1; 2,3,1; 3,3,1; 4,3,4; 5,3,4; 6,3,4; 7,2,7; 8,2,7; 9,2,9; 10,2,9; 11,2,11; 12,2,11; 13,1,13; 14,1,14; 15,3,15; 16,3,15; 17,3,15
+peers/iv80_k	id:bigint(20),r:bigint(20),dr:bigint(20),cnt:bigint(20) | 1,8,4,10; 2,8,4,10; 3,8,4,10; 4,3,2,5; 5,3,2,5; 6,3,2,5; 7,1,1,2; 8,1,1,2; 9,16,8,17; 10,16,8,17; 11,6,3,7; 12,6,3,7; 13,15,7,15; 14,14,6,14; 15,11,5,13; 16,11,5,13; 17,11,5,13
+orderTie/iv80_k	id:bigint(20),v:interval(1186) | 7,-1 days; 8,-24:00:00; 4,1 mon -30 days; 5,00:00:00; 6,00:00:00; 11,1 day; 12,24:00:00; 1,1 mon; 2,30 days; 3,720:00:00; 15,1 year; 16,360 days; 17,1 year; 14,106751991 days 04:00:54.775808; 13,213503982 days 08:01:49.551616; 9,NULL; 10,NULL
+withTies/iv80_k	id:bigint(20) | 8; 7
+withTiesCount/iv80_k	n:bigint(20) | 1
+group/iv80_kr/default	k:interval(1186),n:bigint(20),lo:bigint(20) | 720:00:00,3,1; 00:00:00,3,4; -24:00:00,2,7; NULL,2,9; 24:00:00,2,11; 213503982 days 08:01:49.551616,1,13; 106751991 days 04:00:54.775808,1,14; 1 year,3,15
+explain/group/iv80_kr/default	QUERY PLAN:text(25) | Sort;   Sort Key: (min(id)) NULLS FIRST;   ->  HashAggregate;         Group Key: (s)::interval;         ->  Seq Scan on iv80_kr
+distinct/iv80_kr/default	k:interval(1186) | NULL; -24:00:00; 00:00:00; 24:00:00; 720:00:00; 1 year; 106751991 days 04:00:54.775808; 213503982 days 08:01:49.551616
+explain/distinct/iv80_kr/default	QUERY PLAN:text(25) | Sort;   Sort Key: ((iv80_kr.s)::interval) NULLS FIRST;   ->  HashAggregate;         Group Key: (iv80_kr.s)::interval;         ->  Seq Scan on iv80_kr
+union/iv80_kr/default	k:interval(1186) | NULL; -24:00:00; 00:00:00; 24:00:00; 720:00:00; 1 year; 106751991 days 04:00:54.775808; 213503982 days 08:01:49.551616
+intersect/iv80_kr/default	k:interval(1186) | -24:00:00; 00:00:00; 24:00:00; 30 days; 360 days
+exceptAll/iv80_kr/default	k:interval(1186) | -24:00:00; -24:00:00; 00:00:00; 00:00:00; 720:00:00; 720:00:00
+group/iv80_kr/sortagg	k:interval(1186),n:bigint(20),lo:bigint(20) | 720:00:00,3,1; 00:00:00,3,4; -1 days,2,7; NULL,2,9; 24:00:00,2,11; 213503982 days 08:01:49.551616,1,13; 106751991 days 04:00:54.775808,1,14; 1 year,3,15
+explain/group/iv80_kr/sortagg	QUERY PLAN:text(25) | Sort;   Sort Key: (min(id)) NULLS FIRST;   ->  GroupAggregate;         Group Key: ((s)::interval);         ->  Sort;               Sort Key: ((s)::interval);               ->  Seq Scan on iv80_kr
+distinct/iv80_kr/sortagg	k:interval(1186) | NULL; -1 days; 00:00:00; 24:00:00; 720:00:00; 1 year; 106751991 days 04:00:54.775808; 213503982 days 08:01:49.551616
+explain/distinct/iv80_kr/sortagg	QUERY PLAN:text(25) | Sort;   Sort Key: ((iv80_kr.s)::interval) NULLS FIRST;   ->  Unique;         ->  Sort;               Sort Key: ((iv80_kr.s)::interval);               ->  Seq Scan on iv80_kr
+union/iv80_kr/sortagg	k:interval(1186) | NULL; -24:00:00; 00:00:00; 1 day; 720:00:00; 360 days; 106751991 days 04:00:54.775808; 213503982 days 08:01:49.551616
+intersect/iv80_kr/sortagg	k:interval(1186) | -1 days; 1 mon -30 days; 1 day; 30 days; 1 year
+exceptAll/iv80_kr/sortagg	k:interval(1186) | -24:00:00; -24:00:00; 00:00:00; 00:00:00; 1 mon; 1 mon
+group/iv80_kr/hashagg	k:interval(1186),n:bigint(20),lo:bigint(20) | 720:00:00,3,1; 00:00:00,3,4; -24:00:00,2,7; NULL,2,9; 24:00:00,2,11; 213503982 days 08:01:49.551616,1,13; 106751991 days 04:00:54.775808,1,14; 1 year,3,15
+explain/group/iv80_kr/hashagg	QUERY PLAN:text(25) | Sort;   Sort Key: (min(id)) NULLS FIRST;   ->  HashAggregate;         Group Key: (s)::interval;         ->  Seq Scan on iv80_kr
+distinct/iv80_kr/hashagg	k:interval(1186) | NULL; -24:00:00; 00:00:00; 24:00:00; 720:00:00; 1 year; 106751991 days 04:00:54.775808; 213503982 days 08:01:49.551616
+explain/distinct/iv80_kr/hashagg	QUERY PLAN:text(25) | Sort;   Sort Key: ((iv80_kr.s)::interval) NULLS FIRST;   ->  HashAggregate;         Group Key: (iv80_kr.s)::interval;         ->  Seq Scan on iv80_kr
+union/iv80_kr/hashagg	k:interval(1186) | NULL; -24:00:00; 00:00:00; 24:00:00; 720:00:00; 1 year; 106751991 days 04:00:54.775808; 213503982 days 08:01:49.551616
+intersect/iv80_kr/hashagg	k:interval(1186) | -24:00:00; 00:00:00; 24:00:00; 30 days; 360 days
+exceptAll/iv80_kr/hashagg	k:interval(1186) | -24:00:00; -24:00:00; 00:00:00; 00:00:00; 720:00:00; 720:00:00
+groupCount/iv80_kr	g:bigint(20) | 8
+distinctCount/iv80_kr	g:bigint(20) | 8
+countDistinct/iv80_kr	n:bigint(20) | 7
+partition/iv80_kr	id:bigint(20),n:bigint(20),f:bigint(20) | 1,3,1; 2,3,1; 3,3,1; 4,3,4; 5,3,4; 6,3,4; 7,2,7; 8,2,7; 9,2,9; 10,2,9; 11,2,11; 12,2,11; 13,1,13; 14,1,14; 15,3,15; 16,3,15; 17,3,15
+peers/iv80_kr	id:bigint(20),r:bigint(20),dr:bigint(20),cnt:bigint(20) | 1,8,4,10; 2,8,4,10; 3,8,4,10; 4,3,2,5; 5,3,2,5; 6,3,2,5; 7,1,1,2; 8,1,1,2; 9,16,8,17; 10,16,8,17; 11,6,3,7; 12,6,3,7; 13,15,7,15; 14,14,6,14; 15,11,5,13; 16,11,5,13; 17,11,5,13
+orderTie/iv80_kr	id:bigint(20),v:interval(1186) | 7,-1 days; 8,-24:00:00; 4,1 mon -30 days; 5,00:00:00; 6,00:00:00; 11,1 day; 12,24:00:00; 1,1 mon; 2,30 days; 3,720:00:00; 15,1 year; 16,360 days; 17,1 year; 14,106751991 days 04:00:54.775808; 13,213503982 days 08:01:49.551616; 9,NULL; 10,NULL
+withTies/iv80_kr	id:bigint(20) | 7; 8
+withTiesCount/iv80_kr	n:bigint(20) | 1
+join/default	l:bigint(20),r:bigint(20) | 1,2; 1,3; 2,3; 4,5; 4,6; 5,6; 7,8; 11,12; 15,16; 15,17; 16,17
+explain/join/default	QUERY PLAN:text(25) | Sort;   Sort Key: a.id, b.id;   ->  Merge Join;         Merge Cond: (((a.s)::interval) = ((b.s)::interval));         Join Filter: (a.id < b.id);         ->  Sort;               Sort Key: ((a.s)::interval);               ->  Seq Scan on iv80_k a;         ->  Sort;               Sort Key: ((b.s)::interval);               ->  Seq Scan on iv80_k b
+join/hash	l:bigint(20),r:bigint(20) | 1,2; 1,3; 2,3; 4,5; 4,6; 5,6; 7,8; 11,12; 15,16; 15,17; 16,17
+explain/join/hash	QUERY PLAN:text(25) | Sort;   Sort Key: a.id, b.id;   ->  Hash Join;         Hash Cond: ((a.s)::interval = (b.s)::interval);         Join Filter: (a.id < b.id);         ->  Seq Scan on iv80_k a;         ->  Hash;               ->  Seq Scan on iv80_k b
+join/merge	l:bigint(20),r:bigint(20) | 1,2; 1,3; 2,3; 4,5; 4,6; 5,6; 7,8; 11,12; 15,16; 15,17; 16,17
+explain/join/merge	QUERY PLAN:text(25) | Sort;   Sort Key: a.id, b.id;   ->  Merge Join;         Merge Cond: (((a.s)::interval) = ((b.s)::interval));         Join Filter: (a.id < b.id);         ->  Sort;               Sort Key: ((a.s)::interval);               ->  Seq Scan on iv80_k a;         ->  Sort;               Sort Key: ((b.s)::interval);               ->  Seq Scan on iv80_k b
+join/nestloop	l:bigint(20),r:bigint(20) | 1,2; 1,3; 2,3; 4,5; 4,6; 5,6; 7,8; 11,12; 15,16; 15,17; 16,17
+explain/join/nestloop	QUERY PLAN:text(25) | Sort;   Sort Key: a.id, b.id;   ->  Nested Loop;         Join Filter: ((a.id < b.id) AND ((a.s)::interval = (b.s)::interval));         ->  Seq Scan on iv80_k a;         ->  Materialize;               ->  Seq Scan on iv80_k b
+join/left	l:bigint(20),r:bigint(20) | 1,2; 1,3; 2,1; 2,3; 3,1; 3,2; 4,5; 4,6; 5,4; 5,6; 6,4; 6,5; 7,8; 8,7; 9,NULL; 10,NULL; 11,12; 12,11; 13,NULL; 14,NULL; 15,16; 15,17; 16,15; 16,17; 17,15; 17,16
+join/semi	id:bigint(20) | 1; 2; 3; 13
+join/anti	id:bigint(20) | 9; 10; 13; 14
+setLit/union/default	x:interval(1186) | 1 mon
+setLit/unionRev/default	x:interval(1186) | 720:00:00
+setLit/intersect/default	x:interval(1186) | 30 days
+setLit/except/default	(0 rows)
+setLit/exceptAll/default	x:interval(1186) | 1 mon; 1 mon
+setLit/intersectAll/default	x:interval(1186) | 720:00:00; 720:00:00
+setLit/valuesDistinct/default	x:interval(1186) | 30 days
+setLit/union/sortagg	x:interval(1186) | 1 mon
+setLit/unionRev/sortagg	x:interval(1186) | 720:00:00
+setLit/intersect/sortagg	x:interval(1186) | 30 days
+setLit/except/sortagg	(0 rows)
+setLit/exceptAll/sortagg	x:interval(1186) | 1 mon; 1 mon
+setLit/intersectAll/sortagg	x:interval(1186) | 720:00:00; 720:00:00
+setLit/valuesDistinct/sortagg	x:interval(1186) | 30 days
+wrap/group	g:bigint(20) | 2
+wrap/join	n:bigint(20) | 0
+wrap/hashCollide	a:boolean(16),b:boolean(16),c:boolean(16) | t,t,t
+adr0024/intersectNumericSort	k:numeric(1700) | 1; 2; 3; 4.00; 5; 6.00
+explain/adr0024/intersectNumericSort	QUERY PLAN:text(25) | Subquery Scan on u;   ->  SetOp Intersect;         ->  Sort;               Sort Key: "*SELECT* 1".k;               ->  Append;                     ->  Subquery Scan on "*SELECT* 1";                           ->  Values Scan on "*VALUES*";                     ->  Subquery Scan on "*SELECT* 2";                           ->  Values Scan on "*VALUES*_1"
+adr0024/intersectNumericHash	k:numeric(1700) | 1.00; 2.00; 3.00; 4.00; 5.00; 6.00
+explain/intersect/iv80_kr/sortagg	QUERY PLAN:text(25) | Subquery Scan on u;   ->  SetOp Intersect;         ->  Sort;               Sort Key: "*SELECT* 1".k;               ->  Append;                     ->  Subquery Scan on "*SELECT* 1";                           ->  Seq Scan on iv80_kr;                                 Filter: (id = ANY ('{2,5,8,12,16}'::bigint[]));                     ->  Subquery Scan on "*SELECT* 2";                           ->  Seq Scan on iv80_kr iv80_kr_1;                                 Filter: (id = ANY ('{1,3,4,7,11,15}'::bigint[]))
+array/group	g:bigint(20) | 1
+array/eq	a:boolean(16),b:boolean(16) | t,t
+row/group	g:bigint(20) | 2

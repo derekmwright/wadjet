@@ -1,0 +1,157 @@
+# #1680b interval corpus statements (arc_1680b_interval_corpus_cells_test.go). name<TAB>settings<TAB>kind<TAB>sql
+lit/0/1 day	-	sql	SELECT INTERVAL '1 day' AS a
+lit/1/1 day 2 hours	-	sql	SELECT INTERVAL '1 day 2 hours' AS a
+lit/2/1 year 2 months 3 days 4 hours 5 minutes 6 seconds	-	sql	SELECT INTERVAL '1 year 2 months 3 days 4 hours 5 minutes 6 seconds' AS a
+lit/3/1-2	-	sql	SELECT INTERVAL '1-2' AS a
+lit/4/-1-2	-	sql	SELECT INTERVAL '-1-2' AS a
+lit/5/3 4:05:06	-	sql	SELECT INTERVAL '3 4:05:06' AS a
+lit/6/-3 -4:05:06	-	sql	SELECT INTERVAL '-3 -4:05:06' AS a
+lit/7/1-2 3 4:05:06	-	sql	SELECT INTERVAL '1-2 3 4:05:06' AS a
+lit/8/4:05:06	-	sql	SELECT INTERVAL '4:05:06' AS a
+lit/9/4:05	-	sql	SELECT INTERVAL '4:05' AS a
+lit/10/-4:05:06	-	sql	SELECT INTERVAL '-4:05:06' AS a
+lit/11/1 day 25:00:00	-	sql	SELECT INTERVAL '1 day 25:00:00' AS a
+lit/12/-1 day +25:00:00	-	sql	SELECT INTERVAL '-1 day +25:00:00' AS a
+lit/13/1 mon -30 days	-	sql	SELECT INTERVAL '1 mon -30 days' AS a
+lit/14/-1 year -2 mons +3 days	-	sql	SELECT INTERVAL '-1 year -2 mons +3 days' AS a
+lit/15/1 year -1 second	-	sql	SELECT INTERVAL '1 year -1 second' AS a
+lit/16/P1Y2M3DT4H5M6S	-	sql	SELECT INTERVAL 'P1Y2M3DT4H5M6S' AS a
+lit/17/P1Y2M3DT4H5M6.5S	-	sql	SELECT INTERVAL 'P1Y2M3DT4H5M6.5S' AS a
+lit/18/PT36H	-	sql	SELECT INTERVAL 'PT36H' AS a
+lit/19/P1.5M	-	sql	SELECT INTERVAL 'P1.5M' AS a
+lit/20/P0.5Y	-	sql	SELECT INTERVAL 'P0.5Y' AS a
+lit/21/P1W	-	sql	SELECT INTERVAL 'P1W' AS a
+lit/22/-P1D	-	sql	SELECT INTERVAL '-P1D' AS a
+lit/23/P-1DT-1H	-	sql	SELECT INTERVAL 'P-1DT-1H' AS a
+lit/24/P0001-02-03T04:05:06	-	sql	SELECT INTERVAL 'P0001-02-03T04:05:06' AS a
+lit/25/PT0S	-	sql	SELECT INTERVAL 'PT0S' AS a
+lit/26/@ 1 year 2 mons	-	sql	SELECT INTERVAL '@ 1 year 2 mons' AS a
+lit/27/@ 1 year 2 mons ago	-	sql	SELECT INTERVAL '@ 1 year 2 mons ago' AS a
+lit/28/1 day ago	-	sql	SELECT INTERVAL '1 day ago' AS a
+lit/29/-1 day ago	-	sql	SELECT INTERVAL '-1 day ago' AS a
+lit/30/@ 3 days 4 hours 5 mins 6 secs	-	sql	SELECT INTERVAL '@ 3 days 4 hours 5 mins 6 secs' AS a
+lit/31/1.5 months	-	sql	SELECT INTERVAL '1.5 months' AS a
+lit/32/1.5 days	-	sql	SELECT INTERVAL '1.5 days' AS a
+lit/33/1.5 years	-	sql	SELECT INTERVAL '1.5 years' AS a
+lit/34/0.5 weeks	-	sql	SELECT INTERVAL '0.5 weeks' AS a
+lit/35/1.5 hours	-	sql	SELECT INTERVAL '1.5 hours' AS a
+lit/36/1.5 minutes	-	sql	SELECT INTERVAL '1.5 minutes' AS a
+lit/37/0.1 months	-	sql	SELECT INTERVAL '0.1 months' AS a
+lit/38/1.0333333 months	-	sql	SELECT INTERVAL '1.0333333 months' AS a
+lit/39/-1.5 months	-	sql	SELECT INTERVAL '-1.5 months' AS a
+lit/40/-1.5 days	-	sql	SELECT INTERVAL '-1.5 days' AS a
+lit/41/1.5 centuries	-	sql	SELECT INTERVAL '1.5 centuries' AS a
+lit/42/1 decade	-	sql	SELECT INTERVAL '1 decade' AS a
+lit/43/1 century	-	sql	SELECT INTERVAL '1 century' AS a
+lit/44/1 millennium	-	sql	SELECT INTERVAL '1 millennium' AS a
+lit/45/10 weeks	-	sql	SELECT INTERVAL '10 weeks' AS a
+lit/46/1.000001 seconds	-	sql	SELECT INTERVAL '1.000001 seconds' AS a
+lit/47/0.0000005 seconds	-	sql	SELECT INTERVAL '0.0000005 seconds' AS a
+lit/48/0.0000015 seconds	-	sql	SELECT INTERVAL '0.0000015 seconds' AS a
+lit/49/0.0000025 seconds	-	sql	SELECT INTERVAL '0.0000025 seconds' AS a
+lit/50/1 microsecond	-	sql	SELECT INTERVAL '1 microsecond' AS a
+lit/51/1 millisecond	-	sql	SELECT INTERVAL '1 millisecond' AS a
+lit/52/1.5 microseconds	-	sql	SELECT INTERVAL '1.5 microseconds' AS a
+lit/53/1:2:3.123456789	-	sql	SELECT INTERVAL '1:2:3.123456789' AS a
+lit/54/-0.000001 seconds	-	sql	SELECT INTERVAL '-0.000001 seconds' AS a
+lit/55/00:00:00.000001	-	sql	SELECT INTERVAL '00:00:00.000001' AS a
+lit/56/0	-	sql	SELECT INTERVAL '0' AS a
+lit/57/0 seconds	-	sql	SELECT INTERVAL '0 seconds' AS a
+lit/58/00:00:00	-	sql	SELECT INTERVAL '00:00:00' AS a
+lit/59/-0 days	-	sql	SELECT INTERVAL '-0 days' AS a
+lit/60/100	-	sql	SELECT INTERVAL '100' AS a
+lit/61/1.5	-	sql	SELECT INTERVAL '1.5' AS a
+lit/62/-100	-	sql	SELECT INTERVAL '-100' AS a
+lit/63/178956970 years 7 months	-	sql	SELECT INTERVAL '178956970 years 7 months' AS a
+lit/64/178956970 years 8 months	-	sql	SELECT INTERVAL '178956970 years 8 months' AS a
+lit/65/-178956970 years -8 months	-	sql	SELECT INTERVAL '-178956970 years -8 months' AS a
+lit/66/-178956970 years -9 months	-	sql	SELECT INTERVAL '-178956970 years -9 months' AS a
+lit/67/2147483647 months	-	sql	SELECT INTERVAL '2147483647 months' AS a
+lit/68/2147483648 months	-	sql	SELECT INTERVAL '2147483648 months' AS a
+lit/69/-2147483648 months	-	sql	SELECT INTERVAL '-2147483648 months' AS a
+lit/70/-2147483649 months	-	sql	SELECT INTERVAL '-2147483649 months' AS a
+lit/71/2147483647 days	-	sql	SELECT INTERVAL '2147483647 days' AS a
+lit/72/2147483648 days	-	sql	SELECT INTERVAL '2147483648 days' AS a
+lit/73/-2147483648 days	-	sql	SELECT INTERVAL '-2147483648 days' AS a
+lit/74/-2147483649 days	-	sql	SELECT INTERVAL '-2147483649 days' AS a
+lit/75/2562047788:00:54.775807	-	sql	SELECT INTERVAL '2562047788:00:54.775807' AS a
+lit/76/2562047788:00:54.775808	-	sql	SELECT INTERVAL '2562047788:00:54.775808' AS a
+lit/77/-2562047788:00:54.775808	-	sql	SELECT INTERVAL '-2562047788:00:54.775808' AS a
+lit/78/-2562047788:00:54.775809	-	sql	SELECT INTERVAL '-2562047788:00:54.775809' AS a
+lit/79/2147483647 months 2147483647 days 2562047788:00:54.775807	-	sql	SELECT INTERVAL '2147483647 months 2147483647 days 2562047788:00:54.775807' AS a
+lit/80/-2147483648 months -2147483648 days -2562047788:00:54.775808	-	sql	SELECT INTERVAL '-2147483648 months -2147483648 days -2562047788:00:54.775808' AS a
+lit/81/infinity	-	sql	SELECT INTERVAL 'infinity' AS a
+lit/82/-infinity	-	sql	SELECT INTERVAL '-infinity' AS a
+lit/83/+infinity	-	sql	SELECT INTERVAL '+infinity' AS a
+lit/84/INFINITY	-	sql	SELECT INTERVAL 'INFINITY' AS a
+lit/85/	-	sql	SELECT INTERVAL '' AS a
+lit/86/ 	-	sql	SELECT INTERVAL ' ' AS a
+lit/87/garbage	-	sql	SELECT INTERVAL 'garbage' AS a
+lit/88/1 fortnight	-	sql	SELECT INTERVAL '1 fortnight' AS a
+lit/89/1 day 1 day	-	sql	SELECT INTERVAL '1 day 1 day' AS a
+lit/90/1 2 3	-	sql	SELECT INTERVAL '1 2 3' AS a
+lit/91/P1Y2	-	sql	SELECT INTERVAL 'P1Y2' AS a
+lit/92/1 days 2 days	-	sql	SELECT INTERVAL '1 days 2 days' AS a
+lit/null	-	sql	SELECT CAST(NULL AS INTERVAL) AS a
+std/ym	-	sql	SELECT INTERVAL '1-2' YEAR TO MONTH AS a
+std/ymNeg	-	sql	SELECT INTERVAL '-1-2' YEAR TO MONTH AS a
+std/ds	-	sql	SELECT INTERVAL '3 4:05:06' DAY TO SECOND AS a
+std/dsFrac	-	sql	SELECT INTERVAL '3 4:05:06.789' DAY TO SECOND AS a
+std/year	-	sql	SELECT INTERVAL '5' YEAR AS a
+std/month	-	sql	SELECT INTERVAL '5' MONTH AS a
+std/day	-	sql	SELECT INTERVAL '5' DAY AS a
+std/hour	-	sql	SELECT INTERVAL '5' HOUR AS a
+std/minute	-	sql	SELECT INTERVAL '5' MINUTE AS a
+std/second	-	sql	SELECT INTERVAL '5' SECOND AS a
+std/secondFrac	-	sql	SELECT INTERVAL '5.123456' SECOND AS a
+std/dh	-	sql	SELECT INTERVAL '1 2' DAY TO HOUR AS a
+std/dm	-	sql	SELECT INTERVAL '1 2:03' DAY TO MINUTE AS a
+std/hm	-	sql	SELECT INTERVAL '1:30' HOUR TO MINUTE AS a
+std/ms	-	sql	SELECT INTERVAL '1:30' MINUTE TO SECOND AS a
+std/hs	-	sql	SELECT INTERVAL '1:30:15' HOUR TO SECOND AS a
+std/dayDropsTime	-	sql	SELECT INTERVAL '1 day 2 hours 3 minutes' DAY AS a
+std/yearDropsMonths	-	sql	SELECT INTERVAL '1 year 2 months' YEAR AS a
+std/monthDropsDays	-	sql	SELECT INTERVAL '1 year 2 months 3 days' MONTH AS a
+std/hourDropsMinutes	-	sql	SELECT INTERVAL '1 day 02:30:45' HOUR AS a
+std/yearFrac	-	sql	SELECT INTERVAL '1.5' YEAR AS a
+std/dayFrac	-	sql	SELECT INTERVAL '1.5' DAY AS a
+std/hourNeg	-	sql	SELECT INTERVAL '-25' HOUR AS a
+std/yearOver	-	sql	SELECT INTERVAL '178956971' YEAR AS a
+std/dayOver	-	sql	SELECT INTERVAL '2147483648' DAY AS a
+prec/iv3	-	sql	SELECT CAST(INTERVAL '1.123456 seconds' AS INTERVAL(3)) AS a
+prec/iv0	-	sql	SELECT CAST(INTERVAL '1.5 seconds' AS INTERVAL(0)) AS a, CAST(INTERVAL '2.5 seconds' AS INTERVAL(0)) AS b, CAST(INTERVAL '-1.5 seconds' AS INTERVAL(0)) AS c
+prec/literal3	-	sql	SELECT INTERVAL(3) '1.123456 seconds' AS a
+prec/second3	-	sql	SELECT INTERVAL '1.123456' SECOND(3) AS a
+prec/ds2	-	sql	SELECT INTERVAL '1 2:03:04.5678' DAY TO SECOND(2) AS a
+prec/iv6	-	sql	SELECT CAST(INTERVAL '1.1234567 seconds' AS INTERVAL(6)) AS a
+prec/iv7	-	sql	SELECT CAST(INTERVAL '1 second' AS INTERVAL(7)) AS a
+prec/castDay	-	sql	SELECT CAST(INTERVAL '1 day 02:00:00' AS INTERVAL DAY) AS a
+prec/castYear	-	sql	SELECT CAST(INTERVAL '14 months 3 days' AS INTERVAL YEAR) AS a
+prec/castMonthTyp	-	sql	SELECT CAST(INTERVAL '14 months 3 days' AS INTERVAL YEAR TO MONTH) AS a
+cast/fromText	-	sql	SELECT CAST('1 day 02:00:00' AS INTERVAL) AS a
+cast/colon	-	sql	SELECT '1 day'::interval AS a
+cast/toText	-	sql	SELECT CAST(INTERVAL '1 day 2 hours' AS TEXT) AS a, CAST(INTERVAL '-1 year +2 mons -3 days 04:05:06.7' AS TEXT) AS b
+cast/toVarchar	-	sql	SELECT CAST(INTERVAL '1 mon' AS VARCHAR) AS a
+cast/toTextNull	-	sql	SELECT CAST(CAST(NULL AS INTERVAL) AS TEXT) AS a
+cast/fromInt	-	sql	SELECT CAST(5 AS INTERVAL) AS a
+cast/fromNumeric	-	sql	SELECT CAST(1.5 AS INTERVAL) AS a
+cast/fromTime	-	sql	SELECT CAST(TIME '01:02:03.5' AS INTERVAL) AS a
+cast/toTime	-	sql	SELECT CAST(INTERVAL '25:30:00' AS TIME) AS a, CAST(INTERVAL '-1 hour' AS TIME) AS b
+cast/toBigint	-	sql	SELECT CAST(INTERVAL '1 day' AS BIGINT) AS a
+cast/fromDuration	-	sql	SELECT CAST(CAST(5 AS DURATION) AS INTERVAL) AS a
+make/all	-	sql	SELECT make_interval(1, 2, 3, 4, 5, 6, 7.5) AS a
+make/days	-	sql	SELECT make_interval(days => 10) AS a
+make/secs	-	sql	SELECT make_interval(secs => 1.5) AS a, make_interval(secs => 0.0000015) AS b
+make/negMins	-	sql	SELECT make_interval(mins => -90) AS a
+make/weeks	-	sql	SELECT make_interval(weeks => 1, days => 1) AS a
+make/zero	-	sql	SELECT make_interval() AS a
+make/yearsOver	-	sql	SELECT make_interval(years => 178956971) AS a
+make/secsInf	-	sql	SELECT make_interval(secs => CAST('infinity' AS DOUBLE PRECISION)) AS a
+make/null	-	sql	SELECT make_interval(days => NULL) AS a
+make/hoursOver	-	sql	SELECT make_interval(hours => 2147483647) AS a
+ddl/create/iv80_in	-	ddl	CREATE TABLE iv80_in (id BIGINT, s TEXT)
+ddl/insert/iv80_in	-	ddl	INSERT INTO iv80_in VALUES (1, '1 day'), (2, '1 day 02:00:00'), (3, '1 mon -30 days'), (4, 'P1Y2M'), (5, NULL), (6, '-1 year +2 mons'), (7, '00:00:00.000001'), (8, 'garbage'), (9, 'infinity')
+row/cast	-	sql	SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_in WHERE id <> 8 ORDER BY id
+row/castText	-	sql	SELECT id, CAST(CAST(s AS INTERVAL) AS TEXT) AS v FROM iv80_in WHERE id <> 8 ORDER BY id
+row/bad	-	sql	SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_in WHERE id = 8
+row/badUnreached	-	sql	SELECT id FROM iv80_in WHERE id = 1 AND CAST(s AS INTERVAL) IS NOT NULL

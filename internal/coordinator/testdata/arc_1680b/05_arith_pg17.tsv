@@ -1,0 +1,111 @@
+# PostgreSQL 17.11 answers for the #1680b interval corpus, section 05_arith (TestArc1680bMeasure; postgres:17-alpine, initdb --locale=C --encoding=UTF8, --memory=4g).
+# PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit; datcollate=C datctype=C server_encoding=UTF8; defaults IntervalStyle=postgres DateStyle=ISO, MDY TimeZone=UTC; a cell's settings column overrides them for that cell only.
+# name<TAB>answer: ok | (0 rows) | ERR <SQLSTATE>: message | col:type(oid),... | row; row
+plus/fields	a:interval(1186),b:interval(1186) | 1 year 1 mon 3 days 26:00:00,1 mon -30 days
+plus/noCarry	a:interval(1186),b:interval(1186) | 40:00:00,35 days
+plus/subsec	a:interval(1186),b:interval(1186) | 00:00:01,-00:00:00.000001
+minus/fields	a:interval(1186),b:interval(1186) | 1 mon -1 days,1 day -25:00:00
+minus/zero	a:interval(1186),b:boolean(16) | 1 mon -30 days,t
+plus/null	a:interval(1186),b:interval(1186) | NULL,NULL
+plus/overflowMonths	ERR 22008: interval out of range
+plus/overflowDays	ERR 22008: interval out of range
+plus/overflowTime	ERR 22008: interval out of range
+plus/toInfinityFields	ERR 22008: interval out of range
+plus/inf	a:interval(1186),b:interval(1186),c:interval(1186) | infinity,-infinity,infinity
+plus/infMinusInf	ERR 22008: interval out of range
+plus/infPlusNegInf	ERR 22008: interval out of range
+neg/basic	a:interval(1186),b:interval(1186) | -10 mons -3 days +04:05:06,00:00:00
+neg/inf	a:interval(1186),b:interval(1186) | -infinity,infinity
+neg/minMonths	ERR 22008: interval out of range
+neg/minDays	ERR 22008: interval out of range
+neg/minTime	ERR 22007: invalid input syntax for type interval: "-2562047788:00:54.775808"
+neg/minTimeBuilt	ERR 22008: interval out of range
+neg/minTimeBuiltAlone	a:interval(1186) | -2562047788:00:54.775808
+mul/int	a:interval(1186),t:text(25) | 3 mons 3 days 03:00:00,3 mons 3 days 03:00:00
+mul/zero	a:interval(1186),t:text(25) | 00:00:00,00:00:00
+mul/neg	a:interval(1186),t:text(25) | -2 mons -2 days -02:00:00,-2 mons -2 days -02:00:00
+mul/halfMonth	a:interval(1186),t:text(25) | 15 days,15 days
+mul/thirdMonth	a:interval(1186),t:text(25) | 9 days 23:59:59.136,9 days 23:59:59.136
+mul/monthCascade	a:interval(1186),t:text(25) | 2 mons 3 days,2 mons 3 days
+mul/monthToTime	a:interval(1186),t:text(25) | 3 days,3 days
+mul/dayFrac	a:interval(1186),t:text(25) | 1 day 12:00:00,1 day 12:00:00
+mul/dayCascade	a:interval(1186),t:text(25) | 1 day 12:00:00,1 day 12:00:00
+mul/yearFrac	a:interval(1186),t:text(25) | 1 year 1 mon 6 days,1 year 1 mon 6 days
+mul/mixedSign	a:interval(1186),t:text(25) | 1 mon 14 days -12:00:00,1 mon 14 days -12:00:00
+mul/negFrac	a:interval(1186),t:text(25) | -1 mons -15 days,-1 mons -15 days
+mul/timeOver24	a:interval(1186),t:text(25) | 40:00:00,40:00:00
+mul/usHalfEven1	a:interval(1186),t:text(25) | 00:00:00.000002,00:00:00.000002
+mul/usHalfEven2	a:interval(1186),t:text(25) | 00:00:00.000002,00:00:00.000002
+mul/usHalfEven3	a:interval(1186),t:text(25) | 00:00:00,00:00:00
+mul/usNeg	a:interval(1186),t:text(25) | -00:00:00.000002,-00:00:00.000002
+mul/tinyMonth	a:interval(1186),t:text(25) | 00:00:00.2592,00:00:00.2592
+mul/float8	a:interval(1186),t:text(25) | 2 days 12:00:00,2 days 12:00:00
+mul/real	a:interval(1186),t:text(25) | 02:24:00.000129,02:24:00.000129
+mul/bigint	a:interval(1186),t:text(25) | 3 days,3 days
+mul/numeric	a:interval(1186),t:text(25) | 1 day 06:00:00,1 day 06:00:00
+mul/unknown	a:interval(1186),t:text(25) | 2 days,2 days
+mul/null	a:interval(1186),t:text(25) | NULL,NULL
+mul/overflowDays	ERR 22008: interval out of range
+mul/overflowMonths	ERR 22008: interval out of range
+mul/overflowTime	ERR 22008: interval out of range
+mul/huge	ERR 22008: interval out of range
+mul/nan	ERR 22008: interval out of range
+mul/infFactor	a:interval(1186),t:text(25) | infinity,infinity
+mul/negInfFactor	a:interval(1186),t:text(25) | -infinity,-infinity
+mul/zeroTimesInf	ERR 22008: interval out of range
+mul/infTimesZero	ERR 22008: interval out of range
+mul/infTimesNeg	a:interval(1186),t:text(25) | -infinity,-infinity
+mul/commuted	a:interval(1186),b:interval(1186) | 2 mons 2 days,15 days
+div/int	a:interval(1186),t:text(25) | 15 days 12:30:00,15 days 12:30:00
+div/thirdMonth	a:interval(1186),t:text(25) | 10 days,10 days
+div/thirdDay	a:interval(1186),t:text(25) | 08:00:00,08:00:00
+div/monthCascade	a:interval(1186),t:text(25) | 1 mon 15 days,1 mon 15 days
+div/yearBy7	a:interval(1186),t:text(25) | 1 mon 21 days 10:17:08.5344,1 mon 21 days 10:17:08.5344
+div/neg	a:interval(1186),t:text(25) | -1 days -12:00:00,-1 days -12:00:00
+div/frac	a:interval(1186),t:text(25) | 16:00:00,16:00:00
+div/half	a:interval(1186),t:text(25) | 2 days,2 days
+div/us	a:interval(1186),t:text(25) | 00:00:00,00:00:00
+div/us3	a:interval(1186),t:text(25) | 00:00:00.000002,00:00:00.000002
+div/usNeg	a:interval(1186),t:text(25) | 00:00:00,00:00:00
+div/zero	ERR 22012: division by zero
+div/zeroFloat	ERR 22012: division by zero
+div/tiny	ERR 22008: interval out of range
+div/nan	ERR 22008: interval out of range
+div/infDivisor	a:interval(1186),t:text(25) | 00:00:00,00:00:00
+div/infDividend	a:interval(1186),t:text(25) | infinity,infinity
+div/infByInf	ERR 22008: interval out of range
+div/unknown	a:interval(1186),t:text(25) | 12:00:00,12:00:00
+div/null	a:interval(1186),t:text(25) | NULL,NULL
+div/roundTrip	a:interval(1186),b:boolean(16),c:interval(1186) | 30 days,t,24:00:00.000001
+justify/pos	d:interval(1186),h:interval(1186),i:interval(1186) | 2 mons 5 days 27:00:00,1 mon 36 days 03:00:00,2 mons 6 days 03:00:00
+justify/neg	d:interval(1186),h:interval(1186),i:interval(1186) | -2 mons -5 days -27:00:00,-1 mons -36 days -03:00:00,-2 mons -6 days -03:00:00
+justify/mixed1	d:interval(1186),h:interval(1186),i:interval(1186) | 29 days,1 mon -1 days,29 days
+justify/mixed2	d:interval(1186),h:interval(1186),i:interval(1186) | 5 days,-1 mons +35 days,5 days
+justify/mixed3	d:interval(1186),h:interval(1186),i:interval(1186) | 1 day -25:00:00,-01:00:00,-01:00:00
+justify/mixed4	d:interval(1186),h:interval(1186),i:interval(1186) | -1 days +25:00:00,01:00:00,01:00:00
+justify/zero	d:interval(1186),h:interval(1186),i:interval(1186) | 00:00:00,00:00:00,00:00:00
+justify/us	d:interval(1186),h:interval(1186),i:interval(1186) | -00:00:00.000001,-00:00:00.000001,-00:00:00.000001
+justify/bigHours	d:interval(1186),h:interval(1186),i:interval(1186) | 2562047788:00:54.775807,106751991 days 04:00:54.775807,296533 years 3 mons 21 days 04:00:54.775807
+justify/bigDays	ERR 22008: interval out of range
+justify/monthOverflow	ERR 22008: interval out of range
+justify/inf	d:interval(1186),h:interval(1186),i:interval(1186) | infinity,infinity,infinity
+justify/null	d:interval(1186),h:interval(1186),i:interval(1186) | NULL,NULL,NULL
+ddl/create/iv80_m	ok
+ddl/insert/iv80_m	ok
+agg/sumAvg	s:interval(1186),a:interval(1186),n:bigint(20) | 1 year 2 mons -1 days +745:00:00.000001,2 mons 103:00:00,7
+agg/sumAvgSubset	s:interval(1186),a:interval(1186) | 1 mon -1 days,15 days -12:00:00
+agg/avgCascade	a:interval(1186) | 15 days
+agg/avgThirds	a:interval(1186) | 10 days
+agg/avgUs	a:interval(1186) | 00:00:00
+agg/avgUs3	a:interval(1186) | 00:00:00.000002
+agg/sumEmpty	s:interval(1186),a:interval(1186) | NULL,NULL
+agg/sumNull	s:interval(1186),a:interval(1186) | NULL,NULL
+agg/sumGroup	g:bigint(20),s:interval(1186),a:interval(1186) | 0,1 year 29 days 25:00:00,4 mons 9 days 24:20:00; 1,2 mons -30 days +720:00:00.000001,8 days 168:00:00
+agg/sumOverflowDays	ERR 22008: interval out of range
+agg/sumOverflowThenBack	ERR 22008: interval out of range
+agg/avgBig	ERR 22008: interval out of range
+agg/sumInf	s:interval(1186),a:interval(1186) | infinity,infinity
+agg/sumInfNegInf	ERR 22008: interval out of range
+agg/avgInfNegInf	ERR 22008: interval out of range
+agg/sumWindow	id:bigint(20),s:interval(1186) | 1,1 mon; 2,1 mon 30 days; 3,1 mon 30 days 720:00:00; 4,1 mon 29 days 720:00:00
+agg/avgWindowSliding	id:bigint(20),a:interval(1186) | 1,1 mon; 2,30 days; 3,15 days 360:00:00; 4,348:00:00; 5,-12:00:00

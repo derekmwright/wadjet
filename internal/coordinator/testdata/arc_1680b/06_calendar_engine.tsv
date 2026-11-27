@@ -1,0 +1,65 @@
+# This engine's disposition of the #1680b interval corpus, section 06_calendar, per arm (TestArc1680bRecordEngine; held by TestArc1680bEngineBaseline).
+# Settings are PostgreSQL's only: the engine runs each statement as written. A TIMESTAMP value is printed as text (iv80EngineText). name<TAB>arms<TAB>class<TAB>answer
+ts/monthClampLeap	*	refused	ERR 0A000
+ts/monthClamp	*	refused	ERR 0A000
+ts/monthBack	*	refused	ERR 0A000
+ts/yearLeap	*	agree	a:TIMESTAMP | 2025-02-28 00:00:00
+ts/negMonths	*	refused	ERR 0A000
+ts/orderMD	*	refused	ERR 22007
+ts/orderMDNeg	*	refused	ERR 22007
+ts/orderDT	*	refused	ERR 22007
+ts/mixedSign	*	refused	ERR 22007
+ts/mixedSign2	*	refused	ERR 22007
+ts/hours36	*	agree	a:TIMESTAMP | 2024-02-01 12:00:00
+ts/us	*	refused	ERR 42601
+ts/usNeg	*	refused	ERR 42601
+ts/zero	*	agree	a:TIMESTAMP | 2024-01-01 00:00:00
+ts/1monVs30d	*	agree	a:TIMESTAMP | 2024-03-02 00:00:00
+ts/overflow	*	refused	ERR 22008
+ts/inf	*	refused	ERR 42601
+ts/negInf	*	refused	ERR 42601
+ts/infTs	*	refused	ERR 42601
+ts/infMinusInf	*	refused	ERR 42601
+ts/null	*	agree	a:TIMESTAMP,b:TIMESTAMP | NULL,NULL
+ts/commuted	*	refused	ERR 0A000
+date/plus	*	refused	ERR 22007
+date/plusInt	*	agree-value	a:DATE,b:bigint,c:DATE | 2024-03-01,29,2024-02-29
+date/minusDate	*	agree-value	a:bigint,b:bigint | 366,-366
+tz/UTC/day	*	differs	a:TIMESTAMP,b:TIMESTAMP | 2024-03-10 12:00:00,2024-03-10 12:00:00
+tz/UTC/month	*	refused	ERR 0A000
+tz/UTC/fallBack	*	differs	a:TIMESTAMP,b:TIMESTAMP | 2024-11-03 12:00:00,2024-11-03 12:00:00
+tz/UTC/minus	*	refused	ERR 0A000
+tz/UTC/roundTrip	*	refused	ERR 42883
+tz/UTC/age	*	refused	ERR 42883
+tz/UTC/addFn	*	refused	ERR 42883
+tz/America/New_York/day	*	differs	a:TIMESTAMP,b:TIMESTAMP | 2024-03-10 12:00:00,2024-03-10 12:00:00
+tz/America/New_York/month	*	refused	ERR 0A000
+tz/America/New_York/fallBack	*	differs	a:TIMESTAMP,b:TIMESTAMP | 2024-11-03 12:00:00,2024-11-03 12:00:00
+tz/America/New_York/minus	*	refused	ERR 0A000
+tz/America/New_York/roundTrip	*	refused	ERR 42883
+tz/America/New_York/age	*	refused	ERR 42883
+tz/America/New_York/addFn	*	refused	ERR 42883
+time/plus	*	refused	ERR 22007
+time/minusTime	*	differs	a:double precision,b:double precision | -22,22
+time/timetz	*	refused	ERR 42601
+tsdiff/days	*	refused	ERR 0A000
+tsdiff/time	*	refused	ERR 0A000
+tsdiff/over24	*	refused	ERR 0A000
+tsdiff/neg	*	refused	ERR 0A000
+tsdiff/year	*	refused	ERR 0A000
+tsdiff/us	*	refused	ERR 0A000
+tsdiff/mixedNeg	*	refused	ERR 0A000
+tsdiff/huge	*	refused	ERR 22007
+tsdiff/inf	*	refused	ERR 22008
+tsdiff/infInf	*	refused	ERR 22008
+age/basic	*	refused	ERR 42883
+age/time	*	refused	ERR 42883
+trip/monthEnd	*	refused	ERR 0A000
+trip/diff	*	refused	ERR 42883
+trip/age	*	refused	ERR 42883
+trip/compareVsApply	*	refused	ERR 0A000
+trip/assoc	*	refused	ERR 0A000
+ddl/create/iv80_ts	writer	ok	ok
+ddl/insert/iv80_ts	writer	ok	ok
+rows/plus	*	refused	ERR 0A000
+rows/diff	*	refused	ERR 0A000

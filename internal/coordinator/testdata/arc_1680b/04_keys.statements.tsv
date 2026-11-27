@@ -1,0 +1,98 @@
+# #1680b interval corpus statements (arc_1680b_interval_corpus_cells_test.go). name<TAB>settings<TAB>kind<TAB>sql
+ddl/create/iv80_k	-	ddl	CREATE TABLE iv80_k (id BIGINT, s TEXT)
+ddl/insert/iv80_k	-	ddl	INSERT INTO iv80_k VALUES (1, '1 mon'), (2, '30 days'), (3, '720:00:00'), (4, '1 mon -30 days'), (5, '0'), (6, '00:00:00'), (7, '-1 day'), (8, '-24:00:00'), (9, NULL), (10, NULL), (11, '1 day'), (12, '24:00:00'), (13, '213503982 days 08:01:49.551616'), (14, '106751991 days 04:00:54.775808'), (15, '1 year'), (16, '360 days'), (17, '12 mons')
+ddl/create/iv80_kr	-	ddl	CREATE TABLE iv80_kr (id BIGINT, s TEXT)
+ddl/insert/iv80_kr	-	ddl	INSERT INTO iv80_kr VALUES (17, '12 mons'), (16, '360 days'), (15, '1 year'), (14, '106751991 days 04:00:54.775808'), (13, '213503982 days 08:01:49.551616'), (12, '24:00:00'), (11, '1 day'), (10, NULL), (9, NULL), (8, '-24:00:00'), (7, '-1 day'), (6, '00:00:00'), (5, '0'), (4, '1 mon -30 days'), (3, '720:00:00'), (2, '30 days'), (1, '1 mon')
+group/iv80_k/default	-	sql	SELECT CAST(s AS INTERVAL) AS k, count(*) AS n, min(id) AS lo FROM iv80_k GROUP BY CAST(s AS INTERVAL) ORDER BY lo NULLS FIRST
+explain/group/iv80_k/default	-	pg-only	EXPLAIN (COSTS OFF) SELECT CAST(s AS INTERVAL) AS k, count(*) AS n, min(id) AS lo FROM iv80_k GROUP BY CAST(s AS INTERVAL) ORDER BY lo NULLS FIRST
+distinct/iv80_k/default	-	sql	SELECT k FROM (SELECT DISTINCT CAST(s AS INTERVAL) AS k FROM iv80_k) d ORDER BY k NULLS FIRST
+explain/distinct/iv80_k/default	-	pg-only	EXPLAIN (COSTS OFF) SELECT k FROM (SELECT DISTINCT CAST(s AS INTERVAL) AS k FROM iv80_k) d ORDER BY k NULLS FIRST
+union/iv80_k/default	-	sql	SELECT k FROM (SELECT CAST(s AS INTERVAL) AS k FROM iv80_k WHERE id <= 8 UNION SELECT CAST(s AS INTERVAL) FROM iv80_k WHERE id > 8) u ORDER BY k NULLS FIRST
+intersect/iv80_k/default	-	sql	SELECT k FROM (SELECT CAST(s AS INTERVAL) AS k FROM iv80_k WHERE id IN (2, 5, 8, 12, 16) INTERSECT SELECT CAST(s AS INTERVAL) FROM iv80_k WHERE id IN (1, 3, 4, 7, 11, 15)) u ORDER BY k
+exceptAll/iv80_k/default	-	sql	SELECT k FROM (SELECT CAST(s AS INTERVAL) AS k FROM iv80_k WHERE id <= 8 EXCEPT ALL SELECT CAST(s AS INTERVAL) FROM iv80_k WHERE id IN (1, 4)) u ORDER BY k
+group/iv80_k/sortagg	enable_hashagg=off	sql	SELECT CAST(s AS INTERVAL) AS k, count(*) AS n, min(id) AS lo FROM iv80_k GROUP BY CAST(s AS INTERVAL) ORDER BY lo NULLS FIRST
+explain/group/iv80_k/sortagg	enable_hashagg=off	pg-only	EXPLAIN (COSTS OFF) SELECT CAST(s AS INTERVAL) AS k, count(*) AS n, min(id) AS lo FROM iv80_k GROUP BY CAST(s AS INTERVAL) ORDER BY lo NULLS FIRST
+distinct/iv80_k/sortagg	enable_hashagg=off	sql	SELECT k FROM (SELECT DISTINCT CAST(s AS INTERVAL) AS k FROM iv80_k) d ORDER BY k NULLS FIRST
+explain/distinct/iv80_k/sortagg	enable_hashagg=off	pg-only	EXPLAIN (COSTS OFF) SELECT k FROM (SELECT DISTINCT CAST(s AS INTERVAL) AS k FROM iv80_k) d ORDER BY k NULLS FIRST
+union/iv80_k/sortagg	enable_hashagg=off	sql	SELECT k FROM (SELECT CAST(s AS INTERVAL) AS k FROM iv80_k WHERE id <= 8 UNION SELECT CAST(s AS INTERVAL) FROM iv80_k WHERE id > 8) u ORDER BY k NULLS FIRST
+intersect/iv80_k/sortagg	enable_hashagg=off	sql	SELECT k FROM (SELECT CAST(s AS INTERVAL) AS k FROM iv80_k WHERE id IN (2, 5, 8, 12, 16) INTERSECT SELECT CAST(s AS INTERVAL) FROM iv80_k WHERE id IN (1, 3, 4, 7, 11, 15)) u ORDER BY k
+exceptAll/iv80_k/sortagg	enable_hashagg=off	sql	SELECT k FROM (SELECT CAST(s AS INTERVAL) AS k FROM iv80_k WHERE id <= 8 EXCEPT ALL SELECT CAST(s AS INTERVAL) FROM iv80_k WHERE id IN (1, 4)) u ORDER BY k
+group/iv80_k/hashagg	enable_sort=off	sql	SELECT CAST(s AS INTERVAL) AS k, count(*) AS n, min(id) AS lo FROM iv80_k GROUP BY CAST(s AS INTERVAL) ORDER BY lo NULLS FIRST
+explain/group/iv80_k/hashagg	enable_sort=off	pg-only	EXPLAIN (COSTS OFF) SELECT CAST(s AS INTERVAL) AS k, count(*) AS n, min(id) AS lo FROM iv80_k GROUP BY CAST(s AS INTERVAL) ORDER BY lo NULLS FIRST
+distinct/iv80_k/hashagg	enable_sort=off	sql	SELECT k FROM (SELECT DISTINCT CAST(s AS INTERVAL) AS k FROM iv80_k) d ORDER BY k NULLS FIRST
+explain/distinct/iv80_k/hashagg	enable_sort=off	pg-only	EXPLAIN (COSTS OFF) SELECT k FROM (SELECT DISTINCT CAST(s AS INTERVAL) AS k FROM iv80_k) d ORDER BY k NULLS FIRST
+union/iv80_k/hashagg	enable_sort=off	sql	SELECT k FROM (SELECT CAST(s AS INTERVAL) AS k FROM iv80_k WHERE id <= 8 UNION SELECT CAST(s AS INTERVAL) FROM iv80_k WHERE id > 8) u ORDER BY k NULLS FIRST
+intersect/iv80_k/hashagg	enable_sort=off	sql	SELECT k FROM (SELECT CAST(s AS INTERVAL) AS k FROM iv80_k WHERE id IN (2, 5, 8, 12, 16) INTERSECT SELECT CAST(s AS INTERVAL) FROM iv80_k WHERE id IN (1, 3, 4, 7, 11, 15)) u ORDER BY k
+exceptAll/iv80_k/hashagg	enable_sort=off	sql	SELECT k FROM (SELECT CAST(s AS INTERVAL) AS k FROM iv80_k WHERE id <= 8 EXCEPT ALL SELECT CAST(s AS INTERVAL) FROM iv80_k WHERE id IN (1, 4)) u ORDER BY k
+groupCount/iv80_k	-	sql	SELECT count(*) AS g FROM (SELECT 1 AS one FROM iv80_k GROUP BY CAST(s AS INTERVAL)) x
+distinctCount/iv80_k	-	sql	SELECT count(*) AS g FROM (SELECT DISTINCT CAST(s AS INTERVAL) AS k FROM iv80_k) x
+countDistinct/iv80_k	-	sql	SELECT count(DISTINCT CAST(s AS INTERVAL)) AS n FROM iv80_k
+partition/iv80_k	-	sql	SELECT id, count(*) OVER (PARTITION BY CAST(s AS INTERVAL)) AS n, first_value(id) OVER (PARTITION BY CAST(s AS INTERVAL) ORDER BY id) AS f FROM iv80_k ORDER BY id
+peers/iv80_k	-	sql	SELECT id, rank() OVER (ORDER BY CAST(s AS INTERVAL)) AS r, dense_rank() OVER (ORDER BY CAST(s AS INTERVAL)) AS dr, count(*) OVER (ORDER BY CAST(s AS INTERVAL)) AS cnt FROM iv80_k ORDER BY id
+orderTie/iv80_k	-	sql	SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_k ORDER BY v, id
+withTies/iv80_k	-	sql	SELECT id FROM iv80_k ORDER BY CAST(s AS INTERVAL) FETCH FIRST 2 ROWS WITH TIES
+withTiesCount/iv80_k	-	sql	SELECT count(*) AS n FROM (SELECT id FROM iv80_k WHERE CAST(s AS INTERVAL) IS NOT NULL ORDER BY CAST(s AS INTERVAL) DESC FETCH FIRST 1 ROWS WITH TIES) x
+group/iv80_kr/default	-	sql	SELECT CAST(s AS INTERVAL) AS k, count(*) AS n, min(id) AS lo FROM iv80_kr GROUP BY CAST(s AS INTERVAL) ORDER BY lo NULLS FIRST
+explain/group/iv80_kr/default	-	pg-only	EXPLAIN (COSTS OFF) SELECT CAST(s AS INTERVAL) AS k, count(*) AS n, min(id) AS lo FROM iv80_kr GROUP BY CAST(s AS INTERVAL) ORDER BY lo NULLS FIRST
+distinct/iv80_kr/default	-	sql	SELECT k FROM (SELECT DISTINCT CAST(s AS INTERVAL) AS k FROM iv80_kr) d ORDER BY k NULLS FIRST
+explain/distinct/iv80_kr/default	-	pg-only	EXPLAIN (COSTS OFF) SELECT k FROM (SELECT DISTINCT CAST(s AS INTERVAL) AS k FROM iv80_kr) d ORDER BY k NULLS FIRST
+union/iv80_kr/default	-	sql	SELECT k FROM (SELECT CAST(s AS INTERVAL) AS k FROM iv80_kr WHERE id <= 8 UNION SELECT CAST(s AS INTERVAL) FROM iv80_kr WHERE id > 8) u ORDER BY k NULLS FIRST
+intersect/iv80_kr/default	-	sql	SELECT k FROM (SELECT CAST(s AS INTERVAL) AS k FROM iv80_kr WHERE id IN (2, 5, 8, 12, 16) INTERSECT SELECT CAST(s AS INTERVAL) FROM iv80_kr WHERE id IN (1, 3, 4, 7, 11, 15)) u ORDER BY k
+exceptAll/iv80_kr/default	-	sql	SELECT k FROM (SELECT CAST(s AS INTERVAL) AS k FROM iv80_kr WHERE id <= 8 EXCEPT ALL SELECT CAST(s AS INTERVAL) FROM iv80_kr WHERE id IN (1, 4)) u ORDER BY k
+group/iv80_kr/sortagg	enable_hashagg=off	sql	SELECT CAST(s AS INTERVAL) AS k, count(*) AS n, min(id) AS lo FROM iv80_kr GROUP BY CAST(s AS INTERVAL) ORDER BY lo NULLS FIRST
+explain/group/iv80_kr/sortagg	enable_hashagg=off	pg-only	EXPLAIN (COSTS OFF) SELECT CAST(s AS INTERVAL) AS k, count(*) AS n, min(id) AS lo FROM iv80_kr GROUP BY CAST(s AS INTERVAL) ORDER BY lo NULLS FIRST
+distinct/iv80_kr/sortagg	enable_hashagg=off	sql	SELECT k FROM (SELECT DISTINCT CAST(s AS INTERVAL) AS k FROM iv80_kr) d ORDER BY k NULLS FIRST
+explain/distinct/iv80_kr/sortagg	enable_hashagg=off	pg-only	EXPLAIN (COSTS OFF) SELECT k FROM (SELECT DISTINCT CAST(s AS INTERVAL) AS k FROM iv80_kr) d ORDER BY k NULLS FIRST
+union/iv80_kr/sortagg	enable_hashagg=off	sql	SELECT k FROM (SELECT CAST(s AS INTERVAL) AS k FROM iv80_kr WHERE id <= 8 UNION SELECT CAST(s AS INTERVAL) FROM iv80_kr WHERE id > 8) u ORDER BY k NULLS FIRST
+intersect/iv80_kr/sortagg	enable_hashagg=off	sql	SELECT k FROM (SELECT CAST(s AS INTERVAL) AS k FROM iv80_kr WHERE id IN (2, 5, 8, 12, 16) INTERSECT SELECT CAST(s AS INTERVAL) FROM iv80_kr WHERE id IN (1, 3, 4, 7, 11, 15)) u ORDER BY k
+exceptAll/iv80_kr/sortagg	enable_hashagg=off	sql	SELECT k FROM (SELECT CAST(s AS INTERVAL) AS k FROM iv80_kr WHERE id <= 8 EXCEPT ALL SELECT CAST(s AS INTERVAL) FROM iv80_kr WHERE id IN (1, 4)) u ORDER BY k
+group/iv80_kr/hashagg	enable_sort=off	sql	SELECT CAST(s AS INTERVAL) AS k, count(*) AS n, min(id) AS lo FROM iv80_kr GROUP BY CAST(s AS INTERVAL) ORDER BY lo NULLS FIRST
+explain/group/iv80_kr/hashagg	enable_sort=off	pg-only	EXPLAIN (COSTS OFF) SELECT CAST(s AS INTERVAL) AS k, count(*) AS n, min(id) AS lo FROM iv80_kr GROUP BY CAST(s AS INTERVAL) ORDER BY lo NULLS FIRST
+distinct/iv80_kr/hashagg	enable_sort=off	sql	SELECT k FROM (SELECT DISTINCT CAST(s AS INTERVAL) AS k FROM iv80_kr) d ORDER BY k NULLS FIRST
+explain/distinct/iv80_kr/hashagg	enable_sort=off	pg-only	EXPLAIN (COSTS OFF) SELECT k FROM (SELECT DISTINCT CAST(s AS INTERVAL) AS k FROM iv80_kr) d ORDER BY k NULLS FIRST
+union/iv80_kr/hashagg	enable_sort=off	sql	SELECT k FROM (SELECT CAST(s AS INTERVAL) AS k FROM iv80_kr WHERE id <= 8 UNION SELECT CAST(s AS INTERVAL) FROM iv80_kr WHERE id > 8) u ORDER BY k NULLS FIRST
+intersect/iv80_kr/hashagg	enable_sort=off	sql	SELECT k FROM (SELECT CAST(s AS INTERVAL) AS k FROM iv80_kr WHERE id IN (2, 5, 8, 12, 16) INTERSECT SELECT CAST(s AS INTERVAL) FROM iv80_kr WHERE id IN (1, 3, 4, 7, 11, 15)) u ORDER BY k
+exceptAll/iv80_kr/hashagg	enable_sort=off	sql	SELECT k FROM (SELECT CAST(s AS INTERVAL) AS k FROM iv80_kr WHERE id <= 8 EXCEPT ALL SELECT CAST(s AS INTERVAL) FROM iv80_kr WHERE id IN (1, 4)) u ORDER BY k
+groupCount/iv80_kr	-	sql	SELECT count(*) AS g FROM (SELECT 1 AS one FROM iv80_kr GROUP BY CAST(s AS INTERVAL)) x
+distinctCount/iv80_kr	-	sql	SELECT count(*) AS g FROM (SELECT DISTINCT CAST(s AS INTERVAL) AS k FROM iv80_kr) x
+countDistinct/iv80_kr	-	sql	SELECT count(DISTINCT CAST(s AS INTERVAL)) AS n FROM iv80_kr
+partition/iv80_kr	-	sql	SELECT id, count(*) OVER (PARTITION BY CAST(s AS INTERVAL)) AS n, first_value(id) OVER (PARTITION BY CAST(s AS INTERVAL) ORDER BY id) AS f FROM iv80_kr ORDER BY id
+peers/iv80_kr	-	sql	SELECT id, rank() OVER (ORDER BY CAST(s AS INTERVAL)) AS r, dense_rank() OVER (ORDER BY CAST(s AS INTERVAL)) AS dr, count(*) OVER (ORDER BY CAST(s AS INTERVAL)) AS cnt FROM iv80_kr ORDER BY id
+orderTie/iv80_kr	-	sql	SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_kr ORDER BY v, id
+withTies/iv80_kr	-	sql	SELECT id FROM iv80_kr ORDER BY CAST(s AS INTERVAL) FETCH FIRST 2 ROWS WITH TIES
+withTiesCount/iv80_kr	-	sql	SELECT count(*) AS n FROM (SELECT id FROM iv80_kr WHERE CAST(s AS INTERVAL) IS NOT NULL ORDER BY CAST(s AS INTERVAL) DESC FETCH FIRST 1 ROWS WITH TIES) x
+join/default	-	sql	SELECT a.id AS l, b.id AS r FROM iv80_k a JOIN iv80_k b ON CAST(a.s AS INTERVAL) = CAST(b.s AS INTERVAL) WHERE a.id < b.id ORDER BY l, r
+explain/join/default	-	pg-only	EXPLAIN (COSTS OFF) SELECT a.id AS l, b.id AS r FROM iv80_k a JOIN iv80_k b ON CAST(a.s AS INTERVAL) = CAST(b.s AS INTERVAL) WHERE a.id < b.id ORDER BY l, r
+join/hash	enable_mergejoin=off;enable_nestloop=off	sql	SELECT a.id AS l, b.id AS r FROM iv80_k a JOIN iv80_k b ON CAST(a.s AS INTERVAL) = CAST(b.s AS INTERVAL) WHERE a.id < b.id ORDER BY l, r
+explain/join/hash	enable_mergejoin=off;enable_nestloop=off	pg-only	EXPLAIN (COSTS OFF) SELECT a.id AS l, b.id AS r FROM iv80_k a JOIN iv80_k b ON CAST(a.s AS INTERVAL) = CAST(b.s AS INTERVAL) WHERE a.id < b.id ORDER BY l, r
+join/merge	enable_hashjoin=off;enable_nestloop=off	sql	SELECT a.id AS l, b.id AS r FROM iv80_k a JOIN iv80_k b ON CAST(a.s AS INTERVAL) = CAST(b.s AS INTERVAL) WHERE a.id < b.id ORDER BY l, r
+explain/join/merge	enable_hashjoin=off;enable_nestloop=off	pg-only	EXPLAIN (COSTS OFF) SELECT a.id AS l, b.id AS r FROM iv80_k a JOIN iv80_k b ON CAST(a.s AS INTERVAL) = CAST(b.s AS INTERVAL) WHERE a.id < b.id ORDER BY l, r
+join/nestloop	enable_hashjoin=off;enable_mergejoin=off	sql	SELECT a.id AS l, b.id AS r FROM iv80_k a JOIN iv80_k b ON CAST(a.s AS INTERVAL) = CAST(b.s AS INTERVAL) WHERE a.id < b.id ORDER BY l, r
+explain/join/nestloop	enable_hashjoin=off;enable_mergejoin=off	pg-only	EXPLAIN (COSTS OFF) SELECT a.id AS l, b.id AS r FROM iv80_k a JOIN iv80_k b ON CAST(a.s AS INTERVAL) = CAST(b.s AS INTERVAL) WHERE a.id < b.id ORDER BY l, r
+join/left	-	sql	SELECT a.id AS l, b.id AS r FROM iv80_k a LEFT JOIN iv80_k b ON CAST(a.s AS INTERVAL) = CAST(b.s AS INTERVAL) AND a.id <> b.id ORDER BY l, r NULLS FIRST
+join/semi	-	sql	SELECT id FROM iv80_k a WHERE CAST(s AS INTERVAL) IN (SELECT CAST(s AS INTERVAL) FROM iv80_k WHERE id IN (2, 13)) ORDER BY id
+join/anti	-	sql	SELECT id FROM iv80_k a WHERE NOT EXISTS (SELECT 1 FROM iv80_k b WHERE CAST(b.s AS INTERVAL) = CAST(a.s AS INTERVAL) AND b.id <> a.id) ORDER BY id
+setLit/union/default	-	sql	SELECT INTERVAL '1 mon' AS x UNION SELECT INTERVAL '30 days' UNION SELECT INTERVAL '720:00:00'
+setLit/unionRev/default	-	sql	SELECT INTERVAL '720:00:00' AS x UNION SELECT INTERVAL '30 days' UNION SELECT INTERVAL '1 mon'
+setLit/intersect/default	-	sql	SELECT INTERVAL '30 days' AS x INTERSECT SELECT INTERVAL '1 mon'
+setLit/except/default	-	sql	SELECT INTERVAL '30 days' AS x EXCEPT SELECT INTERVAL '1 mon'
+setLit/exceptAll/default	-	sql	SELECT x FROM (SELECT x FROM (VALUES (INTERVAL '1 mon'), (INTERVAL '30 days'), (INTERVAL '720:00:00')) v(x) EXCEPT ALL SELECT INTERVAL '30 days') u
+setLit/intersectAll/default	-	sql	SELECT x FROM (SELECT x FROM (VALUES (INTERVAL '1 mon'), (INTERVAL '30 days'), (INTERVAL '720:00:00')) v(x) INTERSECT ALL SELECT y FROM (VALUES (INTERVAL '720:00:00'), (INTERVAL '1 mon')) w(y)) u
+setLit/valuesDistinct/default	-	sql	SELECT DISTINCT x FROM (VALUES (INTERVAL '30 days'), (INTERVAL '1 mon'), (INTERVAL '720:00:00')) v(x)
+setLit/union/sortagg	enable_hashagg=off	sql	SELECT INTERVAL '1 mon' AS x UNION SELECT INTERVAL '30 days' UNION SELECT INTERVAL '720:00:00'
+setLit/unionRev/sortagg	enable_hashagg=off	sql	SELECT INTERVAL '720:00:00' AS x UNION SELECT INTERVAL '30 days' UNION SELECT INTERVAL '1 mon'
+setLit/intersect/sortagg	enable_hashagg=off	sql	SELECT INTERVAL '30 days' AS x INTERSECT SELECT INTERVAL '1 mon'
+setLit/except/sortagg	enable_hashagg=off	sql	SELECT INTERVAL '30 days' AS x EXCEPT SELECT INTERVAL '1 mon'
+setLit/exceptAll/sortagg	enable_hashagg=off	sql	SELECT x FROM (SELECT x FROM (VALUES (INTERVAL '1 mon'), (INTERVAL '30 days'), (INTERVAL '720:00:00')) v(x) EXCEPT ALL SELECT INTERVAL '30 days') u
+setLit/intersectAll/sortagg	enable_hashagg=off	sql	SELECT x FROM (SELECT x FROM (VALUES (INTERVAL '1 mon'), (INTERVAL '30 days'), (INTERVAL '720:00:00')) v(x) INTERSECT ALL SELECT y FROM (VALUES (INTERVAL '720:00:00'), (INTERVAL '1 mon')) w(y)) u
+setLit/valuesDistinct/sortagg	enable_hashagg=off	sql	SELECT DISTINCT x FROM (VALUES (INTERVAL '30 days'), (INTERVAL '1 mon'), (INTERVAL '720:00:00')) v(x)
+wrap/group	-	sql	SELECT count(*) AS g FROM (SELECT x FROM (VALUES (INTERVAL '213503982 days 08:01:49.551616'), (INTERVAL '0'), (INTERVAL '0')) v(x) GROUP BY x) t
+wrap/join	-	sql	SELECT count(*) AS n FROM (VALUES (INTERVAL '213503982 days 08:01:49.551616')) a(x) JOIN (VALUES (INTERVAL '0')) b(y) ON x = y
+wrap/hashCollide	-	sql	SELECT interval_hash(INTERVAL '213503982 days 08:01:49.551616') = interval_hash(INTERVAL '0') AS a, interval_hash(INTERVAL '1 mon') = interval_hash(INTERVAL '720:00:00') AS b, interval_hash_extended(INTERVAL '1 mon', 0) = interval_hash_extended(INTERVAL '30 days', 0) AS c
+adr0024/intersectNumericSort	enable_hashagg=off	sql	SELECT k FROM (SELECT x AS k FROM (VALUES (1.00), (2.00), (3.00), (4.00), (5.00), (6.00)) a(x) INTERSECT SELECT y FROM (VALUES (6), (5), (4), (3), (2), (1), (1), (2)) b(y)) u ORDER BY k
+explain/adr0024/intersectNumericSort	enable_hashagg=off	pg-only	EXPLAIN (COSTS OFF) SELECT k FROM (SELECT x AS k FROM (VALUES (1.00), (2.00), (3.00), (4.00), (5.00), (6.00)) a(x) INTERSECT SELECT y FROM (VALUES (6), (5), (4), (3), (2), (1), (1), (2)) b(y)) u ORDER BY k
+adr0024/intersectNumericHash	-	sql	SELECT k FROM (SELECT x AS k FROM (VALUES (1.00), (2.00), (3.00), (4.00), (5.00), (6.00)) a(x) INTERSECT SELECT y FROM (VALUES (6), (5), (4), (3), (2), (1), (1), (2)) b(y)) u ORDER BY k
+explain/intersect/iv80_kr/sortagg	enable_hashagg=off	pg-only	EXPLAIN (COSTS OFF) SELECT k FROM (SELECT CAST(s AS INTERVAL) AS k FROM iv80_kr WHERE id IN (2, 5, 8, 12, 16) INTERSECT SELECT CAST(s AS INTERVAL) FROM iv80_kr WHERE id IN (1, 3, 4, 7, 11, 15)) u ORDER BY k
+array/group	-	sql	SELECT count(*) AS g FROM (SELECT x FROM (VALUES (ARRAY[INTERVAL '1 mon']), (ARRAY[INTERVAL '30 days'])) v(x) GROUP BY x) t
+array/eq	-	sql	SELECT ARRAY[INTERVAL '1 mon'] = ARRAY[INTERVAL '30 days'] AS a, ARRAY[INTERVAL '1 mon', INTERVAL '1 day'] < ARRAY[INTERVAL '30 days', INTERVAL '25:00:00'] AS b
+row/group	-	sql	SELECT count(*) AS g FROM (SELECT a, b FROM (VALUES (INTERVAL '1 mon', 1), (INTERVAL '30 days', 1), (INTERVAL '30 days', 2)) v(a, b) GROUP BY a, b) t
