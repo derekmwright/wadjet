@@ -69,15 +69,68 @@ func raiseTimestampDifference() {
 // at least one a TIMESTAMP. b resolves column operands; nil leaves them
 // undecided (not temporal), which is the compile-time question.
 func isTimestampDifferenceOperands(l, r Expr, b *batch.RecordBatch) bool {
-	lk := producedTemporal(l, b)
+	lk := guardTemporal(l, b)
 	if lk == castNotTemporal {
 		return false
 	}
-	rk := producedTemporal(r, b)
+	rk := guardTemporal(r, b)
 	if rk == castNotTemporal {
 		return false
 	}
 	return lk == castToTimestampKind || rk == castToTimestampKind
+}
+
+// guardTemporal is producedTemporal plus an ARRAY element (`(ARRAY[ts])[1]`,
+// `arr[i]` over an ARRAY(TIMESTAMP) column), which producedTemporal does
+// not type: the element of a timestamp array boxes as its epoch
+// milliseconds, and `(ARRAY[ts2])[1] - ts` answered 9.72e+07 with the
+// statement rule disabled. Read by the guard alone, so no other consumer of
+// producedTemporal (renderers, date arithmetic, comparisons) moves.
+func guardTemporal(e Expr, b *batch.RecordBatch) castTemporalKindT {
+	if k := producedTemporal(e, b); k != castNotTemporal {
+		return k
+	}
+	el, ok := e.(*elementAtExpr)
+	if !ok {
+		return castNotTemporal
+	}
+	if lit, ok := el.arg0.(*ArrayLitExpr); ok {
+		arms := make([]Expr, len(lit.Elements))
+		for i, a := range lit.Elements {
+			arms[i] = a
+		}
+		return commonGuardTemporal(arms, b)
+	}
+	if v := containerElementVector(containerVector(el.arg0, b), b); v != nil {
+		switch v.Type {
+		case batch.TypeTimestamp:
+			return castToTimestampKind
+		case batch.TypeDate:
+			return castToDateKind
+		}
+	}
+	return castNotTemporal
+}
+
+// commonGuardTemporal is commonProducedTemporal over guardTemporal.
+func commonGuardTemporal(arms []Expr, b *batch.RecordBatch) castTemporalKindT {
+	kind, have := castNotTemporal, false
+	for _, a := range arms {
+		if lit, ok := a.(*Lit); ok {
+			if _, quoted := lit.Val.(string); quoted || lit.Val == nil {
+				continue
+			}
+		}
+		k := guardTemporal(a, b)
+		if !have {
+			kind, have = k, true
+			continue
+		}
+		if k != kind {
+			return castNotTemporal
+		}
+	}
+	return kind
 }
 
 // timestampMinusQuoted reports `ts - '…'` / `'…' - ts`: a TIMESTAMP producer
