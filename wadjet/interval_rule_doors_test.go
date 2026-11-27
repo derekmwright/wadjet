@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -230,7 +230,7 @@ var tdwGuardStatements = []string{
 // difference must still fail — with the expression guard's 0A000 — and
 // nothing may be stored, updated, deleted or created.
 func TestTimestampDifferenceGuardOnTheWriteDoors(t *testing.T) {
-	defer physical.DisableTimestampDifferenceRuleForTest()()
+	defer expr.DisableTimestampDifferenceStatementRuleForTest()()
 	ctx := context.Background()
 	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
 	if err != nil {

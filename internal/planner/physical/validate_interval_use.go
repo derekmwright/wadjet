@@ -4,7 +4,6 @@ package physical
 
 import (
 	"strings"
-	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -178,7 +177,7 @@ func (t intervalTyper) isTimestampDifference(n plansql.Node) bool {
 // (`ts - '1 day'`) is no difference: the date arms refuse it 22007, as
 // PostgreSQL does. `date - date` is an integer on both sides and is not here.
 func timestampDifference(n plansql.Node, isTs func(plansql.Node) bool) bool {
-	if tsDiffRuleOff.Load() {
+	if expr.TimestampDifferenceStatementRuleDisabled() {
 		return false
 	}
 	b, ok := plansql.Unparen(n).(*plansql.BinaryOp)
@@ -192,22 +191,14 @@ func timestampDifference(n plansql.Node, isTs func(plansql.Node) bool) bool {
 	return (l && r) || (l && unknown(b.Right)) || (r && unknown(b.Left))
 }
 
-// tsDiffRuleOff is the TEST seam that turns the statement rule's
-// timestamp-difference refusals off (DisableTimestampDifferenceRuleForTest):
-// with it set, no `-` is a timestamp difference to this rule, so every such
-// statement reaches execution and the expression guard
+// The statement rule's timestamp-difference refusals can be turned off by a
+// TEST seam, expr.DisableTimestampDifferenceStatementRuleForTest: with it set,
+// no `-` is a timestamp difference to this rule, so every such statement
+// reaches execution and the expression guard
 // (expr/timestamp_difference_guard.go) alone must refuse it — the proof that
-// the guard is complete. Never set outside a test.
-var tsDiffRuleOff atomic.Bool
-
-// DisableTimestampDifferenceRuleForTest turns the statement rule's
-// timestamp-difference refusals off for a test and returns the restore. It
-// is process-wide: a test using it must not run in parallel with one that
-// expects the rule.
-func DisableTimestampDifferenceRuleForTest() (restore func()) {
-	prev := tsDiffRuleOff.Swap(true)
-	return func() { tsDiffRuleOff.Store(prev) }
-}
+// the guard is complete. The seam lives in expr, beside the guard it proves,
+// so that the AGPL packages' tests reach it without widening what they see of
+// this package (tools/licensecheck holds that surface to a budget).
 
 // timestampValueArg is, for each aggregate and window function that answers
 // one of its arguments' own values, that argument's position: over a

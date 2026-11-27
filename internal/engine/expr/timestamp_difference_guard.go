@@ -5,6 +5,8 @@
 package expr
 
 import (
+	"sync/atomic"
+
 	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
@@ -266,3 +268,22 @@ func (e *IsNull) tsDiffNull(b *batch.RecordBatch, row int) (null, ok bool) {
 	shell.infiniteDateArith(ld, lok, rd, rok, lv, rv)
 	return false, true
 }
+
+// tsDiffStatementRuleOff is the TEST seam that turns the PLANNER's statement
+// rule for a timestamp difference off (physical/validate_interval_use.go
+// reads it), leaving this guard as the only thing between a timestamp
+// difference and a number. Never set outside a test.
+var tsDiffStatementRuleOff atomic.Bool
+
+// DisableTimestampDifferenceStatementRuleForTest turns the planner's
+// statement rule for a timestamp difference off for a test and returns the
+// restore. It is process-wide: a test using it must not run in parallel with
+// one that expects the rule.
+func DisableTimestampDifferenceStatementRuleForTest() (restore func()) {
+	prev := tsDiffStatementRuleOff.Swap(true)
+	return func() { tsDiffStatementRuleOff.Store(prev) }
+}
+
+// TimestampDifferenceStatementRuleDisabled reports whether a test has turned
+// the planner's statement rule off.
+func TimestampDifferenceStatementRuleDisabled() bool { return tsDiffStatementRuleOff.Load() }

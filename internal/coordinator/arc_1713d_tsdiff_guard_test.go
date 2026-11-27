@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 )
 
 // #1713d round 8: the timestamp-difference GUARD (expr's minus operator,
@@ -24,7 +24,7 @@ import (
 //
 //   - the rule ENABLED: the disposition it gives (rule), PostgreSQL 17.11's
 //     own SQLSTATE where PostgreSQL refuses, else the rule's 0A000;
-//   - the rule DISABLED (physical.DisableTimestampDifferenceRuleForTest): the
+//   - the rule DISABLED (expr.DisableTimestampDifferenceStatementRuleForTest): the
 //     guard alone must refuse every difference-using cell with its 0A000 and
 //     its own sentence — the proof that the guard is complete.
 //
@@ -240,7 +240,7 @@ func TestArc1713dTimestampDifferenceGuardEveryArm(t *testing.T) {
 	for _, mode := range []string{"rule", "guard"} {
 		restore := func() {}
 		if mode == "guard" {
-			restore = physical.DisableTimestampDifferenceRuleForTest()
+			restore = expr.DisableTimestampDifferenceStatementRuleForTest()
 		}
 		for _, c := range cells {
 			want := c.rule

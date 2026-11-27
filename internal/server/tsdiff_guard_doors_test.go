@@ -19,7 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	wadjetv1 "github.com/derekmwright/wadjet/gen/wadjet/v1"
-	"github.com/derekmwright/wadjet/internal/planner/physical"
+	"github.com/derekmwright/wadjet/internal/engine/expr"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/wadjet"
 )
@@ -46,7 +46,7 @@ func tgWrite(t *testing.T, ctx context.Context, db *wadjet.DB) {
 // on a timestamp difference's millisecond number, on every door, twice —
 // with the statement rule (PostgreSQL 17.11's diagnostic where PostgreSQL
 // refuses: 42883 for a comparison with a number; else the rule's 0A000) and
-// with the rule disabled (physical.DisableTimestampDifferenceRuleForTest),
+// with the rule disabled (expr.DisableTimestampDifferenceStatementRuleForTest),
 // where the expression guard alone must refuse each with its own 0A000. No
 // write lands on either pass. PostgreSQL 17.11 answers each read with an
 // interval, stores '1 day 03:00:00' text for the MERGE SET writes and raises
@@ -130,7 +130,7 @@ func TestTimestampDifferenceGuardOnEveryDoor(t *testing.T) {
 	for _, mode := range []string{"rule", "guard"} {
 		restore := func() {}
 		if mode == "guard" {
-			restore = physical.DisableTimestampDifferenceRuleForTest()
+			restore = expr.DisableTimestampDifferenceStatementRuleForTest()
 		}
 		for _, c := range cells {
 			state, reason := c.state, c.reason
