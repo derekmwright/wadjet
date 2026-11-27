@@ -84,7 +84,7 @@ operand/plusTimestamptz	A	refusal timestamptz	unmet	-
 operand/eqUnknown	C	supported	met	-
 operand/eqUnknownBad	C	pg-error 22007	met	-
 operand/timesUnknown	A	refusal bare-interval-result	met	-
-operand/concatText	C	supported	unmet	-
+operand/concatText	A	refusal implicit-text-conversion	met	-
 operand/abs	C	pg-error 42883	unmet	-
 operand/greatestTs	C	pg-error 42804	met	-
 operand/coalesceText	C	pg-error 42804	met	-

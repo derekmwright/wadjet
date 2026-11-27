@@ -63,14 +63,14 @@ func compareIntervals(a, b any, op CmpOp) bool {
 	if bok && bi.text != "" {
 		raiseIntervalNotComparable(bi.text)
 	}
-	panic(fatalEval{sqlerr.New("0A000",
+	panic(fatalEval{sqlerr.Refuse("interval-compare-mixed",
 		"an interval can only be compared with another interval: cast the other operand to INTERVAL")})
 }
 
 // raiseIntervalNotComparable refuses an opaque interval wherever it is
 // compared (#1713d).
 func raiseIntervalNotComparable(text string) {
-	panic(fatalEval{sqlerr.New("0A000",
+	panic(fatalEval{sqlerr.Refuse("interval-opaque-value",
 		"interval %s cannot be compared: only a single-unit interval (YEAR, MONTH, "+
 			"WEEK, DAY, HOUR, MINUTE or SECOND) is supported", sqlerr.Quote(text))})
 }
@@ -79,7 +79,7 @@ func raiseIntervalNotComparable(text string) {
 // the input spelling, which is not PostgreSQL's canonical output in general
 // ('26 hours' prints 26:00:00 there) (#1713d).
 func raiseIntervalNotRenderable(text string) {
-	panic(fatalEval{sqlerr.New("0A000",
+	panic(fatalEval{sqlerr.Refuse("interval-opaque-value",
 		"interval %s cannot be rendered as text: only a single-unit interval (YEAR, MONTH, "+
 			"WEEK, DAY, HOUR, MINUTE or SECOND) is supported", sqlerr.Quote(text))})
 }
@@ -106,7 +106,7 @@ func CheckIntervalLiteralText(s string) (err error) {
 // raiseIntervalNotApplicable is the refusal for an interval whose fields this
 // engine cannot hold (IntervalValue.text).
 func raiseIntervalNotApplicable(iv IntervalValue) {
-	panic(fatalEval{sqlerr.New("0A000",
+	panic(fatalEval{sqlerr.Refuse("interval-opaque-value",
 		"interval %s cannot be applied: only a single-unit interval (YEAR, MONTH, "+
 			"WEEK, DAY, HOUR, MINUTE or SECOND) is supported in arithmetic", sqlerr.Quote(iv.text))})
 }

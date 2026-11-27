@@ -107,7 +107,7 @@ import (
 // intervalRefusal is the 0A000 for an interval used where this engine cannot
 // yet take one.
 func intervalRefusal(use string) error {
-	return sqlerr.New("0A000", "interval values cannot yet be used as %s: compare or apply an interval "+
+	return sqlerr.Refuse(useReason(use, "interval-use"), "interval values cannot yet be used as %s: compare or apply an interval "+
 		"inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a "+
 		"stored nanosecond duration", use)
 }
@@ -118,10 +118,38 @@ func intervalRefusal(use string) error {
 // r16), never an interval, so no use of it may answer. Both workarounds were
 // measured against PostgreSQL 17.11 (1713d_r3.md, 1713d_r6.md).
 func tsDiffRefusal(use string) error {
-	return sqlerr.New("0A000", "a timestamp difference (timestamp - timestamp) is an interval and "+
+	return sqlerr.Refuse(useReason(use, "timestamp-difference-to-number"), "a timestamp difference (timestamp - timestamp) is an interval and "+
 		"cannot yet be used as %s: compare the timestamps themselves instead, for example "+
 		"ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts + INTERVAL '30 days', "+
 		"or take a number of seconds as extract(epoch FROM ts2) - extract(epoch FROM ts1)", use)
+}
+
+// useReason is the stable identity (sqlerr.Refuse) of the refusal of an
+// interval used as use: what is refused is the USE, whichever producer
+// (an interval, or a timestamp difference) reaches it; fallback names every
+// other use. The identities are the ones the interval corpus's manifest
+// credits (internal/coordinator/arc_1680b_interval_manifest_rules_test.go,
+// iv80Reasons), read there by identity and never by the sentence's words.
+func useReason(use, fallback string) string {
+	switch {
+	case use == "a query result column":
+		return "bare-interval-result"
+	case use == "a written value":
+		return "interval-write"
+	case use == "an array element" || use == "a row element":
+		return "container"
+	case strings.HasPrefix(use, "an operand of || "):
+		return "implicit-text-conversion"
+	case strings.HasSuffix(use, " key"):
+		return "interval-key"
+	case use == "a table function's argument (generate_series)":
+		return "function-generate_series"
+	case strings.HasPrefix(use, "a table function's argument"):
+		return "table-function-argument"
+	case strings.Contains(use, "subquery's column"):
+		return "subquery-comparison"
+	}
+	return fallback
 }
 
 // refusal is the 0A000 for an interval-valued n used as use: the timestamp
@@ -778,6 +806,19 @@ var intervalArgPositions = map[string]int{
 	"date_part":   1, // float8 on both
 }
 
+// intervalFunctionReasons are the functions over an interval with an item of
+// their own (the definition record, docs/design/interval-execution-type.md),
+// each refused under its own identity.
+var intervalFunctionReasons = map[string]string{
+	"date_trunc":      "function-date_trunc",
+	"to_char":         "function-to_char",
+	"generate_series": "function-generate_series",
+	"width_bucket":    "function-width_bucket",
+	// PostgreSQL's internal hash support functions.
+	"interval_hash":          "postgresql-internal-function",
+	"interval_hash_extended": "postgresql-internal-function",
+}
+
 // funcCall judges a call's interval arguments.
 func (t intervalTyper) funcCall(fc *plansql.FuncCallNode) error {
 	name := strings.ToLower(strings.TrimSpace(fc.Name))
@@ -821,22 +862,28 @@ func (t intervalTyper) funcCall(fc *plansql.FuncCallNode) error {
 		// aggregate would sum or order it.
 		return tsDiffRefusal("an argument of " + label)
 	}
-	if plansql.IsAggregate(name) || windowValueFunctions[name] {
-		return sqlerr.New("0A000", "%s over an interval argument is not supported", name)
+	if plansql.IsAggregate(name) {
+		return sqlerr.Refuse("interval-aggregate", "%s over an interval argument is not supported", name)
+	}
+	if windowValueFunctions[name] {
+		return sqlerr.Refuse("interval-window-function", "%s over an interval argument is not supported", name)
 	}
 	if pos, ok := intervalArgPositions[name]; ok {
 		for i, a := range fc.Args {
 			if t.isInterval(a) && i != pos {
-				return sqlerr.New("0A000", "%s over an interval argument is not supported", name)
+				return sqlerr.Refuse("interval-function-argument", "%s over an interval argument is not supported", name)
 			}
 		}
 		return nil
 	}
 	if strings.EqualFold(label, "extract") {
-		return sqlerr.New("0A000", "EXTRACT over an interval argument is not supported: "+
+		return sqlerr.Refuse("interval-extract", "EXTRACT over an interval argument is not supported: "+
 			"date_part('<field>', <interval>) answers it")
 	}
-	return sqlerr.New("0A000", "%s over an interval argument is not supported", name)
+	if reason, ok := intervalFunctionReasons[name]; ok {
+		return sqlerr.Refuse(reason, "%s over an interval argument is not supported", name)
+	}
+	return sqlerr.Refuse("interval-function-argument", "%s over an interval argument is not supported", name)
 }
 
 // refuseIntervalBlock applies the rule to one query block's own expressions

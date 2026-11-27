@@ -23,6 +23,71 @@ import (
 type Error struct {
 	Code    string // five-character SQLSTATE, e.g. "42P01"
 	Message string
+	// Reason is the stable identity of an intentional capability refusal
+	// (Refuse): a short kebab-case name a test or a tool reads instead of
+	// matching words in Message, which may change. Empty for every other
+	// error.
+	Reason string
+}
+
+// RefusalReason is the refusal identity (ReasonOf).
+func (e *Error) RefusalReason() string { return e.Reason }
+
+// Refuse builds an intentional capability refusal: SQLSTATE 0A000 with the
+// stable identity reason beside the sentence (ReasonOf). The sentence is
+// what a client reads; reason is what a test reads (#1680 stage A: a
+// refusal is credited by its identity, never by words in its sentence).
+func Refuse(reason, format string, args ...any) *Error {
+	return &Error{Code: "0A000", Message: fmt.Sprintf(format, args...), Reason: reason}
+}
+
+// Reasoner is implemented by a coded error that can carry a refusal
+// identity across a boundary that rebuilds it (a worker's task failure).
+type Reasoner interface {
+	RefusalReason() string
+}
+
+// Attacher is implemented by a coded error rebuilt across a boundary that
+// records whether its code was ATTACHED (Attached) where it was raised.
+type Attacher interface {
+	CodeAttached() bool
+}
+
+// raiser is the error in err's chain that raised its code: the DEEPEST
+// carrier of a non-empty SQLSTATE (the refusal where it was raised; the
+// layers above only frame or wrap it), nil when none carries one.
+func raiser(err error) error {
+	var deepest error
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if c, ok := e.(Coder); ok && c.SQLState() != "" {
+			deepest = e
+		}
+	}
+	return deepest
+}
+
+// ReasonOf is the refusal identity of the error that raised err's code
+// (Refuse), "" when that error is no intentional refusal.
+func ReasonOf(err error) string {
+	if r, ok := raiser(err).(Reasoner); ok {
+		return r.RefusalReason()
+	}
+	return ""
+}
+
+// Attached reports an error whose code was attached by Wrap to a chain
+// that carried none: the code says what the wrapping layer guessed, not
+// what the failing code raised, so the error's PROVENANCE is an uncoded
+// failure. A test deciding whether an engine answer is an internal failure
+// reads this (and StateOf), never words in the sentence.
+func Attached(err error) bool {
+	switch r := raiser(err).(type) {
+	case *wrapped:
+		return true
+	case Attacher:
+		return r.CodeAttached()
+	}
+	return false
 }
 
 func (e *Error) Error() string { return e.Message }

@@ -20,7 +20,7 @@ extract/isoyear	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interv
 extract/julian	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
 extract/timezone	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
 extract/inf	*	error	ERR 42601: syntax error at or near ")"
-extract/null	*	refusal	ERR 0A000: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
+extract/null	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
 extract/bigEpoch	*	error	ERR 22007: invalid input syntax for type interval: "178956970 years 7 mons 2147483647 days 2562047788:00:54.775807"
 trunc/millennium	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
 trunc/century	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
@@ -36,21 +36,21 @@ trunc/second	*	error	ERR 22007: invalid input syntax for type interval: "1 year 
 trunc/milliseconds	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
 trunc/microseconds	*	error	ERR 22007: invalid input syntax for type interval: "1 year 14 mons 40 days 26:07:08.5"
 trunc/inf	*	error	ERR 42601: syntax error at or near ")"
-trunc/bogus	*	refusal	ERR 0A000: date_trunc over an interval argument is not supported
-bin/15min	*	refusal	ERR 0A000: date_bin over an interval argument is not supported
+trunc/bogus	*	refusal	ERR 0A000 {function-date_trunc}: date_trunc over an interval argument is not supported
+bin/15min	*	refusal	ERR 0A000 {interval-function-argument}: date_bin over an interval argument is not supported
 bin/days	*	error	ERR 22007: invalid input syntax for type interval: "2 days 12:00:00"
-bin/month	*	pg-error	ERR 0A000: date_bin over an interval argument is not supported
-bin/zero	*	refusal	ERR 0A000: date_bin over an interval argument is not supported
-bin/neg	*	refusal	ERR 0A000: date_bin over an interval argument is not supported
+bin/month	*	pg-error	ERR 0A000 {interval-function-argument}: date_bin over an interval argument is not supported
+bin/zero	*	refusal	ERR 0A000 {interval-function-argument}: date_bin over an interval argument is not supported
+bin/neg	*	refusal	ERR 0A000 {interval-function-argument}: date_bin over an interval argument is not supported
 bin/us	*	error	ERR 42601: syntax error at or near ","
-series/month	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+series/month	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 series/mixed	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 1 day"
-series/neg	*	refusal	ERR 0A000: interval values cannot yet be used as a table function's argument (generate_series): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-series/date	*	refusal	ERR 0A000: interval values cannot yet be used as a table function's argument (generate_series): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-series/zero	*	refusal	ERR 0A000: interval values cannot yet be used as a table function's argument (generate_series): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+series/neg	*	refusal	ERR 0A000 {function-generate_series}: interval values cannot yet be used as a table function's argument (generate_series): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+series/date	*	refusal	ERR 0A000 {function-generate_series}: interval values cannot yet be used as a table function's argument (generate_series): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+series/zero	*	refusal	ERR 0A000 {function-generate_series}: interval values cannot yet be used as a table function's argument (generate_series): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 series/zeroNormalized	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "1 mon -30 days"
 series/inf	*	wrong-sqlstate	ERR 42601: syntax error at or near ")"
-series/tzDst	*	refusal	ERR 0A000: interval values cannot yet be used as a table function's argument (generate_series): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+series/tzDst	*	refusal	ERR 0A000 {function-generate_series}: interval values cannot yet be used as a table function's argument (generate_series): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 tochar/hms	*	error	ERR 22007: invalid input syntax for type interval: "15 hours 2 minutes 12 seconds"
 tochar/days	*	error	ERR 22007: invalid input syntax for type interval: "1 year 2 mons 3 days"
 tochar/us	*	error	ERR 42601: syntax error at or near ","
@@ -68,7 +68,7 @@ frame/tsFollowing	*	error	ERR 42601: syntax error at or near "INTERVAL"
 frame/interval	*	error	ERR 42601: syntax error at or near "INTERVAL"
 frame/negOffset	*	wrong-sqlstate	ERR 42601: syntax error at or near "INTERVAL"
 frame/date	*	error	ERR 42601: syntax error at or near "INTERVAL"
-widthBucket	*	refusal	ERR 0A000: width_bucket over an interval argument is not supported
+widthBucket	*	refusal	ERR 0A000 {function-width_bucket}: width_bucket over an interval argument is not supported
 widthBucketArray	*	error	ERR 42883: function width_bucket(unknown, array) does not exist
 agg/all	*	error	ERR 22007: invalid input syntax for type interval: "-1 day 02:00:00"
 agg/stringAgg	*	error	ERR 42601: syntax error at or near "ORDER"
@@ -86,13 +86,13 @@ operand/plusTime	*	differs	a:text | NULL
 operand/plusTimestamptz	*	differs	a:TIMESTAMP | 2024-01-02 00:00:00
 operand/eqUnknown	*	agree	a:boolean | true
 operand/eqUnknownBad	*	pg-error	ERR 22007: invalid input syntax for type interval: "abc"
-operand/timesUnknown	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-operand/concatText	*	refusal	ERR 0A000: interval values cannot yet be used as an operand of || (an implicit text conversion): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-operand/abs	*	refusal	ERR 0A000: abs over an interval argument is not supported
+operand/timesUnknown	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+operand/concatText	*	refusal	ERR 0A000 {implicit-text-conversion}: interval values cannot yet be used as an operand of || (an implicit text conversion): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+operand/abs	*	refusal	ERR 0A000 {interval-function-argument}: abs over an interval argument is not supported
 operand/greatestTs	*	pg-error	ERR 42804: GREATEST types interval and timestamp without time zone cannot be matched
 operand/coalesceText	*	pg-error	ERR 42804: COALESCE types interval and text cannot be matched
 operand/eqText	*	pg-error	ERR 42883: operator does not exist: interval = text
 operand/eqTime	*	error	ERR 42601: syntax error at or near "="
 operand/minusFromDate	*	pg-error	ERR 42883: operator does not exist: interval - date
-operand/unaryPlus	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+operand/unaryPlus	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 operand/castBool	*	pg-error	ERR 42846: cannot cast type interval to boolean

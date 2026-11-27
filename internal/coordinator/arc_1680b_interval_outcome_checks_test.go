@@ -3,8 +3,12 @@
 package coordinator
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // The outcome checks and the stage rules, held by adversarial cases
@@ -13,7 +17,7 @@ import (
 
 // iv80MeetsCell is iv80Meets for a corpus cell: its order and its spec.
 func iv80MeetsCell(outcome, engine, pg, key, sql string) bool {
-	x := iv80Check{ordered: iv80Ordered(sql)}
+	x := iv80Check{ordered: iv80Ordered(sql), ties: iv80TiedOrder[sql]}
 	if s, ok := iv80RepSpecs()[key]; ok {
 		x.rep = &s
 	}
@@ -46,6 +50,7 @@ func iv80OutcomeCases() []iv80OutcomeCase {
 	reparithSQL := "SELECT TIMESTAMP '2024-01-31' + v AS t FROM (SELECT DISTINCT v FROM (VALUES (INTERVAL '1 mon'), (INTERVAL '30 days')) q(v)) d"
 	reparithPG := "t:timestamp(1114) | 2024-02-29 00:00:00"
 	truncPG := "ERR 0A000: unit \"week\" not supported for type interval"
+	rollupSQL := "SELECT g, CAST(CAST(s AS INTERVAL) AS TEXT) AS k, count(*) AS n FROM iv80_r GROUP BY ROLLUP (g, CAST(s AS INTERVAL)) ORDER BY g NULLS LAST, min(id), n"
 	return []iv80OutcomeCase{
 		// supported: value and type.
 		{"the same answer", "supported", "a:TEXT | 1 mon", pgIv, "", unordered, true},
@@ -62,22 +67,33 @@ func iv80OutcomeCases() []iv80OutcomeCase {
 		{"0A000 where PostgreSQL raised 22008", "pg-error 22008", "ERR 0A000: interval values cannot yet be used", pgErr, "", unordered, false},
 		{"an answer where PostgreSQL raised", "pg-error 22008", "a:TEXT | 1 mon", pgErr, "", unordered, false},
 		// (vii) the internal-failure exclusion before every outcome.
-		{"(vii) a store guard coded like PostgreSQL's error", "pg-error 22008", "ERR 22008: batch: cannot store expr.IntervalValue into STRING vector (#361 silent-write guard)", pgErr, "", unordered, false},
-		{"(vii) a runtime error coded like PostgreSQL's error", "pg-error 22008", "ERR 22008: runtime error: index out of range [3] with length 3", pgErr, "", unordered, false},
+		{"(vii) a store guard coded like PostgreSQL's error", "pg-error 22008", "ERR 22008 {attached}: batch: cannot store expr.IntervalValue into STRING vector (#361 silent-write guard)", pgErr, "", unordered, false},
+		{"(vii) a runtime error coded like PostgreSQL's error", "pg-error 22008", "ERR 22008 {attached}: runtime error: index out of range [3] with length 3", pgErr, "", unordered, false},
 		{"(vii) XX000", "pg-error XX000", "ERR XX000: internal", "ERR XX000: internal", "", unordered, false},
 		{"(vii) an uncoded error", "refusal typmod", "ERR : interval typmod", pgIv, "", unordered, false},
 		{"(vii) a panic", "refusal typmod", "PANIC runtime error", pgIv, "", unordered, false},
-		{"(vii) a runtime error presented as 0A000", "refusal typmod", "ERR 0A000: runtime error: interval typmod slice bounds out of range", pgIv, "", unordered, false},
-		{"(vii) a store guard presented as 0A000", "refusal container", "ERR 0A000: batch: array element declared without its element or fields", pgIv, "", unordered, false},
-		// (i) the refusal's NAMED reason.
-		{"(i) the named reason", "refusal typmod", "ERR 0A000: an interval typmod is not supported", pgIv, "", unordered, true},
-		{"(i) an unrelated 0A000", "refusal typmod", "ERR 0A000: interval values cannot yet be used as a query result column", pgIv, "", unordered, false},
-		{"(i) the wrong capability refusal", "refusal function-to_char", "ERR 0A000: date_trunc over an interval argument is not supported", pgIv, "", unordered, false},
+		{"(vii) a runtime error presented as 0A000", "refusal typmod", "ERR 0A000 {attached}: runtime error: interval typmod slice bounds out of range", pgIv, "", unordered, false},
+		{"(vii) a store guard presented as 0A000", "refusal container", "ERR 0A000 {attached}: batch: array element declared without its element or fields", pgIv, "", unordered, false},
+		// (i) the refusal's NAMED reason: its identity, never its words.
+		{"(i) the named reason", "refusal typmod", "ERR 0A000 {typmod}: an interval typmod is not supported", pgIv, "", unordered, true},
+		{"(i) an unrelated 0A000", "refusal typmod", "ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column", pgIv, "", unordered, false},
+		{"(i) the wrong capability refusal", "refusal function-to_char", "ERR 0A000 {function-date_trunc}: date_trunc over an interval argument is not supported", pgIv, "", unordered, false},
 		{"(i) a syntax error", "refusal typmod", "ERR 42601: syntax error", pgIv, "", unordered, false},
-		{"(i) the bare-result refusal", "refusal bare-interval-result", "ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline", pgIv, "", unordered, true},
+		{"(i) the bare-result refusal", "refusal bare-interval-result", "ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline", pgIv, "", unordered, true},
+		// The third judge (1680c): a reason credited by words, and an
+		// internal failure under an acceptable SQLSTATE.
+		{"(judge 3) a timestamptz refusal is no time-type refusal, though its sentence names the time zone", "refusal time-type", "ERR 0A000 {timestamptz}: timestamptz arithmetic is not supported: the time zone is refused", pgIv, "", unordered, false},
+		{"(judge 3) another refusal's sentence that names date_trunc", "refusal function-date_trunc", "ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column (date_trunc('hour', v))", pgIv, "", unordered, false},
+		{"(judge 3) the named sentence without its identity", "refusal bare-interval-result", "ERR 0A000: interval values cannot yet be used as a query result column", pgIv, "", unordered, false},
+		{"(judge 3) an internal failure under PostgreSQL's 0A000", "pg-error 0A000", "ERR 0A000 {attached}: unsupported shuffle type: 255", truncPG, "", unordered, false},
+		{"(judge 3) a capability refusal under PostgreSQL's own SQLSTATE: the SQLSTATE is the outcome (ADR-0052 section 8)", "pg-error 0A000", "ERR 0A000 {function-date_trunc}: date_trunc over an interval argument is not supported", truncPG, "", unordered, true},
+		{"(judge 3) PostgreSQL's own 0A000", "pg-error 0A000", "ERR 0A000: unit \"week\" not supported for type interval", truncPG, "", unordered, true},
 		// (ii) a refusal where PostgreSQL itself answers 0A000.
-		{"(ii) trunc/week: the named refusal over PostgreSQL's own 0A000", "refusal function-date_trunc", "ERR 0A000: date_trunc over an interval argument is not supported", truncPG, "07_functions:trunc/week", unordered, true},
-		{"(ii) trunc/week: another 0A000", "refusal function-date_trunc", "ERR 0A000: interval unit \"week\" is not supported", truncPG, "07_functions:trunc/week", unordered, false},
+		{"(ii) trunc/week: the named refusal over PostgreSQL's own 0A000", "refusal function-date_trunc", "ERR 0A000 {function-date_trunc}: date_trunc over an interval argument is not supported", truncPG, "07_functions:trunc/week", unordered, true},
+		{"(ii) trunc/week: another 0A000", "refusal function-date_trunc", "ERR 0A000 {interval-unit}: interval unit \"week\" is not supported", truncPG, "07_functions:trunc/week", unordered, false},
+		// The third judge: ROLLUP's ORDER BY leaves ties only within g.
+		{"(judge 3) rollup: a permutation within a tie on g", "supported", "g:bigint,k:text,n:bigint | 1,NULL,3; 1,1 day,3; 4,2 days,2", "g:bigint(20),k:text(25),n:bigint(20) | 1,1 day,3; 1,NULL,3; 4,2 days,2", "", rollupSQL, true},
+		{"(judge 3) rollup: rows out of order between distinct g", "supported", "g:bigint,k:text,n:bigint | 4,2 days,2; 1,1 day,3; 1,NULL,3", "g:bigint(20),k:text(25),n:bigint(20) | 1,1 day,3; 1,NULL,3; 4,2 days,2", "", rollupSQL, false},
 		// (iii) the representative: an eligible input member, the whole
 		// winning tuple, ascending.
 		{"(iii) the rule-3 whole tuple", "rep-divergence", "a:TEXT,b:TEXT | 30 days,1 day", tuplePG, "11_relational:tuple/distinct/default", tupleSQL, true},
@@ -117,15 +133,50 @@ func TestArc1680bOutcomeChecks(t *testing.T) {
 	pgErr := "ERR 22008: interval out of range"
 	// The baseline classes keep an intentional refusal apart from the rest.
 	for engine, want := range map[string]string{
-		"ERR 0A000: interval values cannot yet be used as a query result column":                    "refusal",
-		"ERR : batch: cannot store expr.IntervalValue into STRING vector (#361 silent-write guard)": "store-guard",
-		"ERR : something without a code":   "internal",
-		"PANIC boom":                       "panic",
-		"ERR 22007: invalid input":         "wrong-sqlstate",
-		"ERR 22008: interval out of range": "pg-error",
+		"ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column": "refusal",
+		"ERR : batch: cannot store expr.IntervalValue into STRING vector (#361 silent-write guard)":     "internal",
+		"ERR 0A000 {attached}: unsupported shuffle type: 255":                                           "internal",
+		"ERR : something without a code":                                                                "internal",
+		"PANIC boom":                                                                                    "panic",
+		"ERR 22007: invalid input":                                                                      "wrong-sqlstate",
+		"ERR 22008: interval out of range":                                                              "pg-error",
 	} {
 		if got := iv80Classify(engine, pgErr); got != want {
 			t.Errorf("iv80Classify(%q) = %q, want %q", engine, got, want)
+		}
+	}
+}
+
+// TestArc1680bRecordedIdentity: the recorder reads an error's identity off
+// its TYPE chain, where it was raised, and the checker credits nothing else
+// (#1680c, the third judge): an intentional refusal carries its reason
+// through the door's sentence and a worker's rebuilt failure; a code
+// attached to an uncoded failure is recorded as such and is an internal
+// failure whatever its SQLSTATE; a refusal sentence without its identity
+// earns nothing.
+func TestArc1680bRecordedIdentity(t *testing.T) {
+	refusal := sqlerr.Refuse("typmod", "an interval typmod is not supported")
+	cases := []struct {
+		why, outcome, pg string
+		err              error
+		want             bool
+	}{
+		{"a refusal under its identity", "refusal typmod", "a:text(25) | 1 mon", refusal, true},
+		{"the same refusal through the door's sentence", "refusal typmod", "a:text(25) | 1 mon", sqlerr.Sentence(fmt.Errorf("planning: %w", refusal)), true},
+		{"the same refusal rebuilt from a worker", "refusal typmod", "a:text(25) | 1 mon",
+			stageTaskFailure(taskFailure{SQLState: "0A000", SQLMessage: refusal.Message, SQLReason: "typmod"}, errors.New("stage s: task t: "+refusal.Message)), true},
+		{"the refusal's words under no identity", "refusal typmod", "a:text(25) | 1 mon", sqlerr.New("0A000", "an interval typmod is not supported"), false},
+		{"another refusal naming the reason's words", "refusal typmod", "a:text(25) | 1 mon", sqlerr.Refuse("bare-interval-result", "interval typmod values cannot yet be used as a query result column"), false},
+		{"an internal failure under PostgreSQL's 0A000", "pg-error 0A000", "ERR 0A000: unit \"week\" not supported for type interval", sqlerr.Wrap("0A000", errors.New("unsupported shuffle type: 255")), false},
+		{"the same, rebuilt from a worker", "pg-error 0A000", "ERR 0A000: unit \"week\" not supported for type interval",
+			stageTaskFailure(taskFailure{SQLState: "0A000", SQLMessage: "unsupported shuffle type: 255", SQLAttached: true}, errors.New("unsupported shuffle type: 255")), false},
+		{"PostgreSQL's own 0A000, raised", "pg-error 0A000", "ERR 0A000: unit \"week\" not supported for type interval", sqlerr.New("0A000", "unit \"week\" not supported for type interval"), true},
+		{"a code over a raised code is the raised one's", "pg-error 22008", "ERR 22008: interval out of range", sqlerr.Wrap("0A000", sqlerr.New("22008", "interval out of range")), false},
+	}
+	for _, c := range cases {
+		rec := iv80Err(c.err)
+		if got := iv80Meets(c.outcome, rec, c.pg, iv80Check{}); got != c.want {
+			t.Errorf("%s: recorded %q; iv80Meets(%q) = %v, want %v", c.why, rec, c.outcome, got, c.want)
 		}
 	}
 }

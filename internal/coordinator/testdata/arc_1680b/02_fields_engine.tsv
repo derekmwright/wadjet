@@ -1,28 +1,28 @@
 # This engine's disposition of the #1680b interval corpus, section 02_fields, per arm (TestArc1680bRecordEngine; held by TestArc1680bEngineBaseline).
 # Settings are PostgreSQL's only: the engine runs each statement as written. A TIMESTAMP value is printed as text (iv80EngineText). name<TAB>arms<TAB>class<TAB>answer
-fields/0/1 mon	*	refusal	ERR 0A000: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
-fields/1/30 days	*	refusal	ERR 0A000: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
+fields/0/1 mon	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
+fields/1/30 days	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
 fields/2/720:00:00	*	error	ERR 42601: syntax error at or near ")"
-fields/3/36 hours	*	refusal	ERR 0A000: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
+fields/3/36 hours	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
 fields/4/1 day 12:00:00	*	error	ERR 22007: invalid input syntax for type interval: "1 day 12:00:00"
 fields/5/1 year 2 mons 3 days 04:05:06.789	*	error	ERR 22007: invalid input syntax for type interval: "1 year 2 mons 3 days 04:05:06.789"
 fields/6/-1 year -2 mons +3 days -04:05:06	*	error	ERR 22007: invalid input syntax for type interval: "-1 year -2 mons +3 days -04:05:06"
 fields/7/1 mon -30 days	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -30 days"
-fields/8/0	*	refusal	ERR 0A000: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
-fields/9/-1 day	*	refusal	ERR 0A000: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
+fields/8/0	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
+fields/9/-1 day	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
 fields/10/00:00:00.000001	*	error	ERR 42601: syntax error at or near ")"
 fields/11/-00:00:00.000001	*	error	ERR 42601: syntax error at or near ")"
 fields/12/178956970 years 7 mons	*	error	ERR 22007: invalid input syntax for type interval: "178956970 years 7 mons"
 fields/13/-178956970 years -8 mons	*	error	ERR 22007: invalid input syntax for type interval: "-178956970 years -8 mons"
-fields/14/2147483647 days	*	refusal	ERR 0A000: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
+fields/14/2147483647 days	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
 fields/15/2562047788:00:54.775807	*	error	ERR 42601: syntax error at or near ")"
 fields/16/1.5 months	*	error	ERR 22007: invalid input syntax for type interval: "1.5 months"
 fields/17/-1 day +02:03:04.5	*	error	ERR 22007: invalid input syntax for type interval: "-1 day +02:03:04.5"
-fields/18/14 months	*	refusal	ERR 0A000: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
+fields/18/14 months	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
 fields/19/1 year -1 second	*	error	ERR 22007: invalid input syntax for type interval: "1 year -1 second"
 fields/20/infinity	*	error	ERR 42601: syntax error at or near ")"
 fields/21/-infinity	*	error	ERR 42601: syntax error at or near ")"
-fields/22/NULL	*	refusal	ERR 0A000: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
+fields/22/NULL	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
 print/postgres	*	error	ERR 42601: syntax error at or near ")"
 print/text/postgres	*	error	ERR 42601: syntax error at or near ")"
 print/postgres_verbose	*	error	ERR 42601: syntax error at or near ")"
@@ -31,7 +31,7 @@ print/sql_standard	*	error	ERR 42601: syntax error at or near ")"
 print/text/sql_standard	*	error	ERR 42601: syntax error at or near ")"
 print/iso_8601	*	error	ERR 42601: syntax error at or near ")"
 print/text/iso_8601	*	error	ERR 42601: syntax error at or near ")"
-text/0/1 mon	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+text/0/1 mon	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 text/1/30 days	*	agree	t:text | 30 days
 text/2/720:00:00	*	error	ERR 42601: syntax error at or near "AS"
 text/3/36 hours	*	agree	t:text | 36:00:00
@@ -54,6 +54,6 @@ text/19/1 year -1 second	*	error	ERR 22007: invalid input syntax for type interv
 text/20/infinity	*	error	ERR 42601: syntax error at or near "AS"
 text/21/-infinity	*	error	ERR 42601: syntax error at or near "AS"
 text/22/NULL	*	agree	t:text | NULL
-input/sqlstd/mixed	*	refusal	ERR 0A000: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
-input/postgres/mixed	*	refusal	ERR 0A000: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
+input/sqlstd/mixed	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
+input/postgres/mixed	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
 print/dateStyleSQL	*	error	ERR 22007: invalid input syntax for type interval: "1 year 2 mons 3 days 04:05:06"

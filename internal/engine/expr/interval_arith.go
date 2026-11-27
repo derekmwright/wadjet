@@ -35,7 +35,7 @@ func raiseIntervalOutOfRange() {
 }
 
 func raiseIntervalSubSecond(op string) {
-	panic(fatalEval{sqlerr.New("0A000",
+	panic(fatalEval{sqlerr.Refuse("interval-subsecond",
 		"interval %s has a fractional-second result; only whole seconds are supported in an interval", op)})
 }
 
@@ -117,7 +117,7 @@ func intervalScale(a IntervalValue, factor float64, div bool) IntervalValue {
 		}
 		// PostgreSQL 17 answers an infinite interval, which this type has
 		// no value for.
-		panic(fatalEval{sqlerr.New("0A000", "interval %s has an infinite result; an infinite interval is not supported", op)})
+		panic(fatalEval{sqlerr.Refuse("interval-infinity", "interval %s has an infinite result; an infinite interval is not supported", op)})
 	}
 	apply := func(x float64) float64 {
 		if div {

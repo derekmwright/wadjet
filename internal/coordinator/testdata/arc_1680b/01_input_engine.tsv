@@ -1,12 +1,12 @@
 # This engine's disposition of the #1680b interval corpus, section 01_input, per arm (TestArc1680bRecordEngine; held by TestArc1680bEngineBaseline).
 # Settings are PostgreSQL's only: the engine runs each statement as written. A TIMESTAMP value is printed as text (iv80EngineText). name<TAB>arms<TAB>class<TAB>answer
-lit/0/1 day	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+lit/0/1 day	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 lit/1/1 day 2 hours	*	error	ERR 22007: invalid input syntax for type interval: "1 day 2 hours"
 lit/2/1 year 2 months 3 days 4 hours 5 minutes 6 seconds	*	error	ERR 22007: invalid input syntax for type interval: "1 year 2 months 3 days 4 hours 5 minutes 6 seconds"
 lit/3/1-2	*	error	ERR 42601: syntax error at or near "AS"
 lit/4/-1-2	*	error	ERR 42601: syntax error at or near "AS"
-lit/5/3 4:05:06	*	refusal	ERR 0A000: interval unit "4:05:06" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-lit/6/-3 -4:05:06	*	refusal	ERR 0A000: interval unit "-4:05:06" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+lit/5/3 4:05:06	*	refusal	ERR 0A000 {interval-unit}: interval unit "4:05:06" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+lit/6/-3 -4:05:06	*	refusal	ERR 0A000 {interval-unit}: interval unit "-4:05:06" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 lit/7/1-2 3 4:05:06	*	error	ERR 22007: invalid input syntax for type interval: "1-2 3 4:05:06"
 lit/8/4:05:06	*	error	ERR 42601: syntax error at or near "AS"
 lit/9/4:05	*	error	ERR 42601: syntax error at or near "AS"
@@ -42,38 +42,38 @@ lit/38/1.0333333 months	*	error	ERR 22007: invalid input syntax for type interva
 lit/39/-1.5 months	*	error	ERR 22007: invalid input syntax for type interval: "-1.5 months"
 lit/40/-1.5 days	*	error	ERR 22007: invalid input syntax for type interval: "-1.5 days"
 lit/41/1.5 centuries	*	error	ERR 22007: invalid input syntax for type interval: "1.5 centuries"
-lit/42/1 decade	*	refusal	ERR 0A000: interval unit "decade" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-lit/43/1 century	*	refusal	ERR 0A000: interval unit "century" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-lit/44/1 millennium	*	refusal	ERR 0A000: interval unit "millennium" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-lit/45/10 weeks	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+lit/42/1 decade	*	refusal	ERR 0A000 {interval-unit}: interval unit "decade" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+lit/43/1 century	*	refusal	ERR 0A000 {interval-unit}: interval unit "century" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+lit/44/1 millennium	*	refusal	ERR 0A000 {interval-unit}: interval unit "millennium" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+lit/45/10 weeks	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 lit/46/1.000001 seconds	*	error	ERR 22007: invalid input syntax for type interval: "1.000001 seconds"
 lit/47/0.0000005 seconds	*	error	ERR 22007: invalid input syntax for type interval: "0.0000005 seconds"
 lit/48/0.0000015 seconds	*	error	ERR 22007: invalid input syntax for type interval: "0.0000015 seconds"
 lit/49/0.0000025 seconds	*	error	ERR 22007: invalid input syntax for type interval: "0.0000025 seconds"
-lit/50/1 microsecond	*	refusal	ERR 0A000: interval unit "microsecond" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-lit/51/1 millisecond	*	refusal	ERR 0A000: interval unit "millisecond" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+lit/50/1 microsecond	*	refusal	ERR 0A000 {interval-unit}: interval unit "microsecond" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+lit/51/1 millisecond	*	refusal	ERR 0A000 {interval-unit}: interval unit "millisecond" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 lit/52/1.5 microseconds	*	error	ERR 22007: invalid input syntax for type interval: "1.5 microseconds"
 lit/53/1:2:3.123456789	*	error	ERR 42601: syntax error at or near "AS"
 lit/54/-0.000001 seconds	*	error	ERR 22007: invalid input syntax for type interval: "-0.000001 seconds"
 lit/55/00:00:00.000001	*	error	ERR 42601: syntax error at or near "AS"
-lit/56/0	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-lit/57/0 seconds	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+lit/56/0	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+lit/57/0 seconds	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 lit/58/00:00:00	*	error	ERR 42601: syntax error at or near "AS"
-lit/59/-0 days	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-lit/60/100	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+lit/59/-0 days	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+lit/60/100	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 lit/61/1.5	*	error	ERR 42601: syntax error at or near "AS"
-lit/62/-100	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+lit/62/-100	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 lit/63/178956970 years 7 months	*	error	ERR 22007: invalid input syntax for type interval: "178956970 years 7 months"
 lit/64/178956970 years 8 months	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "178956970 years 8 months"
 lit/65/-178956970 years -8 months	*	error	ERR 22007: invalid input syntax for type interval: "-178956970 years -8 months"
 lit/66/-178956970 years -9 months	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "-178956970 years -9 months"
-lit/67/2147483647 months	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+lit/67/2147483647 months	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 lit/68/2147483648 months	*	pg-error	ERR 22015: interval field value out of range: "2147483648 months"
-lit/69/-2147483648 months	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+lit/69/-2147483648 months	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 lit/70/-2147483649 months	*	pg-error	ERR 22015: interval field value out of range: "-2147483649 months"
-lit/71/2147483647 days	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+lit/71/2147483647 days	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 lit/72/2147483648 days	*	pg-error	ERR 22015: interval field value out of range: "2147483648 days"
-lit/73/-2147483648 days	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+lit/73/-2147483648 days	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 lit/74/-2147483649 days	*	pg-error	ERR 22015: interval field value out of range: "-2147483649 days"
 lit/75/2562047788:00:54.775807	*	error	ERR 42601: syntax error at or near "AS"
 lit/76/2562047788:00:54.775808	*	wrong-sqlstate	ERR 42601: syntax error at or near "AS"
@@ -88,22 +88,22 @@ lit/84/INFINITY	*	error	ERR 42601: syntax error at or near "AS"
 lit/85/	*	pg-error	ERR 22007: invalid input syntax for type interval: ""
 lit/86/ 	*	pg-error	ERR 22007: invalid input syntax for type interval: ""
 lit/87/garbage	*	wrong-sqlstate	ERR 42601: syntax error at or near "AS"
-lit/88/1 fortnight	*	refusal	ERR 0A000: interval unit "fortnight" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+lit/88/1 fortnight	*	refusal	ERR 0A000 {interval-unit}: interval unit "fortnight" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 lit/89/1 day 1 day	*	pg-error	ERR 22007: invalid input syntax for type interval: "1 day 1 day"
 lit/90/1 2 3	*	pg-error	ERR 22007: invalid input syntax for type interval: "1 2 3"
 lit/91/P1Y2	*	wrong-sqlstate	ERR 42601: syntax error at or near "AS"
 lit/92/1 days 2 days	*	pg-error	ERR 22007: invalid input syntax for type interval: "1 days 2 days"
-lit/null	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+lit/null	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 std/ym	*	error	ERR 42601: syntax error at or near "YEAR"
 std/ymNeg	*	error	ERR 42601: syntax error at or near "YEAR"
 std/ds	*	error	ERR 42601: syntax error at or near "TO"
 std/dsFrac	*	error	ERR 42601: syntax error at or near "TO"
-std/year	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-std/month	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-std/day	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-std/hour	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-std/minute	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-std/second	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+std/year	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+std/month	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+std/day	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+std/hour	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+std/minute	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+std/second	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 std/secondFrac	*	error	ERR 42601: syntax error at or near "SECOND"
 std/dh	*	error	ERR 42601: syntax error at or near "TO"
 std/dm	*	error	ERR 42601: syntax error at or near "TO"
@@ -116,7 +116,7 @@ std/monthDropsDays	*	error	ERR 22007: invalid input syntax for type interval: "1
 std/hourDropsMinutes	*	error	ERR 22007: invalid input syntax for type interval: "1 day 02:30:45"
 std/yearFrac	*	error	ERR 42601: syntax error at or near "YEAR"
 std/dayFrac	*	error	ERR 42601: syntax error at or near "DAY"
-std/hourNeg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+std/hourNeg	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 std/yearOver	*	pg-error	ERR 22008: interval out of range
 std/dayOver	*	pg-error	ERR 22015: interval field value out of range: "2147483648 days"
 prec/iv3	*	error	ERR 22007: invalid input syntax for type interval: "1.123456 seconds"
@@ -129,15 +129,15 @@ prec/iv7	*	error	ERR 42704: type "interval(7)" does not exist
 prec/castDay	*	error	ERR 22007: invalid input syntax for type interval: "1 day 02:00:00"
 prec/castYear	*	error	ERR 22007: invalid input syntax for type interval: "14 months 3 days"
 prec/castMonthTyp	*	error	ERR 22007: invalid input syntax for type interval: "14 months 3 days"
-cast/fromText	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-cast/colon	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+cast/fromText	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+cast/colon	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 cast/toText	*	error	ERR 22007: invalid input syntax for type interval: "1 day 2 hours"
-cast/toVarchar	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+cast/toVarchar	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 cast/toChar	*	error	ERR 42846: cannot cast type interval to char(10)
 cast/toTextNull	*	agree	a:text | NULL
 cast/fromInt	*	pg-error	ERR 42846: cannot cast type bigint to interval
 cast/fromNumeric	*	pg-error	ERR 42846: cannot cast type double precision to interval
-cast/fromTime	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+cast/fromTime	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 cast/toTime	*	error	ERR 42601: syntax error at or near "AS"
 cast/toBigint	*	pg-error	ERR 42846: cannot cast type interval to bigint
 cast/fromDuration	*	wrong-sqlstate	ERR 42846: cannot cast type bigint to interval
@@ -153,7 +153,7 @@ make/null	*	error	ERR 42601: syntax error at or near ">"
 make/hoursOver	*	error	ERR 42601: syntax error at or near "hours"
 ddl/create/iv80_in	writer	ok	ok
 ddl/insert/iv80_in	writer	ok	ok
-row/cast	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-row/castText	*	refusal	ERR 0A000: interval "1 day 02:00:00" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
-row/bad	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+row/cast	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+row/castText	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 day 02:00:00" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+row/bad	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 row/badUnreached	*	agree	id:bigint | 1

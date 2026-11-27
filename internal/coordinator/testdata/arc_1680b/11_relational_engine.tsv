@@ -2,68 +2,68 @@
 # Settings are PostgreSQL's only: the engine runs each statement as written. A TIMESTAMP value is printed as text (iv80EngineText). name<TAB>arms<TAB>class<TAB>answer
 ddl/create/iv80_r	writer	ok	ok
 ddl/insert/iv80_r	writer	ok	ok
-rt/mul	*	refusal	ERR 0A000: interval "1 mon" cannot be applied: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported in arithmetic
-rt/div	*	refusal	ERR 0A000: interval "1 mon" cannot be applied: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported in arithmetic
-rt/neg	*	refusal	ERR 0A000: interval "1 mon" cannot be applied: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported in arithmetic
+rt/mul	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be applied: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported in arithmetic
+rt/div	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be applied: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported in arithmetic
+rt/neg	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be applied: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported in arithmetic
 rt/plus	*	error	ERR 22007: invalid input syntax for type interval: "1 day 01:00:00"
-rt/justify	*	refusal	ERR 0A000: justify_interval over an interval argument is not supported
-rt/cmp	*	refusal	ERR 0A000: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
-rt/lt	*	refusal	ERR 0A000: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
-rt/tsPlus	*	refusal	ERR 0A000: interval "1 mon" cannot be applied: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported in arithmetic
-rt/tsMinus	*	refusal	ERR 0A000: interval "1 mon" cannot be applied: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported in arithmetic
-rt/isfinite	*	refusal	ERR 0A000: isfinite over an interval argument is not supported
-rt/extractDay	*	refusal	ERR 0A000: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
-rt/extractEpoch	*	refusal	ERR 0A000: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
-rt/datePart	*	refusal	ERR 0A000: interval "1 mon" cannot be applied: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported in arithmetic
-rt/text	*	refusal	ERR 0A000: interval "1 mon" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
-rt/bare	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-opaque/apply	*	refusal	ERR 0A000: interval "1 day 02:00:00" cannot be applied: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported in arithmetic
-opaque/compare	*	refusal	ERR 0A000: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
-opaque/text	*	refusal	ERR 0A000: interval "1 day 02:00:00" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
-opaque/arith	*	refusal	ERR 0A000: interval "1 day 02:00:00" cannot be applied: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported in arithmetic
-ord/text	*	refusal	ERR 0A000: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-ord/textDescNullsLast	*	refusal	ERR 0A000: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-ord/topN	*	refusal	ERR 0A000: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-filt/text	*	refusal	ERR 0A000: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
-grp/text/default	*	refusal	ERR 0A000: interval values cannot yet be used as a GROUP BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-grp/derived/default	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-distinct/text/default	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-grp/text/sortagg	*	refusal	ERR 0A000: interval values cannot yet be used as a GROUP BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-grp/derived/sortagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-distinct/text/sortagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-tuple/distinct/default	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-tuple/distinctRev/default	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-tuple/group/default	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-tuple/distinct/sortagg	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-tuple/distinctRev/sortagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-tuple/group/sortagg	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+rt/justify	*	refusal	ERR 0A000 {interval-function-argument}: justify_interval over an interval argument is not supported
+rt/cmp	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+rt/lt	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+rt/tsPlus	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be applied: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported in arithmetic
+rt/tsMinus	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be applied: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported in arithmetic
+rt/isfinite	*	refusal	ERR 0A000 {interval-function-argument}: isfinite over an interval argument is not supported
+rt/extractDay	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
+rt/extractEpoch	*	refusal	ERR 0A000 {interval-extract}: EXTRACT over an interval argument is not supported: date_part('<field>', <interval>) answers it
+rt/datePart	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be applied: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported in arithmetic
+rt/text	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+rt/bare	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+opaque/apply	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 day 02:00:00" cannot be applied: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported in arithmetic
+opaque/compare	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+opaque/text	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 day 02:00:00" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+opaque/arith	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 day 02:00:00" cannot be applied: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported in arithmetic
+ord/text	*	refusal	ERR 0A000 {interval-key}: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+ord/textDescNullsLast	*	refusal	ERR 0A000 {interval-key}: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+ord/topN	*	refusal	ERR 0A000 {interval-key}: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+filt/text	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+grp/text/default	*	refusal	ERR 0A000 {interval-key}: interval values cannot yet be used as a GROUP BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+grp/derived/default	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+distinct/text/default	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+grp/text/sortagg	*	refusal	ERR 0A000 {interval-key}: interval values cannot yet be used as a GROUP BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+grp/derived/sortagg	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+distinct/text/sortagg	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+tuple/distinct/default	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+tuple/distinctRev/default	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+tuple/group/default	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+tuple/distinct/sortagg	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+tuple/distinctRev/sortagg	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+tuple/group/sortagg	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 ddl/create/iv80_tp	writer	ok	ok
 ddl/insert/iv80_tp	writer	ok	ok
-tuple/table/default	*	refusal	ERR 0A000: interval values cannot yet be used as a GROUP BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-tuple/table/sortagg	*	refusal	ERR 0A000: interval values cannot yet be used as a GROUP BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+tuple/table/default	*	refusal	ERR 0A000 {interval-key}: interval values cannot yet be used as a GROUP BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+tuple/table/sortagg	*	refusal	ERR 0A000 {interval-key}: interval values cannot yet be used as a GROUP BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 mixkey/group/default	*	error	ERR 42601: syntax error at or near ","
 mixkey/distinct/default	*	error	ERR 42601: syntax error at or near ","
 mixkey/group/sortagg	*	error	ERR 42601: syntax error at or near ","
 mixkey/distinct/sortagg	*	error	ERR 42601: syntax error at or near ","
 ordagg/minMax	*	error	ERR 42601: syntax error at or near "ORDER"
 ordagg/minMaxRev	*	error	ERR 42601: syntax error at or near "ORDER"
-ordagg/unordered	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+ordagg/unordered	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 ordagg/sumOrdered	*	error	ERR 42601: syntax error at or near "ORDER"
 ordagg/percentile	*	error	ERR 42601: syntax error at or near "WITHIN"
-distagg/sumAvg/default	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-distagg/sumAvgRev/default	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-distagg/sumAvg/sortagg	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-distagg/sumAvgRev/sortagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-distagg/countRows	*	refusal	ERR 0A000: count over an interval argument is not supported
-reparith/default	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-reparithRev/default	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-reparith/sortagg	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-reparithRev/sortagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+distagg/sumAvg/default	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+distagg/sumAvgRev/default	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+distagg/sumAvg/sortagg	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+distagg/sumAvgRev/sortagg	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+distagg/countRows	*	refusal	ERR 0A000 {interval-aggregate}: count over an interval argument is not supported
+reparith/default	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+reparithRev/default	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+reparith/sortagg	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+reparithRev/sortagg	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 ddl/create/iv80_rt	writer	ok	ok
 ddl/insert/iv80_rt	writer	ok	ok
-lag/tsDiff	*	refusal	ERR 0A000: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as the operand of a cast to text: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts …
-lag/tsDiffBare	*	refusal	ERR 0A000: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
-lag/tsDiffCompare	*	refusal	ERR 0A000: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
+lag/tsDiff	*	refusal	ERR 0A000 {timestamp-difference-to-number}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as the operand of a cast to text: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts …
+lag/tsDiffBare	*	refusal	ERR 0A000 {bare-interval-result}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
+lag/tsDiffCompare	*	refusal	ERR 0A000 {bare-interval-result}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
 tsdate/text	*	error	ERR 42883: operator does not exist: timestamp without time zone - date
 tsdate/bare	*	error	ERR 42883: operator does not exist: timestamp without time zone - date
 tsdate/compare	*	error	ERR 42883: operator does not exist: timestamp without time zone - date
@@ -95,58 +95,58 @@ set/exceptAll/dupRight1/sortagg	*	error	ERR 42601: syntax error at or near ")"
 explain/set/exceptAll/dupRight1/sortagg	*	pg-only	-
 set/except/bigSmall/sortagg	*	error	ERR 42601: syntax error at or near ")"
 explain/set/except/bigSmall/sortagg	*	pg-only	-
-gsets/sets	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-gsets/rollup	*	refusal	ERR 0A000: interval values cannot yet be used as a GROUP BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-sub/scalarEq	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-sub/scalarMax	*	refusal	ERR 0A000: max over an interval argument is not supported
-sub/in	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-sub/notIn	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-sub/any	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-sub/all	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-sub/correlatedCount	*	refusal	ERR 0A000: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
-sub/correlatedMin	*	refusal	ERR 0A000: min over an interval argument is not supported
-sub/exists	*	refusal	ERR 0A000: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
-sub/scalarPublish	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-sub/scalarText	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-cte/materializedJoin	*	error	ERR 42601: parsing CTEs: expected '(' after AS in CTE "m"
-cte/text	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-cte/twice	*	error	ERR 42601: parsing CTEs: expected '(' after AS in CTE "m"
-oj/leftText	*	refusal	ERR 0A000: interval "1 mon" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
-oj/leftDerived	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-oj/fullKey	*	refusal	ERR 0A000: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+gsets/sets	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+gsets/rollup	*	refusal	ERR 0A000 {interval-key}: interval values cannot yet be used as a GROUP BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+sub/scalarEq	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+sub/scalarMax	*	refusal	ERR 0A000 {interval-aggregate}: max over an interval argument is not supported
+sub/in	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+sub/notIn	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+sub/any	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+sub/all	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+sub/correlatedCount	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+sub/correlatedMin	*	refusal	ERR 0A000 {interval-aggregate}: min over an interval argument is not supported
+sub/exists	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+sub/scalarPublish	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+sub/scalarText	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+cte/materializedJoin	*	internal	ERR 42601 {attached}: parsing CTEs: expected '(' after AS in CTE "m"
+cte/text	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+cte/twice	*	internal	ERR 42601 {attached}: parsing CTEs: expected '(' after AS in CTE "m"
+oj/leftText	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+oj/leftDerived	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+oj/fullKey	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
 ddl/create/iv80_n	writer	ok	ok
 ddl/insert/iv80_n	writer	ok	ok
 empty/text	*	agree	t:text | (0 rows)
-empty/bare	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-empty/agg	*	refusal	ERR 0A000: sum over an interval argument is not supported
-empty/group	*	refusal	ERR 0A000: interval values cannot yet be used as a GROUP BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-null/agg	*	refusal	ERR 0A000: sum over an interval argument is not supported
-null/group	*	refusal	ERR 0A000: interval values cannot yet be used as a GROUP BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-null/order	*	refusal	ERR 0A000: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+empty/bare	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+empty/agg	*	refusal	ERR 0A000 {interval-aggregate}: sum over an interval argument is not supported
+empty/group	*	refusal	ERR 0A000 {interval-key}: interval values cannot yet be used as a GROUP BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+null/agg	*	refusal	ERR 0A000 {interval-aggregate}: sum over an interval argument is not supported
+null/group	*	refusal	ERR 0A000 {interval-key}: interval values cannot yet be used as a GROUP BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+null/order	*	refusal	ERR 0A000 {interval-key}: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 ddl/create/iv80_ov	writer	ok	ok
 ddl/insert/iv80_ov	writer	ok	ok
-ov/winForward	*	refusal	ERR 0A000: sum over an interval argument is not supported
-ov/winBackward	*	refusal	ERR 0A000: sum over an interval argument is not supported
+ov/winForward	*	refusal	ERR 0A000 {interval-aggregate}: sum over an interval argument is not supported
+ov/winBackward	*	refusal	ERR 0A000 {interval-aggregate}: sum over an interval argument is not supported
 ov/aggAsc	*	wrong-sqlstate	ERR 42601: syntax error at or near "ORDER"
 ov/aggDesc	*	error	ERR 42601: syntax error at or near "ORDER"
-ov/aggUnordered	*	refusal	ERR 0A000: sum over an interval argument is not supported
-ov/timeForward	*	refusal	ERR 0A000: sum over an interval argument is not supported
-ov/timeBackward	*	refusal	ERR 0A000: sum over an interval argument is not supported
+ov/aggUnordered	*	refusal	ERR 0A000 {interval-aggregate}: sum over an interval argument is not supported
+ov/timeForward	*	refusal	ERR 0A000 {interval-aggregate}: sum over an interval argument is not supported
+ov/timeBackward	*	refusal	ERR 0A000 {interval-aggregate}: sum over an interval argument is not supported
 ddl/create/iv80_pm	writer	ok	ok
 ddl/insert/iv80_pm	writer	ok	ok
-pm/null	*	refusal	ERR 0A000: sum over an interval argument is not supported
-pm/posInf	*	refusal	ERR 0A000: sum over an interval argument is not supported
-pm/negInf	*	refusal	ERR 0A000: sum over an interval argument is not supported
-pm/bothInf	*	refusal	ERR 0A000: sum over an interval argument is not supported
-pm/nullOnly	*	refusal	ERR 0A000: sum over an interval argument is not supported
-pm/posInfTwice	*	refusal	ERR 0A000: sum over an interval argument is not supported
-pm/groups	*	refusal	ERR 0A000: sum over an interval argument is not supported
+pm/null	*	refusal	ERR 0A000 {interval-aggregate}: sum over an interval argument is not supported
+pm/posInf	*	refusal	ERR 0A000 {interval-aggregate}: sum over an interval argument is not supported
+pm/negInf	*	refusal	ERR 0A000 {interval-aggregate}: sum over an interval argument is not supported
+pm/bothInf	*	refusal	ERR 0A000 {interval-aggregate}: sum over an interval argument is not supported
+pm/nullOnly	*	refusal	ERR 0A000 {interval-aggregate}: sum over an interval argument is not supported
+pm/posInfTwice	*	refusal	ERR 0A000 {interval-aggregate}: sum over an interval argument is not supported
+pm/groups	*	refusal	ERR 0A000 {interval-aggregate}: sum over an interval argument is not supported
 ddl/create/iv80_sw	writer	ok	ok
 ddl/insert/iv80_sw	writer	ok	ok
-sw/rows2	*	refusal	ERR 0A000: sum over an interval argument is not supported
-sw/rows3	*	refusal	ERR 0A000: sum over an interval argument is not supported
-sw/following	*	refusal	ERR 0A000: sum over an interval argument is not supported
-sw/all	*	refusal	ERR 0A000: sum over an interval argument is not supported
+sw/rows2	*	refusal	ERR 0A000 {interval-aggregate}: sum over an interval argument is not supported
+sw/rows3	*	refusal	ERR 0A000 {interval-aggregate}: sum over an interval argument is not supported
+sw/following	*	refusal	ERR 0A000 {interval-aggregate}: sum over an interval argument is not supported
+sw/all	*	refusal	ERR 0A000 {interval-aggregate}: sum over an interval argument is not supported
 ddl/create/iv80_fr	writer	ok	ok
 ddl/insert/iv80_fr	writer	ok	ok
 frame/monthPreceding	*	error	ERR 42601: syntax error at or near "INTERVAL"
@@ -160,48 +160,48 @@ frame/infOffset	*	error	ERR 42601: syntax error at or near "INTERVAL"
 frame/infFollowing	*	error	ERR 42601: syntax error at or near "INTERVAL"
 frame/negInfOffset	*	wrong-sqlstate	ERR 42601: syntax error at or near "INTERVAL"
 frame/negOffset	*	wrong-sqlstate	ERR 42601: syntax error at or near "INTERVAL"
-frame/tsInfRowsShift	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+frame/tsInfRowsShift	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 frame/intervalOrderDesc	*	error	ERR 42601: syntax error at or near "INTERVAL"
 frame/intervalOrderAsc	*	error	ERR 42601: syntax error at or near "INTERVAL"
-neg/projection/toChar	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-neg/projection/dateTrunc	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-neg/projection/castTime	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/projection/toChar	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/projection/dateTrunc	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/projection/castTime	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 neg/projection/orderedAgg	*	error	ERR 42601: syntax error at or near "WITHIN"
 neg/projection/distinctSum	*	error	ERR 42883: function sum(text) does not exist
 neg/projection/arrayAgg	*	error	ERR 42601: syntax error at or near "ORDER"
-neg/projection/arrayCtor	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-neg/derived/toChar	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-neg/derived/dateTrunc	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-neg/derived/castTime	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/projection/arrayCtor	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/derived/toChar	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/derived/dateTrunc	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/derived/castTime	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 neg/derived/orderedAgg	*	error	ERR 42601: syntax error at or near "WITHIN"
 neg/derived/distinctSum	*	error	ERR 42883: function sum(text) does not exist
 neg/derived/arrayAgg	*	error	ERR 42601: syntax error at or near "ORDER"
-neg/derived/arrayCtor	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-neg/cte/toChar	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-neg/cte/dateTrunc	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-neg/cte/castTime	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/derived/arrayCtor	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/cte/toChar	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/cte/dateTrunc	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/cte/castTime	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 neg/cte/orderedAgg	*	error	ERR 42601: syntax error at or near "WITHIN"
 neg/cte/distinctSum	*	error	ERR 42883: function sum(text) does not exist
 neg/cte/arrayAgg	*	error	ERR 42601: syntax error at or near "ORDER"
-neg/cte/arrayCtor	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-neg/subquery/toChar	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-neg/subquery/dateTrunc	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-neg/subquery/castTime	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/cte/arrayCtor	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/subquery/toChar	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/subquery/dateTrunc	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/subquery/castTime	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 neg/subquery/orderedAgg	*	error	ERR 42601: syntax error at or near "WITHIN"
-neg/subquery/distinctSum	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/subquery/distinctSum	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 neg/subquery/arrayAgg	*	error	ERR 42601: syntax error at or near "ORDER"
-neg/subquery/arrayCtor	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-neg/setop/toChar	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-neg/setop/dateTrunc	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-neg/setop/castTime	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/subquery/arrayCtor	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/setop/toChar	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/setop/dateTrunc	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/setop/castTime	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 neg/setop/orderedAgg	*	error	ERR 42601: syntax error at or near "WITHIN"
 neg/setop/distinctSum	*	error	ERR 42883: function sum(text) does not exist
 neg/setop/arrayAgg	*	error	ERR 42601: syntax error at or near "ORDER"
-neg/setop/arrayCtor	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-neg/join/toChar	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-neg/join/dateTrunc	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-neg/join/castTime	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/setop/arrayCtor	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/join/toChar	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/join/dateTrunc	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/join/castTime	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 neg/join/orderedAgg	*	error	ERR 42601: syntax error at or near "WITHIN"
 neg/join/distinctSum	*	error	ERR 42883: function sum(text) does not exist
 neg/join/arrayAgg	*	error	ERR 42601: syntax error at or near "ORDER"
-neg/join/arrayCtor	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/join/arrayCtor	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration

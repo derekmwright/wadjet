@@ -5,8 +5,8 @@ lit/1/1 day 2 hours~text	*	error	ERR 22007: invalid input syntax for type interv
 lit/2/1 year 2 months 3 days 4 hours 5 minutes 6 seconds~text	*	error	ERR 22007: invalid input syntax for type interval: "1 year 2 months 3 days 4 hours 5 minutes 6 seconds"
 lit/3/1-2~text	*	error	ERR 42601: syntax error at or near "AS"
 lit/4/-1-2~text	*	error	ERR 42601: syntax error at or near "AS"
-lit/5/3 4:05:06~text	*	refusal	ERR 0A000: interval unit "4:05:06" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-lit/6/-3 -4:05:06~text	*	refusal	ERR 0A000: interval unit "-4:05:06" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+lit/5/3 4:05:06~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "4:05:06" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+lit/6/-3 -4:05:06~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "-4:05:06" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 lit/7/1-2 3 4:05:06~text	*	error	ERR 22007: invalid input syntax for type interval: "1-2 3 4:05:06"
 lit/8/4:05:06~text	*	error	ERR 42601: syntax error at or near "AS"
 lit/9/4:05~text	*	error	ERR 42601: syntax error at or near "AS"
@@ -41,16 +41,16 @@ lit/38/1.0333333 months~text	*	error	ERR 22007: invalid input syntax for type in
 lit/39/-1.5 months~text	*	error	ERR 22007: invalid input syntax for type interval: "-1.5 months"
 lit/40/-1.5 days~text	*	error	ERR 22007: invalid input syntax for type interval: "-1.5 days"
 lit/41/1.5 centuries~text	*	error	ERR 22007: invalid input syntax for type interval: "1.5 centuries"
-lit/42/1 decade~text	*	refusal	ERR 0A000: interval unit "decade" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-lit/43/1 century~text	*	refusal	ERR 0A000: interval unit "century" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-lit/44/1 millennium~text	*	refusal	ERR 0A000: interval unit "millennium" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+lit/42/1 decade~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "decade" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+lit/43/1 century~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "century" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+lit/44/1 millennium~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "millennium" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 lit/45/10 weeks~text	*	agree	a:text | 70 days
 lit/46/1.000001 seconds~text	*	error	ERR 22007: invalid input syntax for type interval: "1.000001 seconds"
 lit/47/0.0000005 seconds~text	*	error	ERR 22007: invalid input syntax for type interval: "0.0000005 seconds"
 lit/48/0.0000015 seconds~text	*	error	ERR 22007: invalid input syntax for type interval: "0.0000015 seconds"
 lit/49/0.0000025 seconds~text	*	error	ERR 22007: invalid input syntax for type interval: "0.0000025 seconds"
-lit/50/1 microsecond~text	*	refusal	ERR 0A000: interval unit "microsecond" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-lit/51/1 millisecond~text	*	refusal	ERR 0A000: interval unit "millisecond" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+lit/50/1 microsecond~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "microsecond" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+lit/51/1 millisecond~text	*	refusal	ERR 0A000 {interval-unit}: interval unit "millisecond" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 lit/52/1.5 microseconds~text	*	error	ERR 22007: invalid input syntax for type interval: "1.5 microseconds"
 lit/53/1:2:3.123456789~text	*	error	ERR 42601: syntax error at or near "AS"
 lit/54/-0.000001 seconds~text	*	error	ERR 22007: invalid input syntax for type interval: "-0.000001 seconds"
@@ -108,9 +108,9 @@ prec/iv7~text	*	error	ERR 42704: type "interval(7)" does not exist
 prec/castDay~text	*	error	ERR 22007: invalid input syntax for type interval: "1 day 02:00:00"
 prec/castYear~text	*	error	ERR 22007: invalid input syntax for type interval: "14 months 3 days"
 prec/castMonthTyp~text	*	error	ERR 22007: invalid input syntax for type interval: "14 months 3 days"
-cast/fromText~text	*	refusal	ERR 0A000: interval "1 day 02:00:00" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+cast/fromText~text	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 day 02:00:00" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
 cast/colon~text	*	agree	a:text | 1 day
-cast/fromTime~text	*	refusal	ERR 0A000: interval "01:02:03.5" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+cast/fromTime~text	*	refusal	ERR 0A000 {interval-opaque-value}: interval "01:02:03.5" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
 make/all~text	*	error	ERR 42883: unknown function: make_interval
 make/days~text	*	error	ERR 42601: syntax error at or near ">"
 make/secs~text	*	error	ERR 42601: syntax error at or near ">"
@@ -119,4 +119,4 @@ make/weeks~text	*	error	ERR 42601: syntax error at or near ">"
 make/zero~text	*	error	ERR 42883: unknown function: make_interval
 make/null~text	*	error	ERR 42601: syntax error at or near ">"
 make/hoursOver~text	*	error	ERR 42601: syntax error at or near "hours"
-row/cast~text	*	refusal	ERR 0A000: interval "1 day 02:00:00" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+row/cast~text	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 day 02:00:00" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported

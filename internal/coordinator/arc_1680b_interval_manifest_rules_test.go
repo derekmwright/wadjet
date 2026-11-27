@@ -30,47 +30,44 @@ import (
 
 // --- The named refusals --------------------------------------------------
 
-// iv80Reason is one named capability refusal: what it covers and the
-// sentence a refusal must contain to be that refusal (case-insensitive).
-// The patterns accept the sentences the interim guards already use where
-// they name the reason exactly; a stage that installs a guard writes a
-// sentence these patterns match, or changes the pattern in the same diff,
-// where the reviewer sees it.
-type iv80Reason struct {
-	desc string
-	re   *regexp.Regexp
+// iv80Reasons are the named capability refusals: each an identity the engine
+// emits with its 0A000 (sqlerr.Refuse; recorded by iv80Err between the
+// SQLSTATE and the sentence) and what it covers. A refusal outcome is met by
+// the identity alone (iv80Meets): the sentence is the client's and may be
+// reworded; no word pattern over it credits anything (#1680c, the third
+// judge: `time-type` matched a timestamptz sentence and
+// `function-date_trunc` any sentence that named date_trunc).
+var iv80Reasons = map[string]string{
+	"bare-interval-result":           "a query result column of type interval (ruling 1: no wire change)",
+	"intervalstyle":                  "SET IntervalStyle other than postgres (ruling 7)",
+	"typmod":                         "an interval typmod: field qualifier or precision (ruling 7)",
+	"timestamptz":                    "timestamptz arithmetic or a timestamptz operand (ruling 7; ruling 8)",
+	"time-type":                      "a TIME / TIMETZ operand (no TIME type: ADR-0012 temporal r23; ruling 8)",
+	"container":                      "an interval inside ARRAY / ROW / MAP or array_agg",
+	"ordered-aggregate":              "an ordered or ordered-set aggregate over an interval (ruling 4)",
+	"distinct-aggregate":             "sum / avg (DISTINCT interval) (ruling 5)",
+	"numeric-infinity":               "an EXTRACT whose numeric result is infinite (ruling 6)",
+	"timestamp-millisecond-carrier":  "a timestamp value or result with sub-millisecond digits (TIMESTAMP is a millisecond carrier, E36)",
+	"interval-write":                 "storing an interval: INSERT / UPDATE / MERGE / CTAS (no persistent interval)",
+	"function-date_trunc":            "date_trunc over an interval (its own item)",
+	"function-to_char":               "to_char over an interval (its own item)",
+	"function-generate_series":       "generate_series with an interval step (its own item)",
+	"function-overlaps":              "OVERLAPS with an interval end (its own item)",
+	"function-width_bucket":          "width_bucket over intervals (its own item)",
+	"range-offset-frame":             "a RANGE frame with an interval offset (offset RANGE frames are refused for every type today)",
+	"postgresql-internal-function":   "interval_hash / interval_hash_extended (PostgreSQL's internal hash support)",
+	"char-display":                   "an interval cast to CHAR(n) / bpchar: PostgreSQL declares OID 1042 and blank-pads to n; this engine declares CHAR as 1043 and does not pad (pgColumnOID), so only TEXT and VARCHAR are display types (ruling 1, addition (a))",
+	"timestamp-difference-to-number": "a timestamp difference compared with or written as a number",
+	"implicit-text-conversion":       "an interval converted to text implicitly: || concatenation (ADR-0052 section 5; the third judge)",
+	"interval-lineage-unresolved":    "a consumer of a slot whose interval lineage the planner cannot resolve (ADR-0052 section 8: unresolved lineage is a loud refusal, never a pass)",
 }
 
-func iv80R(desc, pattern string) iv80Reason {
-	return iv80Reason{desc, regexp.MustCompile(`(?i)` + pattern)}
-}
-
-var iv80Reasons = map[string]iv80Reason{
-	"bare-interval-result":           iv80R("a query result column of type interval (ruling 1: no wire change)", `cannot yet be used as a query result column`),
-	"intervalstyle":                  iv80R("SET IntervalStyle other than postgres (ruling 7)", `IntervalStyle`),
-	"typmod":                         iv80R("an interval typmod: field qualifier or precision (ruling 7)", `interval (typmod|precision|field qualifier)|(typmod|precision|field qualifier).*interval`),
-	"timestamptz":                    iv80R("timestamptz arithmetic or a timestamptz operand (ruling 7; ruling 8)", `timestamptz|timestamp with time zone|time zone`),
-	"time-type":                      iv80R("a TIME / TIMETZ operand (no TIME type: ADR-0012 temporal r23; ruling 8)", `\btime(tz)?\b.*(not supported|refused)|(not supported|refused).*\btime(tz)?\b|time of day`),
-	"container":                      iv80R("an interval inside ARRAY / ROW / MAP or array_agg", `array element|row field|map (key|value)|array_agg|inside an? (array|row|map)|container`),
-	"ordered-aggregate":              iv80R("an ordered or ordered-set aggregate over an interval (ruling 4)", `ordered(-set)? aggregate|WITHIN GROUP|aggregate .*ORDER BY`),
-	"distinct-aggregate":             iv80R("sum / avg (DISTINCT interval) (ruling 5)", `(sum|avg)\s*\(\s*DISTINCT|DISTINCT (sum|avg)`),
-	"numeric-infinity":               iv80R("an EXTRACT whose numeric result is infinite (ruling 6)", `infinit.*(numeric|EXTRACT)|(numeric|EXTRACT).*infinit`),
-	"timestamp-millisecond-carrier":  iv80R("a timestamp value or result with sub-millisecond digits (TIMESTAMP is a millisecond carrier, E36)", `millisecond`),
-	"interval-write":                 iv80R("storing an interval: INSERT / UPDATE / MERGE / CTAS (no persistent interval)", `written value|cannot be (stored|written)|stor(e|ing) an interval|write an interval`),
-	"function-date_trunc":            iv80R("date_trunc over an interval (its own item)", `date_trunc`),
-	"function-to_char":               iv80R("to_char over an interval (its own item)", `to_char`),
-	"function-generate_series":       iv80R("generate_series with an interval step (its own item)", `generate_series`),
-	"function-overlaps":              iv80R("OVERLAPS with an interval end (its own item)", `OVERLAPS`),
-	"function-width_bucket":          iv80R("width_bucket over intervals (its own item)", `width_bucket`),
-	"range-offset-frame":             iv80R("a RANGE frame with an interval offset (offset RANGE frames are refused for every type today)", `RANGE.*(offset|PRECEDING|FOLLOWING)`),
-	"postgresql-internal-function":   iv80R("interval_hash / interval_hash_extended (PostgreSQL's internal hash support)", `interval_hash`),
-	"char-display":                   iv80R("an interval cast to CHAR(n) / bpchar: PostgreSQL declares OID 1042 and blank-pads to n; this engine declares CHAR as 1043 and does not pad (pgColumnOID), so only TEXT and VARCHAR are display types (ruling 1, addition (a))", `\b(char|character|bpchar)\b.*interval|interval.*\b(char|character|bpchar)\b`),
-	"timestamp-difference-to-number": iv80R("a timestamp difference compared with or written as a number", `timestamp difference`),
-}
-
-// iv80InternalFailure: an engine answer no outcome may accept: a panic, an
-// error without a SQLSTATE or with XX000, the batch store's guards, or an
-// error whose sentence is a runtime failure (however it is coded).
+// iv80InternalFailure: an engine answer no outcome may accept, decided by
+// the error's PROVENANCE as the recorder read it off the error's type chain
+// (iv80Err), never by words in its sentence (#1680c; the third judge): a
+// panic, an error without a SQLSTATE (the batch store's guards are such
+// errors), XX000, or a code attached by a layer that did not raise it
+// (sqlerr.Attached: `unsupported shuffle type: 255` under 0A000 is one).
 func iv80InternalFailure(engine string) bool {
 	if strings.HasPrefix(engine, "PANIC") {
 		return true
@@ -78,36 +75,39 @@ func iv80InternalFailure(engine string) bool {
 	if !strings.HasPrefix(engine, "ERR ") {
 		return false
 	}
-	code, msg := iv80ErrCode(engine)
-	return code == "" || code == "XX000" ||
-		strings.Contains(msg, "silent-write guard") || strings.Contains(msg, "declared without its element or fields") ||
-		iv80RuntimeFailure.MatchString(msg)
+	code, _ := iv80ErrCode(engine)
+	return code == "" || code == "XX000" || iv80ErrIdentity(engine) == iv80Attached
 }
-
-var iv80RuntimeFailure = regexp.MustCompile(`(?i)runtime error|panic|nil pointer|index out of range|unexpected type|internal error`)
 
 // --- Answers: types, rows, order ------------------------------------------
 
 // iv80Ordered: the statement's top level states ORDER BY (an ORDER BY inside
 // a subquery or a window does not order the result).
 func iv80Ordered(sql string) bool {
-	if iv80TiedOrder[sql] {
-		return false
-	}
 	return len(iv80TopLevel(sql, " ORDER BY ")) > 1
 }
 
 // iv80TiedOrder are statements whose top-level ORDER BY leaves ties PostgreSQL
-// broke arbitrarily (compared as multisets; checked by hand).
-var iv80TiedOrder = map[string]bool{
+// broke arbitrarily, each with the result columns (0-based) that are the
+// LEADING sort keys visible in the result: rows compare ordered between
+// distinct values of those columns and as a multiset within one (a tie
+// there), never wholly unordered (#1680c; the third judge). Checked by hand.
+var iv80TiedOrder = map[string][]int{
 	// ROLLUP: (1, k, 3) and (1, NULL, 3) tie on g, min(id), n; so do (4, k, 2)
 	// and (4, NULL, 2).
-	"SELECT g, CAST(CAST(s AS INTERVAL) AS TEXT) AS k, count(*) AS n FROM iv80_r GROUP BY ROLLUP (g, CAST(s AS INTERVAL)) ORDER BY g NULLS LAST, min(id), n": true,
+	"SELECT g, CAST(CAST(s AS INTERVAL) AS TEXT) AS k, count(*) AS n FROM iv80_r GROUP BY ROLLUP (g, CAST(s AS INTERVAL)) ORDER BY g NULLS LAST, min(id), n": {0},
 }
 
 // iv80SameAnswer: the engine's answer has PostgreSQL's column names, types
 // and rows: in order when ordered, as a multiset otherwise.
 func iv80SameAnswer(engine, pg string, ordered bool) bool {
+	return iv80SameAnswerTies(engine, pg, ordered, nil)
+}
+
+// iv80SameAnswerTies is iv80SameAnswer for an ordered result whose order
+// leaves ties: ordered between distinct values of the ties columns, a
+// multiset within each run of equal values (nil ties: wholly ordered).
+func iv80SameAnswerTies(engine, pg string, ordered bool, ties []int) bool {
 	pg, _ = iv80Notice(pg)
 	if engine == "ok" || pg == "ok" {
 		return engine == pg
@@ -131,6 +131,13 @@ func iv80SameAnswer(engine, pg string, ordered bool) bool {
 		er, pr = append([]string(nil), er...), append([]string(nil), pr...)
 		sort.Strings(er)
 		sort.Strings(pr)
+	} else if len(ties) > 0 {
+		er, pr = iv80SortWithinTies(er, ties), iv80SortWithinTies(pr, ties)
+		for i := range er {
+			if iv80TieKey(er[i], ties) != iv80TieKey(pr[i], ties) {
+				return false
+			}
+		}
 	}
 	for i := range er {
 		if er[i] != pr[i] {
@@ -138,6 +145,33 @@ func iv80SameAnswer(engine, pg string, ordered bool) bool {
 		}
 	}
 	return true
+}
+
+// iv80TieKey is a row's values at the ties columns.
+func iv80TieKey(row string, ties []int) string {
+	f := strings.Split(row, ",")
+	var k []string
+	for _, i := range ties {
+		if i < len(f) {
+			k = append(k, f[i])
+		}
+	}
+	return strings.Join(k, ",")
+}
+
+// iv80SortWithinTies sorts each run of consecutive rows with one tie key,
+// keeping the runs in their order.
+func iv80SortWithinTies(rows []string, ties []int) []string {
+	out := append([]string(nil), rows...)
+	for i := 0; i < len(out); {
+		j := i + 1
+		for j < len(out) && iv80TieKey(out[j], ties) == iv80TieKey(out[i], ties) {
+			j++
+		}
+		sort.Strings(out[i:j])
+		i = j
+	}
+	return out
 }
 
 // --- Representative expectations -----------------------------------------

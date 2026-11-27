@@ -857,6 +857,8 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 		// cannot recover a class from it without guessing (#649).
 		result.SQLState = sqlerr.StateOf(err)
 		result.SQLMessage = sqlerr.SentenceOf(err)
+		result.SQLReason = sqlerr.ReasonOf(err)
+		result.SQLAttached = sqlerr.Attached(err)
 		// And for a refusal the PLAN earns rather than the machine: #503's
 		// declared-schema guard says the same thing on every worker and on
 		// every attempt, so saying it three times only costs the stage its

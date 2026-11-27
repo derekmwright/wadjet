@@ -345,13 +345,35 @@ func iv80PGTypes(ans string) string {
 	return strings.Join(cols, ",")
 }
 
-// iv80ErrCode is the SQLSTATE of an "ERR <code>: message" answer ("" when
-// it carries none) and its message.
+// iv80ErrCode is the SQLSTATE of an "ERR <code>[ {<identity>}]: message"
+// answer ("" when it carries none) and its message.
 func iv80ErrCode(ans string) (code, msg string) {
 	rest := strings.TrimPrefix(ans, "ERR ")
 	code, msg, _ = strings.Cut(rest, ":")
+	code, _, _ = strings.Cut(code, " {")
 	return strings.TrimSpace(code), strings.TrimSpace(msg)
 }
+
+// iv80ErrIdentity is the identity an engine error was recorded with
+// (iv80Err): an intentional refusal's stable reason (sqlerr.ReasonOf), or
+// iv80Attached for a code attached to an uncoded failure (sqlerr.Attached);
+// "" for any other answer.
+func iv80ErrIdentity(ans string) string {
+	if !strings.HasPrefix(ans, "ERR ") {
+		return ""
+	}
+	head, _, _ := strings.Cut(strings.TrimPrefix(ans, "ERR "), ":")
+	_, id, ok := strings.Cut(head, " {")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSuffix(id, "}")
+}
+
+// iv80Attached is the identity iv80Err records for an error whose code was
+// attached by a layer that did not raise it (sqlerr.Attached): by
+// provenance an internal failure, whatever its SQLSTATE.
+const iv80Attached = "attached"
 
 // iv80Classify is the class of one engine answer against PostgreSQL's (the
 // list in the file comment).
@@ -363,11 +385,11 @@ func iv80Classify(engine, pg string) string {
 	case strings.HasPrefix(engine, "PANIC"):
 		return "panic"
 	case strings.HasPrefix(engine, "ERR "):
-		code, msg := iv80ErrCode(engine)
+		code, _ := iv80ErrCode(engine)
 		switch {
-		case strings.Contains(msg, "silent-write guard") || strings.Contains(msg, "declared without its element or fields"):
-			return "store-guard"
-		case code == "" || code == "XX000":
+		case code == "" || code == "XX000" || iv80ErrIdentity(engine) == iv80Attached:
+			// By provenance (#1680c): no code, the internal class, or a
+			// code attached to an uncoded failure.
 			return "internal"
 		case pgErr && code == pgCode:
 			return "pg-error"
@@ -462,7 +484,17 @@ func iv80Err(err error) string {
 	if r := []rune(msg); len(r) > 240 {
 		msg = string(r[:240]) + "…"
 	}
-	return "ERR " + sqlerr.StateOf(err) + ": " + msg
+	// The error's identity, read off its TYPE chain where it was raised
+	// (never off the sentence): an intentional refusal's reason, or the
+	// provenance of a code attached to an uncoded failure (#1680c).
+	id := ""
+	switch {
+	case sqlerr.ReasonOf(err) != "":
+		id = " {" + sqlerr.ReasonOf(err) + "}"
+	case sqlerr.Attached(err):
+		id = " {" + iv80Attached + "}"
+	}
+	return "ERR " + sqlerr.StateOf(err) + id + ": " + msg
 }
 
 // iv80EngineRender is ftEngineRender keeping a zero-row result's types.

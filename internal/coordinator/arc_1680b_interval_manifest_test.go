@@ -107,7 +107,9 @@ var (
 	iv80TypmodRe    = regexp.MustCompile(`INTERVAL\(\d+\)|INTERVAL '[^']*' (YEAR|MONTH|DAY|HOUR|MINUTE|SECOND)|AS INTERVAL (YEAR|MONTH|DAY|HOUR|MINUTE|SECOND)|SECOND\(\d+\)`)
 	iv80TimeRe      = regexp.MustCompile(`\bTIME '|\bTIMETZ\b|AS TIME\)`)
 	iv80DistinctAgg = regexp.MustCompile(`(sum|avg)\(DISTINCT`)
-	iv80SubMilliTs  = regexp.MustCompile(`TIMESTAMP '[^']*\.\d{4,}'`)
+	// iv80ConcatRe: an interval operand of ||.
+	iv80ConcatRe   = regexp.MustCompile(`\|\|\s*(INTERVAL\b|CAST\([^)]*AS INTERVAL\))|INTERVAL '[^']*'\s*\|\|`)
+	iv80SubMilliTs = regexp.MustCompile(`TIMESTAMP '[^']*\.\d{4,}'`)
 	// age(DATE, DATE) resolves to the timestamptz overload (measured:
 	// 10_definitions:explain/age/date, age/dateGapHavana against
 	// age/dateGapUTC).
@@ -201,6 +203,10 @@ func iv80ManifestOutcome(stem string, c iv80Cell, pg string) (outcome string) {
 		return "refusal timestamptz"
 	case iv80TimeRe.MatchString(sql):
 		return "refusal time-type"
+	case iv80ConcatRe.MatchString(sql):
+		// Implicit interval-to-text conversion is refused (ADR-0052 §5; the
+		// third judge: operand/concatText was owned by C as supported).
+		return "refusal implicit-text-conversion"
 	case iv80TypmodRe.MatchString(sql):
 		return "refusal typmod"
 	case iv80CharCastRe.MatchString(sql) && strings.Contains(sql, "INTERVAL"):
@@ -317,7 +323,10 @@ func iv80ParsePGInterval(s string) (*big.Int, bool) {
 // the statement orders its result, and a representative cell's spec.
 type iv80Check struct {
 	ordered bool
-	rep     *iv80RepSpec
+	// ties: an ordered result's visible leading sort keys where its order
+	// leaves ties (iv80TiedOrder).
+	ties []int
+	rep  *iv80RepSpec
 }
 
 // iv80Meets: one engine answer reaches the outcome against PostgreSQL's. The
@@ -329,16 +338,20 @@ func iv80Meets(outcome, engine, pg string, x iv80Check) bool {
 	kind, arg, _ := strings.Cut(outcome, " ")
 	switch kind {
 	case "supported":
-		return iv80SameAnswer(engine, pg, x.ordered)
+		return iv80SameAnswerTies(engine, pg, x.ordered, x.ties)
 	case "pg-error":
+		// PostgreSQL's own error: its SQLSTATE (ADR-0052 §8), after the
+		// internal-failure exclusion above, which decides by provenance.
 		code, _ := iv80ErrCode(engine)
 		return strings.HasPrefix(engine, "ERR ") && code == arg
 	case "refusal":
-		// 0A000 with the NAMED reason's sentence; PostgreSQL may itself
-		// answer 0A000 for the cell (trunc/week): the refusal is still met.
-		code, msg := iv80ErrCode(engine)
-		r, ok := iv80Reasons[arg]
-		return ok && strings.HasPrefix(engine, "ERR ") && code == "0A000" && r.re.MatchString(msg)
+		// 0A000 with the NAMED reason's identity, as the engine emitted it
+		// (sqlerr.Refuse), never a word pattern over the sentence (#1680c;
+		// the third judge). PostgreSQL may itself answer 0A000 for the cell
+		// (trunc/week): the refusal is still met.
+		code, _ := iv80ErrCode(engine)
+		_, ok := iv80Reasons[arg]
+		return ok && strings.HasPrefix(engine, "ERR ") && code == "0A000" && iv80ErrIdentity(engine) == arg
 	case "rep-divergence":
 		return x.rep != nil && iv80SameAnswer(engine, iv80RepAnswer(pg, *x.rep), x.ordered)
 	}
@@ -373,7 +386,7 @@ func iv80Manifest(t *testing.T, sec iv80Section) []string {
 		key := iv80BaseStem(sec.stem) + ":" + c.name
 		outcome := iv80ManifestOutcome(sec.stem, c, ans)
 		stage := iv80CellStage(c, outcome)
-		x := iv80Check{ordered: iv80Ordered(c.sql)}
+		x := iv80Check{ordered: iv80Ordered(c.sql), ties: iv80TiedOrder[c.sql]}
 		if s, ok := specs[key]; ok {
 			x.rep = &s
 		}

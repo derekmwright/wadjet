@@ -95,6 +95,8 @@ type taskAttemptState struct {
 	panicked  bool
 	sqlState  string
 	sqlMsg    string
+	sqlReason string
+	sqlAttach bool
 	// cancelled: the recorded failure is a stopped attempt
 	// (ResultNotification.Cancelled), not a verdict of the task's own.
 	cancelled bool
@@ -119,6 +121,10 @@ type taskFailure struct {
 	SQLState string
 	// SQLMessage is ResultNotification.SQLMessage: that error's own sentence.
 	SQLMessage string
+	// SQLReason and SQLAttached are ResultNotification's: the refusal
+	// identity and the provenance of the code (sqlerr.ReasonOf, Attached).
+	SQLReason   string
+	SQLAttached bool
 }
 
 // stageTaskFailure preserves the worker's classification across ResultNotification;
@@ -138,7 +144,7 @@ func stageTaskFailure(f taskFailure, err error) error {
 			// The client is owed the refusal's sentence; the framing —
 			// stage, task, attempts — stays reachable through Unwrap for the
 			// log that records it (#1145).
-			return &taskRefusal{code: f.SQLState, sentence: f.SQLMessage, framing: err}
+			return &taskRefusal{code: f.SQLState, sentence: f.SQLMessage, reason: f.SQLReason, attached: f.SQLAttached, framing: err}
 		}
 		return sqlerr.Wrap(f.SQLState, err)
 	}
@@ -150,12 +156,16 @@ func stageTaskFailure(f taskFailure, err error) error {
 // where it failed kept behind Unwrap.
 type taskRefusal struct {
 	code, sentence string
+	reason         string
+	attached       bool
 	framing        error
 }
 
-func (e *taskRefusal) Error() string    { return e.sentence }
-func (e *taskRefusal) SQLState() string { return e.code }
-func (e *taskRefusal) Unwrap() error    { return e.framing }
+func (e *taskRefusal) Error() string         { return e.sentence }
+func (e *taskRefusal) SQLState() string      { return e.code }
+func (e *taskRefusal) RefusalReason() string { return e.reason }
+func (e *taskRefusal) CodeAttached() bool    { return e.attached }
+func (e *taskRefusal) Unwrap() error         { return e.framing }
 
 // newTaskRetrier registers the dispatched tasks. republish re-dispatches a
 // single task; it is invoked on the caller-provided function asynchronously
@@ -273,6 +283,8 @@ func (tr *taskRetrier) Observe(r distributed.ResultNotification) (allDone bool) 
 	st.panicked = rec.Panicked
 	st.sqlState = rec.SQLState
 	st.sqlMsg = rec.SQLMessage
+	st.sqlReason = rec.SQLReason
+	st.sqlAttach = rec.SQLAttached
 	st.cancelled = rec.Cancelled
 	if rec.MissingInputKey != "" {
 		// Tag both the fatal-classified case and attempts-exhausted-on-
@@ -375,6 +387,7 @@ func (tr *taskRetrier) FirstError() (taskFailure, bool) {
 		f := taskFailure{
 			TaskID: id, Message: st.errMsg,
 			Panicked: st.panicked, SQLState: st.sqlState, SQLMessage: st.sqlMsg,
+			SQLReason: st.sqlReason, SQLAttached: st.sqlAttach,
 		}
 		if !st.cancelled {
 			return f, true

@@ -51,7 +51,7 @@ const tsDiffGuardMessage = "a timestamp difference (timestamp - timestamp) canno
 
 // TimestampDifferenceRefusal is the guard's 0A000.
 func TimestampDifferenceRefusal() error {
-	return sqlerr.New("0A000", "%s", tsDiffGuardMessage)
+	return sqlerr.Refuse("timestamp-difference-to-number", "%s", tsDiffGuardMessage)
 }
 
 // isTimestampDifferenceRefusal reports the guard's own refusal: it is this

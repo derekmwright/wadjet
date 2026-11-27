@@ -1703,7 +1703,7 @@ func intervalValueOf(n *plansql.IntervalLit) (IntervalValue, error) {
 		// that answers not at all. Supporting sub-second intervals is a
 		// change to IntervalValue and to every consumer of it, which is a
 		// feature rather than this fix.
-		return IntervalValue{}, sqlerr.New("0A000",
+		return IntervalValue{}, sqlerr.Refuse("interval-unit",
 			"interval unit %q is not supported; use YEAR, MONTH, WEEK, DAY, "+
 				"HOUR, MINUTE or SECOND", n.Unit)
 	}

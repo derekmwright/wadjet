@@ -1229,6 +1229,15 @@ type ResultNotification struct {
 	// hands the client the refusal PostgreSQL would send and not the path it
 	// took to fail (#1145). Empty when SQLState is.
 	SQLMessage string `json:"sqlmessage,omitempty"`
+	// SQLReason is that error's refusal identity (sqlerr.ReasonOf), so an
+	// intentional refusal raised on a worker reaches the client as the same
+	// refusal the coordinator would have raised (#1680 stage A). Empty when
+	// the error is no intentional refusal.
+	SQLReason string `json:"sqlreason,omitempty"`
+	// SQLAttached is sqlerr.Attached for that error: its code was attached
+	// by a layer that did not raise it, so its provenance is an uncoded
+	// failure (#1680 stage A).
+	SQLAttached bool `json:"sqlattached,omitempty"`
 
 	// Result location
 	ResultPath  string   `json:"result_path,omitempty"`

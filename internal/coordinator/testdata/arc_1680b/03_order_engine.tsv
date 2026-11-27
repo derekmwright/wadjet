@@ -1,11 +1,11 @@
 # This engine's disposition of the #1680b interval corpus, section 03_order, per arm (TestArc1680bRecordEngine; held by TestArc1680bEngineBaseline).
 # Settings are PostgreSQL's only: the engine runs each statement as written. A TIMESTAMP value is printed as text (iv80EngineText). name<TAB>arms<TAB>class<TAB>answer
-cmp/1 mon~30 days	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+cmp/1 mon~30 days	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 cmp/1 mon~720:00:00	*	error	ERR 42601: syntax error at or near "AS"
 cmp/30 days~720:00:00	*	error	ERR 42601: syntax error at or near "AS"
 cmp/1 mon -30 days~0	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -30 days"
 cmp/1 year~360 days	*	agree	eq:boolean,ne:boolean,lt:boolean,le:boolean,gt:boolean,ge:boolean,dist:boolean | true,false,false,true,false,true,false
-cmp/1 year~12 mons	*	refusal	ERR 0A000: interval unit "mons" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+cmp/1 year~12 mons	*	refusal	ERR 0A000 {interval-unit}: interval unit "mons" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 cmp/1 day~24:00:00	*	error	ERR 42601: syntax error at or near "AS"
 cmp/-1 day~-24:00:00	*	error	ERR 42601: syntax error at or near "AS"
 cmp/1 mon~29 days 24:00:00.000001	*	error	ERR 22007: invalid input syntax for type interval: "29 days 24:00:00.000001"
@@ -34,20 +34,20 @@ between	*	error	ERR 42601: syntax error at or near "AS"
 in	*	error	ERR 42601: syntax error at or near "IN"
 ddl/create/iv80_o	writer	ok	ok
 ddl/insert/iv80_o	writer	ok	ok
-order/asc	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-order/desc	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-order/ascNullsFirst	*	refusal	ERR 0A000: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-order/descNullsLast	*	refusal	ERR 0A000: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-order/idDesc	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-order/minMax	*	refusal	ERR 0A000: min over an interval argument is not supported
-order/minMaxFinite	*	refusal	ERR 0A000: min over an interval argument is not supported
+order/asc	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+order/desc	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+order/ascNullsFirst	*	refusal	ERR 0A000 {interval-key}: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+order/descNullsLast	*	refusal	ERR 0A000 {interval-key}: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+order/idDesc	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+order/minMax	*	refusal	ERR 0A000 {interval-aggregate}: min over an interval argument is not supported
+order/minMaxFinite	*	refusal	ERR 0A000 {interval-aggregate}: min over an interval argument is not supported
 order/minTieFwd	*	error	ERR 42601: syntax error at or near ")"
 order/minTieRev	*	error	ERR 42601: syntax error at or near ")"
-order/minTieTable	*	refusal	ERR 0A000: min over an interval argument is not supported
-order/greatestTie	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-order/topN	*	refusal	ERR 0A000: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-order/wrap	*	refusal	ERR 0A000: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-filter/eq	*	refusal	ERR 0A000: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
-filter/eqZero	*	refusal	ERR 0A000: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
-filter/lt	*	refusal	ERR 0A000: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
-filter/gtWrap	*	refusal	ERR 0A000: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+order/minTieTable	*	refusal	ERR 0A000 {interval-aggregate}: min over an interval argument is not supported
+order/greatestTie	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+order/topN	*	refusal	ERR 0A000 {interval-key}: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+order/wrap	*	refusal	ERR 0A000 {interval-key}: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+filter/eq	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+filter/eqZero	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+filter/lt	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+filter/gtWrap	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
