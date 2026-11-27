@@ -31,7 +31,7 @@ func TestIntervalR4EarliestTruthfulRule(t *testing.T) {
 		// age (the architect's ruling on 1680c r4): every call is the named
 		// capability refusal function-age, raised where "unknown function"
 		// was (expr.checkKnown; the statement-level cells are
-		// wadjet.TestAgeIsTheNamedRefusal). age is NOT declared an interval
+		// wadjet.TestIntervalRuleFourRefusals). age is NOT declared an interval
 		// producer, so the binder does not refuse a bare age(...) as a result
 		// column (the compiler's function-age does). Where the binder spoke
 		// first with an untrue 42883 (an operator beside an interval, the

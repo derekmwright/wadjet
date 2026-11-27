@@ -210,7 +210,9 @@ var scKept = map[string]string{
 	"other/timeofday":             "ERR 42883",
 	"other/current_time":          "ERR 42883",
 	"other/localtime":             "ERR 42703",
-	"other/age_one_arg":           "ERR 42883",
+	// age is the named capability refusal since interval stage A (#1680,
+	// ADR-0052 §8: "unknown function" was untruthful for a function PostgreSQL has).
+	"other/age_one_arg": "ERR 0A000",
 }
 
 // scDoorPin is an answer one door gives for a reason that is not the clock,
@@ -305,7 +307,7 @@ func TestArcSCStatementClockEveryArm(t *testing.T) {
 				parts := strings.SplitN(c.name, "/", 3)
 				base := parts[0] + "/" + parts[1]
 				if k, ok := scKept[base]; ok {
-					want, why = k, " (kept: no such function)"
+					want, why = k, " (kept: refused here)"
 				}
 				if k, ok := scDoorPin(d.name, base); ok {
 					want, why = k, " (door pin: not the clock)"
