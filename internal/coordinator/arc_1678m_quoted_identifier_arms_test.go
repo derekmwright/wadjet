@@ -149,14 +149,18 @@ var qiKnownRefused = qiPins([]struct {
 // base and the tip (the tip's answer is pinned; the note records both):
 //   - ra/selDot: a relation alias containing a dot ("x.y") answers no rows on
 //     every arm that runs it, single-process included.
-//   - ra/foldMismatch, cn/caseCols, cn/foldMismatch: the binder resolves an
-//     identifier whose case does not match (`Bq.id` against the alias "Bq",
-//     `m."Val"` against the column val, `VAL` against "Val") where PostgreSQL
-//     refuses it (42P01 / 42703) — every arm, single-process included; the
-//     catalog's identity rule (a schema cannot hold two columns differing
-//     only by case) is the column half of it. ra/foldMismatch's DAG arms keep
-//     the answer they gave at the base: a qualifier that matches no base
-//     relation exactly is not an identifier source and stays text.
+//   - ra/foldMismatch, cn/foldMismatch: an UNQUOTED identifier finds a
+//     relation alias or a stored name whose case differs (`Bq.id` against the
+//     alias "Bq", `VAL` against the column "Val") where PostgreSQL refuses it
+//     (42P01 / 42703) — every arm, single-process included. The engine keeps
+//     resolving an unquoted reference case-insensitively on purpose (a stored
+//     mixed-case name such as ClickBench's ClientIP stays reachable without
+//     quotes); that is a compatibility tradeoff, not this line's to change.
+//     ra/foldMismatch's DAG arms keep the answer they gave at the base: a
+//     qualifier that matches no base relation exactly is not an identifier
+//     source and stays text. (cn/caseCols, the QUOTED half — `m."Val"`
+//     against m's val — is refused 42703 on every arm since the binder holds
+//     a qualified delimited reference to its own relation's spelling.)
 //   - ra/window, ra/windowKey, cn/windowJoin: a window over a join whose
 //     argument or PARTITION BY names a quoted build-side reference reads the
 //     probe's column of that name — every arm, single-process included.
@@ -176,8 +180,6 @@ var qiKnownWrong = qiPins([]struct {
 	{"ra/window", qiAllArms, "rows=4 1,8 | 2,2 | 3,3 | 7,8"},
 	{"ra/windowKey", qiAllArms, "rows=4 1,1 | 2,1 | 3,1 | 7,1"},
 	{"ra/setop", qiDAGArms, "rows=5 1 | 2 | 3 | 7 | 8"},
-	{"cn/caseCols", []string{"single", "spilled512k", "fastpath", "async", "async-probesplit"}, "rows=2 1,10,10 | 2,20,20"},
-	{"cn/caseCols", qiDAGArms, "rows=2 1,10,100 | 2,20,200"},
 	{"cn/foldMismatch", qiAllArms, "rows=5 10 | 20 | 30 | 50 | NULL"},
 	{"cn/windowJoin", qiAllArms, "rows=3 1,40 | 2,20 | 3,40"},
 	{"cal/orderBy", []string{"single", "spilled512k", "dag-shuffled", "dag-skew", "fastpath", "async", "async-probesplit"}, "rows=2 3,2 | 7,6"},
