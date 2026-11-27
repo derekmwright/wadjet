@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -654,6 +655,13 @@ func (c *pgConn) handleSet(sql string) error {
 		s = strings.TrimSpace(s[strings.IndexByte(s, ' ')+1:])
 	}
 
+	// SET TIME ZONE <value>: the SQL-standard spelling of SET TimeZone, which
+	// has no `=` or TO and was accepted unparsed — a client in New York ran
+	// every later statement at UTC with no sign of it (#1680 line d).
+	if rest, ok := cutTimeZoneKeyword(s); ok {
+		return refuseTimeZone(timeZoneStandardValue(rest))
+	}
+
 	// Split on " = " or " TO "
 	var key, val string
 	if idx := strings.Index(strings.ToUpper(s), " TO "); idx >= 0 {
@@ -683,6 +691,9 @@ func (c *pgConn) handleSet(sql string) error {
 // every field), so accepting the setting answered in the wrong style.
 // `DEFAULT` and `postgres` (any case) are accepted.
 func refuseSessionSetting(key, val string) error {
+	if key == "timezone" || key == `"timezone"` {
+		return refuseTimeZone(val)
+	}
 	if key != "intervalstyle" {
 		return nil
 	}
@@ -692,6 +703,71 @@ func refuseSessionSetting(key, val string) error {
 	}
 	return sqlerr.Refuse("intervalstyle", "IntervalStyle %s is not supported: interval values display "+
 		"in the postgres style only", sqlerr.Quote(val))
+}
+
+// cutTimeZoneKeyword reports whether s (the SET statement after SET and any
+// SESSION / LOCAL) is the `TIME ZONE <value>` form, and returns the value.
+func cutTimeZoneKeyword(s string) (string, bool) {
+	f := strings.Fields(s)
+	if len(f) < 3 || !strings.EqualFold(f[0], "TIME") || !strings.EqualFold(f[1], "ZONE") {
+		return "", false
+	}
+	return strings.Join(f[2:], " "), true
+}
+
+// timeZoneStandardValue is the zone a `SET TIME ZONE` value names, in the
+// spelling refuseTimeZone reads: LOCAL and DEFAULT are the server's default
+// zone (PostgreSQL 17.11: both reset TimeZone to it), a quoted string is its
+// text, and `INTERVAL '<offset>' HOUR TO MINUTE` is its offset text. A bare
+// number (`SET TIME ZONE -5`) stays as written.
+func timeZoneStandardValue(v string) string {
+	v = strings.TrimRight(strings.TrimSpace(v), "; ")
+	u := strings.ToUpper(v)
+	switch u {
+	case "LOCAL", "DEFAULT":
+		return "DEFAULT"
+	}
+	if strings.HasPrefix(u, "INTERVAL ") {
+		v = strings.TrimSpace(v[len("INTERVAL "):])
+		if i := strings.LastIndexByte(v, '\''); strings.HasPrefix(v, "'") && i > 0 {
+			v = v[:i+1]
+		}
+	}
+	return strings.Trim(v, `'"`)
+}
+
+// utcZoneNames are the TimeZone names PostgreSQL 17.11 runs at offset zero
+// in every season (measured: each SET, then a summer and a winter instant
+// printed `+00`; matched case-insensitively, as PostgreSQL matches zone
+// names). `Z` is not among them: PostgreSQL refuses it as a TimeZone.
+var utcZoneNames = map[string]bool{
+	"utc": true, "etc/utc": true, "uct": true, "etc/uct": true,
+	"universal": true, "etc/universal": true, "zulu": true, "etc/zulu": true,
+	"gmt": true, "etc/gmt": true, "gmt0": true, "etc/gmt0": true,
+	"gmt+0": true, "gmt-0": true, "etc/gmt+0": true, "etc/gmt-0": true,
+	"greenwich": true, "etc/greenwich": true, "utc0": true,
+}
+
+// zeroOffset matches a numeric zone offset of zero, in the spellings
+// PostgreSQL 17.11 accepts as one (`0`, `+00`, `+00:00`, `-0`, `0.0`).
+var zeroOffset = regexp.MustCompile(`^[+-]?0+(\.0+)?(:00(:00)?)?$`)
+
+// refuseTimeZone refuses a TimeZone this engine cannot honour (#1680 line
+// d). Every session runs at UTC: a timestamptz literal without an offset is
+// read at UTC, a timestamptz is printed at UTC, now() is the UTC instant, and
+// ParameterStatus reports TimeZone=UTC. A SET naming any other zone was
+// stored and echoed by SHOW while every answer stayed UTC's —
+// `TIMESTAMPTZ '2024-03-10 02:30:00'` under America/New_York answered 02:30
+// where PostgreSQL answers 03:30-04 — so it is refused, as an IntervalStyle
+// other than postgres is. UTC, its synonyms, a zero offset and DEFAULT /
+// LOCAL (the server default, UTC) are accepted.
+func refuseTimeZone(val string) error {
+	v := strings.TrimSpace(val)
+	if strings.EqualFold(v, "default") || utcZoneNames[strings.ToLower(v)] || zeroOffset.MatchString(v) {
+		return nil
+	}
+	return sqlerr.Refuse("timezone", "TimeZone %s is not supported: every session runs at UTC "+
+		"(timestamptz values are read and printed at UTC)", sqlerr.Quote(val))
 }
 
 // sendRefusal sends a door-level refusal with its SQLSTATE and sentence, and
