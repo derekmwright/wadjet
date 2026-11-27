@@ -1,0 +1,35 @@
+# #1680b client evidence (interval_client_evidence_test.go): step<TAB>what the client saw.
+# this engine's embedded server over pgwire
+connect/IntervalStyle	ParameterStatus=postgres
+describe/bare	ERR 0A000
+describe/text	params=[] fields=[t:oid=25:typmod=-1:len=-1:fmt=0]
+execute/text	fields=[t:oid=25:typmod=-1:len=-1:fmt=0] rows=[1 day; NULL; 30 days]
+execute/textAsBinary	fields=[t:oid=25:typmod=-1:len=-1:fmt=1] rows=[0x3120646179; NULL; 0x33302064617973]
+execute/bare	ERR 0A000
+execute/bareBinary	ERR 0A000
+simple/bare	ERR 0A000
+simple/text	fields=[t:oid=25:typmod=-1:len=-1:fmt=0] rows=[1 day; NULL; 30 days]
+null/text	fields=[t:oid=25:typmod=-1:len=-1:fmt=0] rows=[NULL]
+null/bare	ERR 0A000
+empty/describeText	params=[] fields=[t:oid=25:typmod=-1:len=-1:fmt=0]
+empty/executeText	fields=[t:oid=25:typmod=-1:len=-1:fmt=0] rows=[]
+empty/describeBare	ERR 0A000
+empty/executeBare	ERR 0A000
+empty/simpleBare	ERR 0A000
+param/describe	params=[1186] fields=[id:oid=20:typmod=-1:len=8:fmt=0]
+param/text	fields=[id:oid=20:typmod=-1:len=8:fmt=0] rows=[1]
+param/textMultiField	ERR 0A000
+param/null	fields=[id:oid=20:typmod=-1:len=8:fmt=0] rows=[]
+param/binary	ERR 0A000
+param/describeUntyped	params=[25] fields=[id:oid=20:typmod=-1:len=8:fmt=0]
+publishParam/describe	params=[1186] fields=[]
+publishParam/execute	ERR 0A000
+publishParamText/describe	params=[1186] fields=[a:oid=25:typmod=-1:len=-1:fmt=0]
+publishParamText/execute	ERR 0A000
+typmod/describe	params=[] fields=[]
+typmod/describeDay	params=[] fields=[]
+intervalstyle/set	fields=[] rows=[]
+intervalstyle/show	fields=[IntervalStyle:oid=25:typmod=-1:len=-1:fmt=0] rows=[iso_8601]
+intervalstyle/text	fields=[t:oid=25:typmod=-1:len=-1:fmt=0] rows=[1 day]
+intervalstyle/reset	fields=[] rows=[]
+intervalstyle/afterReset	fields=[t:oid=25:typmod=-1:len=-1:fmt=0] rows=[1 day]
