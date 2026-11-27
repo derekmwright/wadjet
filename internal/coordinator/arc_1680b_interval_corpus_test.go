@@ -436,6 +436,17 @@ func iv80EngineText(ans string) string {
 // (query, task and stage ids), replaced so the baseline holds the sentence.
 var iv80Ids = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,}`)
 
+// iv80Redact replaces the run-specific ids in an error sentence; a run of
+// decimal digits (a value the sentence quotes) is kept.
+func iv80Redact(msg string) string {
+	return iv80Ids.ReplaceAllStringFunc(msg, func(m string) string {
+		if strings.ContainsAny(m, "abcdef") {
+			return "<id>"
+		}
+		return m
+	})
+}
+
 // iv80Err is an engine error as the baseline records it: its SQLSTATE and
 // the sentence a client is owed (sqlerr.SentenceOf), or the whole text of an
 // error that carries no SQLSTATE, so an intentional refusal, a store guard
@@ -445,7 +456,7 @@ func iv80Err(err error) string {
 	if msg == "" {
 		msg = err.Error()
 	}
-	msg = iv80Ids.ReplaceAllString(strings.Join(strings.Fields(msg), " "), "<id>")
+	msg = iv80Redact(strings.Join(strings.Fields(msg), " "))
 	if r := []rune(msg); len(r) > 240 {
 		msg = string(r[:240]) + "…"
 	}
@@ -498,7 +509,7 @@ func iv80RunDAG(ctx context.Context, c *Coordinator, sql string) (out string) {
 		return iv80Err(err)
 	}
 	if res.Error != "" {
-		return "ERR : " + iv80Ids.ReplaceAllString(res.Error, "<id>")
+		return "ERR : " + iv80Redact(res.Error)
 	}
 	cols := append([]parquet.Column(nil), res.OutputSchema()...)
 	var cells [][]any

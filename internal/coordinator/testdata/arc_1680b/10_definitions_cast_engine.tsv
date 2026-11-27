@@ -2,12 +2,12 @@
 # Settings are PostgreSQL's only: the engine runs each statement as written. A TIMESTAMP value is printed as text (iv80EngineText). name<TAB>arms<TAB>class<TAB>answer
 in/usMinUnit~text	*	refusal	ERR 0A000: interval unit "microseconds" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 in/usMaxUnit~text	*	refusal	ERR 0A000: interval unit "microseconds" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-in/usMinUnitAgo~text	*	error	ERR 22007: invalid input syntax for type interval: "<id> microseconds ago"
-in/allMin~text	*	error	ERR 22007: invalid input syntax for type interval: "-2147483648 months -2147483648 days -<id> microseconds"
-in/allMinNear~text	*	error	ERR 22007: invalid input syntax for type interval: "-2147483648 months -2147483648 days -<id> microseconds"
-in/allMaxUnits~text	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 months 2147483647 days <id> microseconds"
-in/allMaxNear~text	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 months 2147483647 days <id> microseconds"
-in/allMinCastText~text	*	refusal	ERR 0A000: interval "-2147483648 months -2147483648 days -<id> microseconds" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+in/usMinUnitAgo~text	*	error	ERR 22007: invalid input syntax for type interval: "9223372036854775807 microseconds ago"
+in/allMin~text	*	error	ERR 22007: invalid input syntax for type interval: "-2147483648 months -2147483648 days -9223372036854775808 microseconds"
+in/allMinNear~text	*	error	ERR 22007: invalid input syntax for type interval: "-2147483648 months -2147483648 days -9223372036854775807 microseconds"
+in/allMaxUnits~text	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 months 2147483647 days 9223372036854775807 microseconds"
+in/allMaxNear~text	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 months 2147483647 days 9223372036854775806 microseconds"
+in/allMinCastText~text	*	refusal	ERR 0A000: interval "-2147483648 months -2147483648 days -9223372036854775808 microseconds" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
 in/allMinMake~text	*	error	ERR 42601: syntax error at or near ">"
 frac/1.5us~text	*	error	ERR 42601: syntax error at or near "AS"
 frac/-1.5us~text	*	error	ERR 42601: syntax error at or near "AS"
@@ -63,9 +63,9 @@ justify/negMonPlus25h~text	*	error	ERR 22007: invalid input syntax for type inte
 justify/negMonPlus25h/hoursOfDays~text	*	error	ERR 22007: invalid input syntax for type interval: "-1 mon 25 hours"
 justify/negMonPlus25h/daysOfHours~text	*	error	ERR 22007: invalid input syntax for type interval: "-1 mon 25 hours"
 infop/ivInfMinusNegInf~text	*	error	ERR 42601: syntax error at or near "-"
-sentinel/negOfNearMax~text	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 months 2147483647 days <id> microseconds"
-sentinel/negOfInfinityTriple~text	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 months 2147483647 days <id> microseconds"
-sentinel/mulNegInfinityTriple~text	*	error	ERR 22007: invalid input syntax for type interval: "-2147483648 months -2147483648 days -<id> microseconds"
+sentinel/negOfNearMax~text	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 months 2147483647 days 9223372036854775806 microseconds"
+sentinel/negOfInfinityTriple~text	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 months 2147483647 days 9223372036854775807 microseconds"
+sentinel/mulNegInfinityTriple~text	*	error	ERR 22007: invalid input syntax for type interval: "-2147483648 months -2147483648 days -9223372036854775808 microseconds"
 age/borrow~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
 age/timeBorrow~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
 age/null~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
