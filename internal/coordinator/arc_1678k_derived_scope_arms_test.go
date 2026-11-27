@@ -331,12 +331,20 @@ func TestArc1678kMeasure(t *testing.T) {
 // on the stage DAG, whose filter respelling is a separate defect:
 //
 //   - dag-respell: the four DAG arms respell a conjunct that stays above the
-//     join through the derived table's projection into its INNER spelling
+//     join through the derived table's projection
 //     (logical.ResolveFilterThroughProjects, read by dagplan's join-stage
-//     filter), and that spelling binds the outer relation at the join stage
-//     — `upper(a.s) = b.k` becomes `upper(a.s) = (upper(a.s))`, true on every
-//     row whose s is not NULL. At base the same cells were wrong on every arm
-//     because the conjunct was pushed inside the block.
+//     filter) and qualify the substituted definition by the join stage's
+//     build alias (#1678 line j). That alias is the build STREAM's
+//     (PlanContext.BuildStreamAlias: the inner scan's alias), and where it
+//     equals a name the probe carries — an inner alias equal to the outer
+//     alias or to the outer table's name — the qualified spelling still binds
+//     the probe: `upper(a.s) = b.k` reaches the join stage as
+//     `upper(a.s) = (upper(a.s))` with build alias `a`, true on every row
+//     whose s is not NULL; the outer-join cells' answers read as the same
+//     collision reaching the residual and the gather's `a.id`. At base 6ef333fb the same cells were
+//     wrong on every arm because the conjunct was pushed inside the block;
+//     the self-join through an unaliased table (build alias `b`) and a CTE
+//     reference are right since the line-j qualification landed.
 //   - dag-nocollision: the DAG arms answer wrong where NO name collides (the
 //     derived output respelled to an inner qualifier the join stage does not
 //     carry, an outer join's ON, a CTE): identical at base.
@@ -356,6 +364,12 @@ func TestArc1678kMeasure(t *testing.T) {
 //     base on every arm with no collision at all (reorder/none, the same
 //     answer at base and tip); the aa / tt cells, wrong at base for this
 //     line's reason as well, now answer what the no-collision cell answers.
+//   - dag-select-alias: the DAG arms' gather reads a derived table's column
+//     by the name the query wrote (`b.id`) where the join stream carries the
+//     build under a nested table's inner alias (`d1.id`); the qualifier strip
+//     hands it the PROBE's `id` (the stage DAG's SELECT-list read through a
+//     derived alias, #1678 line j's sl/* family). box/tt/nested2: the right
+//     row count since the line-j qualification, the probe's id in `r`.
 //
 // A pin FAILS the moment the arm starts agreeing or answers anything else.
 const ekPinsPath = "testdata/arc_1678k_derived_scope_pins.tsv"
@@ -376,7 +390,7 @@ func ekPins(t *testing.T) map[string]string {
 			t.Fatalf("malformed pin line %q", line)
 		}
 		switch f[3] {
-		case "dag-respell", "dag-nocollision", "dag-0A000", "async-nostage", "cte-ref-alias":
+		case "dag-respell", "dag-nocollision", "dag-0A000", "async-nostage", "cte-ref-alias", "dag-select-alias":
 		default:
 			t.Fatalf("pin %s@%s: unknown reason %q", f[0], f[1], f[3])
 		}

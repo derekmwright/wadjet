@@ -279,13 +279,17 @@ var ejKnown = func() map[string]map[string]string {
 //   - cx/cteJoinTwice: a CTE over a join read on both sides; the probe arm's
 //     definitions are qualified by the CTE body's inner alias, which the
 //     build's columns also carry on the stream.
-//   - open/*: every arm, single-process included: logical filter pushdown
-//     moves an outer predicate under a derived table's Project onto its inner
-//     scan when a name matches the table's INNER scope (an inner alias equal
-//     to an outer relation's name; a bare column the table does not publish).
+//   - open/*: at the base every arm, single-process included, was wrong:
+//     logical filter pushdown moved an outer predicate under a derived
+//     table's Project onto its inner scan when a name matched the table's
+//     INNER scope. #1678 line k stopped that (the join-side attribution ends
+//     at the block) and every arm but the stage DAG now answers PostgreSQL's
+//     rows. What stays wrong is the four DAG arms of an inner alias equal to
+//     the outer alias: the join stage's build alias is the build STREAM's
+//     (the inner scan's `a`), the probe carries `a` too, so the qualified
+//     respelling `upper(a.s) = (upper(a.s))` and the gather's `a.s` read the
+//     wrong side.
 var ejKnownWrong = func() map[string]map[string]string {
-	allArms := []string{"single", "spilled512k", "dag", "dag-shuffled", "dag-morsel4", "dag-skew",
-		"fastpath", "async", "async-probesplit"}
 	dagArms := []string{"dag", "dag-shuffled", "dag-morsel4", "dag-skew"}
 	out := map[string]map[string]string{}
 	for _, p := range []struct {
@@ -294,13 +298,8 @@ var ejKnownWrong = func() map[string]map[string]string {
 		answer string
 	}{
 		{"cx/cteJoinTwice", dagArms, "rows=0 "},
-		{"open/aliasIsProbe", []string{"single", "spilled512k", "fastpath", "async", "async-probesplit"}, "rows=40 1,1 | 1,2 | 1,3 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,5 | 4,6 | 5,1 | 5,2 | 5,3 | 5,5 | 5,6 | 6,1 | 6,2 | 6,3 | 6,5 | 6,6 | 7,1 | 7,2 | 7,3 | 7,5 | 7,6 | 8,1 | 8,2 | 8,3 | 8,5 | 8,6"},
 		{"open/aliasIsProbe", dagArms, "rows=40 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 1,7 | 1,8 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 2,7 | 2,8 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 3,7 | 3,8 | 5,1 | 5,2 | 5,3 | 5,4 | 5,5 | 5,6 | 5,7 | 5,8 | 6,1 | 6,2 | 6,3 | 6,4 | 6,5 | 6,6 | 6,7 | 6,8"},
 		{"open/aliasIsProbeSelect", dagArms, "rows=6 1,A,1,A | 2,b,2,B | 3,x,3,X | 4,NULL,4,NULL | 5,C,5,C | 6,a,6,A"},
-		{"open/tableUnaliasedProbe", allArms, "rows=0 "},
-		{"open/unqualifiedOuterN", allArms, "rows=6 1,1 | 1,6 | 2,1 | 2,6 | 7,1 | 7,6"},
-		{"open/unqualifiedOuterNPlain", allArms, "rows=4 1,1 | 3,3 | 4,4 | 6,6"},
-		{"open/unqualifiedOuterNWhere", allArms, "rows=6 1,1 | 1,6 | 2,1 | 2,6 | 7,1 | 7,6"},
 		{"sl/cteJoinDefIds", dagArms, "rows=0 "},
 		{"sl/inlNestedIds", dagArms, "rows=4 1,1 | 2,2 | 3,3 | 7,7"},
 		{"sl/inlNestedIdsExpr", dagArms, "rows=9 1,1 | 1,1 | 2,2 | 2,2 | 3,3 | 5,5 | 6,6 | 7,7 | 7,7"},
@@ -363,8 +362,8 @@ var ejKnownWrong = func() map[string]map[string]string {
 // filter of that join or of an inner join above it (ns/*: those run
 // single-process now, the route widened from the carrier join to every outer
 // join the filter's resolution crosses); and, pinned as still wrong
-// (ejKnownWrong), the SELECT-list build-column defect (sl/*) and the binder
-// defect (open/*).
+// (ejKnownWrong), the SELECT-list build-column defect (sl/*) and, on the DAG
+// arms only since #1678 line k, the build-stream alias collision (open/*).
 func TestArc1678jExprOnDerivedEveryArm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: nine arms over the expression-against-derived-column ON table")
