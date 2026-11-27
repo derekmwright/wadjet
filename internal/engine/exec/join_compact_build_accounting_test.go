@@ -538,7 +538,9 @@ func TestKeyOnlyMergeRefusalAndBloomOmission(t *testing.T) {
 // the distinct-pair build answers unbudgeted — NULL keys, NULL values,
 // one/two/three distinct values per key, an empty and a NULL-only build. A
 // join with no estimate, no spill manager or room keeps the distinct-pair
-// build.
+// build. Either way the choice is already made when the source's first Next
+// runs: it is a pre-consumption choice, never a switch after rows were folded
+// into the distinct-pair state.
 func TestNEBuildDeclinesToTheSpillingBuild(t *testing.T) {
 	shapes := []struct {
 		name string
@@ -571,9 +573,18 @@ func TestNEBuildDeclinesToTheSpillingBuild(t *testing.T) {
 				tr := memory.NewTracker("cb", 1<<20)
 				hj := cbJoin(t, jt, src, tr, true)
 				hj.BuildRowHint = 200_000 // the plan's estimate, whatever the rows
+				declinedAtFirstRead := false
+				src.before = func(call int) {
+					if call == 1 {
+						declinedAtFirstRead = hj.neDeclined
+					}
+				}
 				before := CompactNEDeclined.Load()
 				if err := hj.Build(context.Background(), src); err != nil {
 					t.Fatalf("declined build: %v", err)
+				}
+				if !declinedAtFirstRead {
+					t.Fatal("the decline was not made before the source's first Next: it must be a pre-consumption choice")
 				}
 				if CompactNEDeclined.Load() != before+1 || hj.neActive || !hj.neDeclined {
 					t.Fatalf("not declined: declined=%d neActive=%v", CompactNEDeclined.Load()-before, hj.neActive)
@@ -603,9 +614,21 @@ func TestNEBuildDeclinesToTheSpillingBuild(t *testing.T) {
 			hj := cbJoin(t, SemiJoin, src, memory.NewTracker("cb", 1<<20), true)
 			hj.BuildRowHint = 200_000
 			k.setup(hj)
+			firstRead := false
+			src.before = func(call int) {
+				if call == 1 {
+					firstRead = true
+					if hj.neDeclined {
+						t.Errorf("declined at the first read")
+					}
+				}
+			}
 			before := CompactNEDeclined.Load()
 			if err := hj.Build(context.Background(), src); err != nil {
 				t.Fatal(err)
+			}
+			if !firstRead {
+				t.Fatal("the build never read its source")
 			}
 			if CompactNEDeclined.Load() != before || !hj.neActive {
 				t.Fatalf("declined=%d neActive=%v: the distinct-pair build should have run", CompactNEDeclined.Load()-before, hj.neActive)
