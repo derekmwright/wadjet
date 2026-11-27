@@ -121,6 +121,12 @@ func tdgCells() []tdgCell {
 		{"literals", "SELECT TIMESTAMP '2024-01-02 00:00:00' - TIMESTAMP '2024-01-01 00:00:00' AS r", "1 day", tdgResult, ""},
 		{"clock", "SELECT now() - ts AS r FROM tg_t", "an interval per row", tdgResult, ""},
 		{"arrayElement", "SELECT id, (ARRAY[ts2])[1] - ts AS r FROM tg_t ORDER BY id", "1 day 03:00:00; 00:00:00.5; NULL", tdgResult, ""},
+		// A CTE-backed scalar subquery (the DAG defers it to a producer
+		// stage and substitutes its answer) and a correlated one.
+		{"cteSub", "WITH m AS (SELECT max(ts2) AS x FROM tg_t) SELECT id, (SELECT x FROM m) - ts AS r FROM tg_t ORDER BY id",
+			"1 day 03:00:00; 1 day 02:59:59.5; NULL", tdgResult, ""},
+		{"corrSub", "SELECT id, (SELECT max(b.ts2) FROM tg_t b WHERE b.id >= a.id) - ts AS r FROM tg_t a ORDER BY id",
+			"1 day 03:00:00; 00:00:00.5; NULL", tdgResult, ""},
 		{"shifted", "SELECT id, (ts2 + INTERVAL '1 day') - ts AS r FROM tg_t ORDER BY id", "2 days 03:00:00; 1 day 00:00:00.5; NULL", tdgResult, ""},
 		{"dateTrunc", "SELECT id, date_trunc('day', ts2) - date_trunc('day', ts) AS r FROM tg_t ORDER BY id", "1 day; 00:00:00; NULL", tdgResult, ""},
 		{"midnight", "SELECT id, date_trunc('day', ts2) - date_trunc('day', ts) > 0 AS r FROM tg_t ORDER BY id", "ERR 42883",
