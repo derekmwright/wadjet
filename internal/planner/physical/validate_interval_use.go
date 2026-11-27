@@ -60,8 +60,8 @@ import (
 // that does not exist for an interval, 22007 for constant text that is no
 // interval input); the rest is 0A000.
 //
-// A timestamp difference (`timestamp - timestamp`, both operands declared
-// TIMESTAMP) is a PRODUCER too (#1713d round 6, the maintainer's ruling):
+// A timestamp difference (`timestamp - timestamp`, both operands TIMESTAMP)
+// is a PRODUCER too (#1713d round 6, the maintainer's ruling):
 // PostgreSQL types it interval, and this engine computes it as a double of
 // milliseconds (ADR-0012 temporal r16). It is classified interval-valued like
 // any other producer, so publication, keys, aggregates, function arguments,
@@ -70,8 +70,22 @@ import (
 // number, not an interval, every allowlisted operation that would consume it
 // (a comparison, a shift, a cast to text, an allowlisted function) refuses it
 // instead (carriesTsDiff, tsDiffRefusal). Only IS [NOT] NULL takes it, where
-// the number and the interval are NULL on the same rows. No statement can
-// observe the millisecond number.
+// the number and the interval are NULL on the same rows.
+//
+// The rule sees a difference only where it can type both operands
+// TIMESTAMP: a column, a CAST, a temporal expression, and (round 7,
+// withTimestampLeaves) a TIMESTAMP-valued aggregate or window function
+// (min / max / min_by / max_by / lag / lead / first_value / last_value /
+// nth_value) or a scalar subquery answering one, and any expression over
+// those. Round 6 claimed no statement could observe the millisecond number;
+// `SELECT max(ts2) - min(ts)` (9.72e+07), `ts2 - lag(ts2) OVER (…)` and
+// `(SELECT max(ts2) FROM t) - ts` still did, because the declared-type walk
+// types no aggregate, window function or aggregate-bodied subquery. A window
+// value function is typed by its VALUE argument only, so `lag(NULL, 1, ts)`
+// (the timestamp in the default) is not seen: it answers NULL text there,
+// not the number. That and any other operand the plan types TIMESTAMP and
+// this walk does not remain outside the rule; the measured cases are in
+// 1713d_r7.md.
 //
 // What this rule cannot see — the ROW's text under CAST(s AS INTERVAL), which
 // may be input this engine cannot hold (an opaque IntervalValue) — is guarded
@@ -139,10 +153,7 @@ func (t intervalTyper) anyCarriesTsDiff(ns []plansql.Node) bool {
 // isTimestampDifference reports `timestamp - timestamp` (r16's millisecond
 // double), parentheses aside.
 func (t intervalTyper) isTimestampDifference(n plansql.Node) bool {
-	return timestampDifference(n, func(k plansql.Node) bool {
-		id, ok := t.declaredID(k)
-		return ok && id == parquet.TypeTimestamp
-	})
+	return timestampDifference(n, t.isTimestampOperand)
 }
 
 // timestampDifference reports a `-` PostgreSQL types interval as the
@@ -165,12 +176,82 @@ func timestampDifference(n plansql.Node, isTs func(plansql.Node) bool) bool {
 	return (l && r) || (l && unknown(b.Right)) || (r && unknown(b.Left))
 }
 
+// timestampValueArg is, for each aggregate and window function that answers
+// one of its arguments' own values, that argument's position: over a
+// TIMESTAMP argument it answers a TIMESTAMP (PostgreSQL's min / max and
+// window value functions are polymorphic in it; min_by / max_by answer their
+// first argument here). The declared-type walk cannot type them from the
+// statement's AST (an aggregate's output is typed by the logical plan), so
+// before #1713d round 7 a difference over one — max(ts2) - min(ts),
+// ts2 - lag(ts2) OVER (…) — was no difference to this rule and answered the
+// millisecond number.
+var timestampValueArg = map[string]int{
+	"min": 0, "max": 0, "min_by": 0, "max_by": 0,
+	"lag": 0, "lead": 0, "first_value": 0, "last_value": 0, "nth_value": 0,
+}
+
+// withTimestampLeaves is d with the INTERVAL rule's TIMESTAMP leaves
+// installed (ColDecls.timestampLeaf): a TIMESTAMP-valued aggregate or window
+// function, and a scalar subquery the subquery callback reports TIMESTAMP
+// (nil: the walk's own SubqueryNode arm decides). Every node over them — a CASE, COALESCE,
+// date_trunc, `+ interval`, a CAST — is then typed by the walk as it types
+// a column.
+func withTimestampLeaves(d ColDecls, subquery func(*plansql.SubqueryNode) bool) ColDecls {
+	d.timestampLeaf = func(n plansql.Node) bool {
+		switch v := n.(type) {
+		case *plansql.WindowFuncNode:
+			return v.Func != nil && d.timestampLeaf(v.Func)
+		case *plansql.FuncCallNode:
+			pos, ok := timestampValueArg[strings.ToLower(strings.TrimSpace(v.Name))]
+			if !ok || v.Star || pos >= len(v.Args) {
+				return false
+			}
+			t, c := nodeDeclaredType(v.Args[pos], d)
+			return c == expr.Decided && !t.Untyped && t.ID == parquet.TypeTimestamp
+		case *plansql.SubqueryNode:
+			return subquery != nil && !v.Array && subquery(v)
+		}
+		return false
+	}
+	return d
+}
+
 // intervalTyper carries the declarations an operand's type is read from.
 type intervalTyper struct {
 	decls ColDecls
+	// tsDecls is decls with the TIMESTAMP leaves (withTimestampLeaves),
+	// read by the timestamp-difference producer alone (isTimestampOperand).
+	tsDecls ColDecls
 	// subquery types a scalar subquery's one output column (the binder's
 	// declaration of its body), nil where no binder is at hand.
 	subquery func(sql string) (parquet.TypeID, bool)
+}
+
+// newIntervalTyper is the typer over decls, its TIMESTAMP leaves installed
+// for the producer (withTimestampLeaves): a scalar subquery is a TIMESTAMP
+// leaf when tsSubquery says its body answers one (nil: none is).
+func newIntervalTyper(decls ColDecls, subquery func(sql string) (parquet.TypeID, bool), tsSubquery func(sql string) bool) intervalTyper {
+	var leaf func(*plansql.SubqueryNode) bool
+	if tsSubquery != nil {
+		leaf = func(v *plansql.SubqueryNode) bool { return tsSubquery(v.SQL) }
+	}
+	return intervalTyper{decls: decls, tsDecls: withTimestampLeaves(decls, leaf), subquery: subquery}
+}
+
+// isTimestampOperand reports an operand the producer reads as a TIMESTAMP:
+// declaredID's answer, or the TIMESTAMP leaves' (an aggregate, a window
+// function, a scalar subquery, an expression over them). Only the producer
+// reads the leaves, so no other judgment's operand type (a 42846 / 42883
+// message, a shift's operand) moves with them.
+func (t intervalTyper) isTimestampOperand(k plansql.Node) bool {
+	if _, lit := plansql.Unparen(k).(*plansql.Lit); lit {
+		return false
+	}
+	if d, c := nodeDeclaredType(k, t.tsDecls); c == expr.Decided && !d.Untyped && d.ID == parquet.TypeTimestamp {
+		return true
+	}
+	id, ok := t.declaredID(k)
+	return ok && id == parquet.TypeTimestamp
 }
 
 // isInterval is the provenance rule, the timestamp difference a producer.
@@ -724,8 +805,8 @@ func (t intervalTyper) funcCall(fc *plansql.FuncCallNode) error {
 // refuseIntervalBlock applies the rule to one query block's own expressions
 // (its derived tables, CTE bodies, set-operation arms and subqueries are
 // blocks of their own, each judged where the binder validates it).
-func refuseIntervalBlock(info *plansql.SelectInfo, decls ColDecls, subquery func(string) (parquet.TypeID, bool)) error {
-	t := intervalTyper{decls: decls, subquery: subquery}
+func refuseIntervalBlock(info *plansql.SelectInfo, decls ColDecls, subquery func(string) (parquet.TypeID, bool), tsSubquery func(string) bool) error {
+	t := newIntervalTyper(decls, subquery, tsSubquery)
 	for i := range info.Columns {
 		c := info.Columns[i]
 		if c.Star || c.ASTExpr == nil {
@@ -811,7 +892,7 @@ func RefuseIntervalWrite(node plansql.Node, alias string, schema []parquet.Colum
 		scope.addRowColumn(c)
 		scope.addElementType(c)
 	}
-	return intervalTyper{decls: rowFieldScopeDecls(scope)}.walk(node)
+	return newIntervalTyper(rowFieldScopeDecls(scope), nil, nil).walk(node)
 }
 
 // IntervalWriteRefusal is the rule's refusal of an interval written to a
@@ -825,12 +906,15 @@ func IntervalWriteRefusal() error {
 // expression, its columns declared by schema as DeclaredTypeOfNodeWith reads
 // them: an interval producer, a timestamp difference among them.
 func IsIntervalValuedWith(node plansql.Node, schema []parquet.Column, cat []expr.PGCategory, p *Planner) bool {
+	// A scalar subquery is typed by the walk's own arm through p's plan (the
+	// declarations DeclaredTypeOfNodeWith reads); an aggregate or window
+	// function by the TIMESTAMP leaves, as the SELECT rule types them.
+	decls := withTimestampLeaves(schemaDecls(schema, cat, p), nil)
 	isTs := func(k plansql.Node) bool {
-		switch plansql.Unparen(k).(type) {
-		case *plansql.Lit, *plansql.SubqueryNode:
+		if _, lit := plansql.Unparen(k).(*plansql.Lit); lit {
 			return false
 		}
-		d, c := DeclaredTypeOfNodeWith(k, schema, cat, p)
+		d, c := nodeDeclaredType(k, decls)
 		return c == expr.Decided && !d.Untyped && d.ID == parquet.TypeTimestamp
 	}
 	return node != nil && expr.IsIntervalNodeWith(node, func(k plansql.Node) bool {

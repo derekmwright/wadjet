@@ -699,6 +699,13 @@ type binder struct {
 	// rule's reading of a body item the structural walk does not type —
 	// `upper(s)`, `s || ''` (memberPair, #1370).
 	declaredOut map[*plansql.SelectInfo][]parquet.TypeID
+	// timestampOut is, per block output column, whether it is TIMESTAMP by
+	// the INTERVAL rule's typing (the declared-type walk with the TIMESTAMP
+	// leaves, withTimestampLeaves: a column, a CAST, a TIMESTAMP-valued
+	// aggregate or window function), so a scalar
+	// subquery answering `max(ts)` is a timestamp operand of a difference
+	// (#1713d round 7). Read by that rule alone.
+	timestampOut map[*plansql.SelectInfo][]bool
 	// bodyScopes is each validated block's own FROM scope and its resolution
 	// scope (FROM plus the enclosing levels), for the question which of a
 	// body's equalities are CORRELATED (refuseBodyKeyPairs).
@@ -853,6 +860,17 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 			}
 		}
 		b.declaredOut[info] = dec
+		// A TIMESTAMP column of one arm beside a TIMESTAMP or a NULL of the
+		// other is a TIMESTAMP (PostgreSQL's select_common_type).
+		lt, rt := b.timestampOut[info.Union.Left], b.timestampOut[info.Union.Right]
+		if len(lt) == len(rt) {
+			ts := make([]bool, len(lt))
+			for i := range lt {
+				ln, rn := outputIsNull(info.Union.Left, i), outputIsNull(info.Union.Right, i)
+				ts[i] = (lt[i] || ln) && (rt[i] || rn) && (lt[i] || rt[i])
+			}
+			b.setTimestampOut(info, ts)
+		}
 		return nil
 	}
 
@@ -973,6 +991,15 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 			b.declaredOut = map[*plansql.SelectInfo][]parquet.TypeID{}
 		}
 		b.declaredOut[info] = dec
+		tsInputs := withTimestampLeaves(fieldInputs, nil)
+		ts := make([]bool, len(info.Columns))
+		for i, col := range info.Columns {
+			if col.ASTExpr != nil {
+				d, conf := nodeDeclaredType(col.ASTExpr, tsInputs)
+				ts[i] = conf == expr.Decided && !d.Untyped && d.ID == parquet.TypeTimestamp
+			}
+		}
+		b.setTimestampOut(info, ts)
 	}
 
 	// Resolution scope for WHERE and SELECT: FROM sources plus any outer scope
@@ -1187,6 +1214,10 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 				return types[0], true
 			}
 			return 0, false
+		}, func(sql string) bool {
+			sub := b.validatedBody(sql, resolve)
+			ts := b.timestampOut[sub]
+			return sub != nil && len(ts) == 1 && ts[0]
 		})
 	}
 
@@ -1580,6 +1611,23 @@ func (b *binder) validatedMemo(n plansql.Node, outer *colScope) *plansql.SelectI
 type memoKey struct {
 	body  *plansql.SelectInfo
 	outer *colScope
+}
+
+// setTimestampOut records a block's timestampOut.
+func (b *binder) setTimestampOut(info *plansql.SelectInfo, ts []bool) {
+	if b.timestampOut == nil {
+		b.timestampOut = map[*plansql.SelectInfo][]bool{}
+	}
+	b.timestampOut[info] = ts
+}
+
+// outputIsNull reports a plain block whose i-th output is the NULL literal.
+func outputIsNull(info *plansql.SelectInfo, i int) bool {
+	if info == nil || info.Union != nil || i >= len(info.Columns) {
+		return false
+	}
+	l, ok := plansql.Unparen(info.Columns[i].ASTExpr).(*plansql.Lit)
+	return ok && l.Kind == plansql.LitNull
 }
 
 // subqueryDeclaredTypes is a subquery body's output column types by

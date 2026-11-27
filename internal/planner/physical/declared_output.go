@@ -1197,6 +1197,12 @@ type ColDecls struct {
 	// and is asked before the three text resolvers above, which answer for
 	// a node that records no chain and for a walk that holds no Planner.
 	subqueryNode func(*plansql.SubqueryNode) (logical.SubqueryColumnDecl, bool)
+	// timestampLeaf, when set, declares TIMESTAMP a node this AST walk
+	// cannot type: a TIMESTAMP-valued aggregate or window function (max(ts),
+	// lag(ts) OVER (…)) or a scalar subquery answering one. Only the
+	// INTERVAL rule's typer sets it (withTimestampLeaves, #1713d), to find a
+	// timestamp difference over such operands; nil everywhere else.
+	timestampLeaf func(plansql.Node) bool
 	// PlaceholderTypes is the declared type of each `:scalar_N` deferred
 	// literal, keyed by the placeholder's NAME.
 	//
@@ -1553,6 +1559,12 @@ func DeclaredTypeOfNodeIn(node plansql.Node, schema []parquet.Column, cat []expr
 // 2.5 stored 3 where PostgreSQL stores 2 (#1353). A nil p is
 // DeclaredTypeOfNodeIn.
 func DeclaredTypeOfNodeWith(node plansql.Node, schema []parquet.Column, cat []expr.PGCategory, p *Planner) (expr.DeclType, expr.Confidence) {
+	return nodeDeclaredType(node, schemaDecls(schema, cat, p))
+}
+
+// schemaDecls is the declarations DeclaredTypeOfNodeWith reads schema's
+// columns (and, with p, a scalar subquery) through.
+func schemaDecls(schema []parquet.Column, cat []expr.PGCategory, p *Planner) ColDecls {
 	decls := ColDecls{
 		Types:  make(map[string]parquet.TypeID, len(schema)),
 		Fields: map[string][]parquet.Column{},
@@ -1604,7 +1616,7 @@ func DeclaredTypeOfNodeWith(node plansql.Node, schema []parquet.Column, cat []ex
 		decls.subqueryDecl, decls.subqueryIntWidth, decls.subqueryPGCategory = subqueryResolvers(p.scalarSubqueryColumnDecl)
 		decls.subqueryNode = p.subqueryNodeDeclIn(nil)
 	}
-	return nodeDeclaredType(node, decls)
+	return decls
 }
 
 // nodeDeclaredType is the declared-type walk's entry, and every recursive call
@@ -1650,6 +1662,9 @@ func nodeDeclaredTypeCategory(node plansql.Node, decls ColDecls) (expr.DeclType,
 // nodeDeclaredTypeOf declares one node by its kind; it recurses through
 // nodeDeclaredType, never itself, so every subtree carries its category.
 func nodeDeclaredTypeOf(node plansql.Node, decls ColDecls) (expr.DeclType, expr.Confidence) {
+	if decls.timestampLeaf != nil && decls.timestampLeaf(node) {
+		return expr.Decl(parquet.TypeTimestamp), expr.Decided
+	}
 	switch n := node.(type) {
 	case *plansql.ColRef:
 		return colRefDeclaredType(n, decls)
