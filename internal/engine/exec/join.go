@@ -1726,31 +1726,12 @@ func (h *HashJoin) buildParallelKeyOnly(ctx context.Context, source Source, work
 			hint = 64
 		}
 	}
+	// A worker's table and key buffer are made on its first batch
+	// (insertKeyOnlyBatch), so a worker that pulls no batch allocates nothing:
+	// a two-row build no longer holds one table per CPU.
 	locals := make([]*localKeyBuild, workers)
 	for i := range locals {
-		if err := h.compactReserve(localKeyBufCap, "a worker's key buffer"); err != nil {
-			return err
-		}
-		lb := &localKeyBuild{keyBuf: make([]byte, 0, localKeyBufCap), keyBufCharged: localKeyBufCap}
-		locals[i] = lb
-		// The hinted size is an optimization: when its reservation is refused
-		// the worker starts at the unhinted size and reserves its growth as
-		// keys actually arrive, so a pessimistic row hint alone cannot refuse
-		// a build whose keys fit.
-		var err error
-		for _, n := range []int{hint, 64} {
-			if h.useIntKey || h.useDualIntKey {
-				lb.intIndex, err = h.newIntTableCharged(n, "a worker's key table")
-			} else {
-				lb.strIndex, err = h.newStrTableCharged(n, strArenaFirstChunk, "a worker's key table")
-			}
-			if err == nil {
-				break
-			}
-		}
-		if err != nil {
-			return err
-		}
+		locals[i] = &localKeyBuild{hint: hint}
 	}
 
 	// Insert first batch into worker 0.
@@ -1854,7 +1835,7 @@ func (h *HashJoin) buildParallelKeyOnly(ctx context.Context, source Source, work
 			h.buildHasNullKey = true
 		}
 		var sz int
-		if h.useIntKey || h.useDualIntKey {
+		if lb.intIndex != nil {
 			sz = lb.intIndex.Len()
 		} else if lb.strIndex != nil {
 			sz = lb.strIndex.Len()
@@ -1997,6 +1978,8 @@ type localKeyBuild struct {
 	keyBuf   []byte
 	// keyBufCharged is the capacity of keyBuf this worker has reserved.
 	keyBufCharged int
+	// hint sizes the table the worker makes on its first batch.
+	hint int
 	// hasNullKey is this worker's half of HashJoin.buildHasNullKey; the
 	// merge below ORs them, because a NULL anywhere in the build poisons a
 	// null-aware anti join's whole answer (#507).
@@ -2009,11 +1992,14 @@ type localKeyBuild struct {
 // before it is allocated; a refusal returns before the allocation.
 func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) error {
 	batchRows := b.ActiveLen()
+	if err := h.ensureLocalKeyTable(lk); err != nil {
+		return err
+	}
 	if h.useIntKey || h.useDualIntKey {
 		if err := h.ensureIntCapacityCharged(lk.intIndex, batchRows, "a worker's key table growth"); err != nil {
 			return err
 		}
-	} else if lk.strIndex != nil {
+	} else {
 		if err := h.ensureStrCapacityCharged(lk.strIndex, batchRows, "a worker's key table growth"); err != nil {
 			return err
 		}
@@ -2076,17 +2062,6 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) e
 		}
 		lk.intIndex.CheckGrow()
 	} else {
-		if lk.strIndex == nil {
-			// Seed to this batch's row count — the EnsureCapacity above
-			// skipped a nil strIndex, and a 64-bucket seed would let the
-			// first batch fill the table mid-loop (GetOrInsertNoGrow spins
-			// forever on a full table).
-			t, err := h.newStrTableCharged(batchRows, strArenaFirstChunk, "a worker's key table")
-			if err != nil {
-				return err
-			}
-			lk.strIndex = t
-		}
 		if b.Sel != nil {
 			for _, si := range b.Sel {
 				lk.keyBuf = lk.keyBuf[:0]

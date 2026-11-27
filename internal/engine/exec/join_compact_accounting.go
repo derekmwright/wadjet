@@ -280,6 +280,40 @@ func (h *HashJoin) addStrChunkCharged(t *strHashTable, need int) error {
 	return nil
 }
 
+// ensureLocalKeyTable makes a parallel key-only worker's table (and, for a
+// string key, its key buffer) on the worker's first batch. The hinted size is
+// an optimization: when its reservation is refused the worker starts at the
+// unhinted size and reserves its growth as keys arrive, so a pessimistic row
+// hint alone cannot refuse a build whose keys fit. The caller then reserves
+// the batch's own growth (ensure*CapacityCharged), which is what keeps a
+// first batch from filling a small table mid-loop.
+func (h *HashJoin) ensureLocalKeyTable(lk *localKeyBuild) error {
+	if lk.intIndex != nil || lk.strIndex != nil {
+		return nil
+	}
+	var err error
+	for _, n := range []int{lk.hint, 64} {
+		if h.useIntKey || h.useDualIntKey {
+			lk.intIndex, err = h.newIntTableCharged(n, "a worker's key table")
+		} else {
+			lk.strIndex, err = h.newStrTableCharged(n, strArenaFirstChunk, "a worker's key table")
+		}
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if !h.useIntKey && !h.useDualIntKey && lk.keyBuf == nil {
+		if err := h.compactReserve(localKeyBufCap, "a worker's key buffer"); err != nil {
+			return err
+		}
+		lk.keyBuf, lk.keyBufCharged = make([]byte, 0, localKeyBufCap), localKeyBufCap
+	}
+	return nil
+}
+
 // strInsertCharged inserts key into t, adding (reserved) arena chunks as the
 // key needs them. The table must already have room for one more entry.
 func (h *HashJoin) strInsertCharged(t *strHashTable, key []byte) error {
