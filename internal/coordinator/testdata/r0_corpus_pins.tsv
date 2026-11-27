@@ -61,6 +61,10 @@
 #   own/computed_null (right -> routed-right), own/outer_nonstrict_rows (wrong:564413ecb116 -> routed-right),
 #   own/outer_constant, own/outer_nonstrict, own/outer_strict (refused:42000 -> routed-right).
 #   Measured with R0_PINS_WRITE=1; every other artifact row equals its pin except the h2_base2_control flap pin, kept.
+# Re-pinned at #1678 line j round 3: the outer-join route covers every outer join the filter's resolution crosses, not only
+#   the carrying one: own/join2_outer_coalesce (a LEFT join's padded coalesce(v,0)+1 read by the inner join above it) goes
+#   dag, dag-morsel4 wrong:a8f0538aa13e and dag-shuffled refused:42000 -> routed-right, localD gains dag-routes. Measured
+#   with R0_PINS_WRITE=1; every other artifact row equals its pin except the two h2_base2_control flap pins, kept.
 own	m1_diffbase	single	right	-	-
 own	m1_diffbase	spilled512k	right	-	-
 own	m1_diffbase	dag	right	-	-
@@ -417,10 +421,10 @@ own	proj_outer_coalesce	dag-morsel4	right	-	-
 own	proj_outer_coalesce	localD	right	-	status=established
 own	join2_outer_coalesce	single	right	-	-
 own	join2_outer_coalesce	spilled512k	right	-	-
-own	join2_outer_coalesce	dag	wrong:a8f0538aa13e	emission	-
-own	join2_outer_coalesce	dag-shuffled	refused:42000	emission	-
-own	join2_outer_coalesce	dag-morsel4	wrong:a8f0538aa13e	emission	-
-own	join2_outer_coalesce	localD	right	-	status=established
+own	join2_outer_coalesce	dag	routed-right	-	-
+own	join2_outer_coalesce	dag-shuffled	routed-right	-	-
+own	join2_outer_coalesce	dag-morsel4	routed-right	-	-
+own	join2_outer_coalesce	localD	right	-	status=established;dag-routes
 own	window_nested_order	single	right	-	-
 own	window_nested_order	spilled512k	right	-	-
 own	window_nested_order	dag	wrong:01825e254830	emission	-
