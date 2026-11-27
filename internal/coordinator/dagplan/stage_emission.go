@@ -1190,7 +1190,8 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				// never writes to the logical plan the single-process path
 				// shares.
 				if len(node.Children) == 1 {
-					if ast, names, ok := logical.ResolveFilterThroughProjects(pred, node.Children[0]); ok {
+					if ast, names, ok := logical.ResolveFilterThroughProjects(pred, node.Children[0],
+						joinCarrierBuildQualifier(&(*stages)[filterIdx])); ok {
 						exprStr, aliasNames, exprTree = ast.String(), names, ast
 					}
 				}

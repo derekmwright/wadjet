@@ -217,6 +217,37 @@ func resolveFilterAliasSpelling(stages []Stage) {
 	}
 }
 
+// joinCarrierBuildQualifier answers, for a filter whose carrier is a JOIN
+// stage, the qualifier that names a BUILD-side column on that stage's stream:
+// the scan that owns it when the build spans several (BuildColOrigins), the
+// build alias otherwise — the two names the worker qualifies the build's
+// columns by. Nil for every other carrier, and for a join with no build alias.
+//
+// logical.ResolveFilterThroughProjects uses it on the definitions it
+// substitutes from the join's build arm. Those definitions' bare names were
+// bound inside the arm; on the join's stream a bare name binds the PROBE
+// first, so `upper(a.s) = b.k` over `(SELECT upper(s) AS k FROM t) b` arrived
+// as `upper(a.s) = upper(s)` — the probe compared with itself, every pair
+// with a non-NULL probe value admitted (#1678 line j). The outer-join
+// residual follows the same rule (residualWithStageSpellings).
+func joinCarrierBuildQualifier(s *Stage) func(string) string {
+	switch s.Type {
+	case StageHashJoin, StageBroadcastJoin, StageSortMergeJoin:
+	default:
+		return nil
+	}
+	if s.BuildTableAlias == "" {
+		return nil
+	}
+	alias, origins := s.BuildTableAlias, s.BuildColOrigins
+	return func(col string) string {
+		if o := origins[strings.ToLower(col)]; o != "" {
+			return o
+		}
+		return alias
+	}
+}
+
 // filterInputStage returns the stage whose output columns the filter on the
 // stage at i is evaluated against.
 //

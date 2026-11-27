@@ -35,6 +35,20 @@ aggregate output, a volatile function — because a stage that emits such a
 column emits it under the alias, which is the name the predicate already
 carries.
 
+A definition substituted from a join's BUILD arm is spelled in that arm's
+scope, and its bare names do not survive the move to the join's stream: there
+a bare name binds the PROBE first. When the predicate's carrier is the join's
+own stage, the stage DAG therefore passes a qualifier (dagplan's
+`joinCarrierBuildQualifier`: the owning scan from `BuildColOrigins`, else
+`BuildTableAlias`), and every bare reference the build arm's walk brought in
+is qualified by it — copy-on-write, so the logical plan's own definitions are
+untouched. Before that, `upper(a.s) = b.k` over `(SELECT upper(s) AS k FROM
+t) b` reached the join as `upper(a.s) = upper(s)`, which compared the probe
+with itself and admitted every pair whose probe value was not NULL (#1678
+line j). The outer-join residual follows the same rule
+(`residualWithStageSpellings`). Probe-arm definitions stay bare: binding the
+probe is what they mean.
+
 It also stops at a Sort or a LIMIT. Those DO emit stages, carrying the
 names above them, so a predicate re-spelled past one would name a column
 the stage below the Project has and the stage the filter lands on does not.

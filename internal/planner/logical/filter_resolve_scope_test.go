@@ -34,7 +34,7 @@ func resolveTopFilter(t *testing.T, sql string) string {
 	if filter == nil {
 		t.Fatalf("no Filter node in the optimized plan for %q", sql)
 	}
-	ast, _, ok := ResolveFilterThroughProjects(filter.Predicates[0], filter.Children[0])
+	ast, _, ok := ResolveFilterThroughProjects(filter.Predicates[0], filter.Children[0], nil)
 	if !ok {
 		return ""
 	}
@@ -111,6 +111,80 @@ func TestResolveFilterThroughProjectsScoping(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if got := resolveTopFilter(t, c.sql); !strings.EqualFold(got, c.want) {
 				t.Fatalf("resolved to %q, want %q\n  SQL: %s", got, c.want, c.sql)
+			}
+		})
+	}
+}
+
+// A JOIN'S OWN STAGE QUALIFIES WHAT THE BUILD ARM BROUGHT IN (#1678 line j).
+// The build arm's definition `upper(s)` was spelled in the arm's scope; on the
+// join's stream a bare `s` binds the PROBE's, so the predicate compared the
+// probe with itself. With a qualifier only the build arm's substituted bare
+// references take it: the query's own references, the probe arm's
+// substitutions and a definition already qualified stay as written, no
+// qualifier (every carrier but a join stage) leaves the old spelling, and the
+// logical plan's own definitions are never written to.
+func TestResolveFilterThroughProjectsQualifiesBuildArmDefinitions(t *testing.T) {
+	qual := func(string) string { return "bq" }
+	defs := func(n *Node) string {
+		var b strings.Builder
+		var walk func(*Node)
+		walk = func(n *Node) {
+			for _, p := range n.Projections {
+				if p.ASTExpr != nil {
+					b.WriteString(p.ASTExpr.String() + ";")
+				}
+			}
+			for _, c := range n.Children {
+				walk(c)
+			}
+		}
+		walk(n)
+		return b.String()
+	}
+	for _, c := range []struct {
+		name, sql string
+		qualify   func(string) string
+		want      string
+	}{
+		{"BuildExpression", `SELECT a.id FROM t a, (SELECT id, upper(s) AS k FROM t) b WHERE upper(a.s) = b.k`,
+			qual, "upper(a.s) = (upper(bq.s))"},
+		{"BuildRename", `SELECT a.id FROM t a, (SELECT id, s AS k FROM t) b WHERE a.s = b.k OR a.id = b.id`,
+			qual, "a.s = bq.s or a.id = b.id"},
+		{"ProbeArmStaysBare", `SELECT a.id FROM (SELECT id, upper(s) AS k FROM t) a, (SELECT id, lower(s) AS k FROM t) b WHERE lower(a.k) = b.k`,
+			qual, "lower((upper(s))) = (lower(bq.s))"},
+		{"AlreadyQualified", `SELECT a.id FROM t a, (SELECT x.id, upper(x.s) AS k FROM t x) b WHERE upper(a.s) = b.k`,
+			qual, "upper(a.s) = (upper(x.s))"},
+		{"NoQualifier", `SELECT a.id FROM t a, (SELECT id, upper(s) AS k FROM t) b WHERE upper(a.s) = b.k`,
+			nil, "upper(a.s) = (upper(s))"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			parsed, err := plansql.Parse(c.sql)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			info, err := plansql.ExtractSelect(parsed)
+			if err != nil {
+				t.Fatalf("extract: %v", err)
+			}
+			plan, err := BuildFromSelect(info)
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			filter := findTopFilter(Optimize(plan))
+			if filter == nil {
+				t.Fatalf("no Filter node in the optimized plan for %q", c.sql)
+			}
+			before := defs(filter.Children[0])
+			ast, _, ok := ResolveFilterThroughProjects(filter.Predicates[0], filter.Children[0], c.qualify)
+			if !ok {
+				t.Fatalf("unchanged, want %q", c.want)
+			}
+			if got := ast.String(); !strings.EqualFold(got, c.want) {
+				t.Fatalf("resolved to %q, want %q\n  SQL: %s", got, c.want, c.sql)
+			}
+			if after := defs(filter.Children[0]); after != before {
+				t.Fatalf("the logical plan's definitions were written to:\n  before %s\n  after  %s", before, after)
 			}
 		})
 	}
