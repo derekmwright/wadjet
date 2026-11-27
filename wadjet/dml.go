@@ -1582,7 +1582,7 @@ func (ev *mergeEvaluator) refuseTargetInNotMatchedSubquery(node plansql.Node) er
 // already resolves against — so `WHEN MATCHED AND t.id IN (SELECT …)` answers
 // and a subquery correlated to either side compiles as correlated.
 func (ev *mergeEvaluator) compile(node plansql.Node) (expr.Expr, error) {
-	if err := dmlExpressionTyping(node, "", ev.mergedCols); err != nil {
+	if err := dmlExpressionTyping(node, "", ev.mergedCols, ev.planner.TimestampSubquery); err != nil {
 		return nil, err
 	}
 	if !dmlClauseHasSubquery(node) {
@@ -1947,11 +1947,15 @@ func assignmentClassified(t parquet.TypeID) bool {
 // SELECT-side rule for the same reason: an interval is consumed inline or
 // refused. The written value itself is assignSource.check's (0A000 into TEXT,
 // 42804 into anything else).
-func dmlExpressionTyping(node plansql.Node, alias string, schema []parquet.Column) error {
+//
+// tsSubquery types a scalar subquery's TIMESTAMP answer for the timestamp
+// difference rule (physical.RefuseIntervalWriteWith; nil where the door has
+// no planner, and a subquery there is then left to the expression guard).
+func dmlExpressionTyping(node plansql.Node, alias string, schema []parquet.Column, tsSubquery func(string) bool) error {
 	if err := physical.RefuseTemporalArithmetic(node, alias, schema); err != nil {
 		return err
 	}
-	return physical.RefuseIntervalWrite(node, alias, schema)
+	return physical.RefuseIntervalWriteWith(node, alias, schema, tsSubquery)
 }
 
 // refuseAggregateOrWindow is PostgreSQL's placement rule for an expression a
@@ -2025,7 +2029,7 @@ func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.
 	if err != nil {
 		return nil, sqlerr.Wrap("42601", fmt.Errorf("parsing %q: %w", text, err))
 	}
-	if err := dmlExpressionTyping(node, "", ev.mergedCols); err != nil {
+	if err := dmlExpressionTyping(node, "", ev.mergedCols, ev.planner.TimestampSubquery); err != nil {
 		return nil, err
 	}
 	clause := "UPDATE"
@@ -3070,7 +3074,7 @@ func assignInsertValue(text string, col parquet.Column, opts ...expr.CompileOpti
 		return nil, sqlerr.Wrap("42601", fmt.Errorf("parsing %q: %w", trimmed, err))
 	}
 	// The expression is typed before it is assigned — PostgreSQL's order.
-	if err := dmlExpressionTyping(node, "", nil); err != nil {
+	if err := dmlExpressionTyping(node, "", nil, nil); err != nil {
 		return nil, err
 	}
 	if err := refuseAggregateOrWindow(node, "VALUES"); err != nil {
@@ -3681,6 +3685,10 @@ type DMLSubqueryEnv struct {
 	// Clock binds the statement's clock functions (expr.WithStatementClock,
 	// #1566) in a clause with no subquery too.
 	Clock expr.CompileOption
+	// tsSubquery reports a scalar subquery answering a TIMESTAMP
+	// (physical.Planner.TimestampSubquery), for the timestamp-difference
+	// rule's typing of the predicate (#1713d round 8).
+	tsSubquery func(string) bool
 	// release returns what the environment's subqueries charged to the
 	// DB's pool (physical.Planner.ReleaseSubqueryEnv). The statement that
 	// built the environment calls Release when it is done with the
@@ -3694,6 +3702,14 @@ func (s *DMLSubqueryEnv) Release() {
 	if s != nil && s.release != nil {
 		s.release()
 	}
+}
+
+// timestampSubquery is the environment's tsSubquery; nil on a nil one.
+func (s *DMLSubqueryEnv) timestampSubquery() func(string) bool {
+	if s == nil {
+		return nil
+	}
+	return s.tsSubquery
 }
 
 // clock is the statement-clock option of an environment that may be nil.
@@ -3757,7 +3773,7 @@ func BuildDMLPredicate(target plansql.DMLTarget, schema []parquet.Column, sub *D
 	if err := refuseDMLLiteralPairs(node, schema); err != nil {
 		return nil, err
 	}
-	if err := dmlExpressionTyping(node, target.Alias, schema); err != nil {
+	if err := dmlExpressionTyping(node, target.Alias, schema, sub.timestampSubquery()); err != nil {
 		return nil, err
 	}
 	// A TRUTH CONTEXT, held to the same rule a SELECT's WHERE is held to:
@@ -3917,7 +3933,7 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget,
 		if err := checkDMLColumns(node, target, schema); err != nil {
 			return nil, fmt.Errorf("SET %s: %w", name, err)
 		}
-		if err := dmlExpressionTyping(node, target.Alias, schema); err != nil {
+		if err := dmlExpressionTyping(node, target.Alias, schema, nil); err != nil {
 			return nil, fmt.Errorf("SET %s: %w", name, err)
 		}
 		// The one assignment table, asked once per clause before any row —
@@ -4435,7 +4451,7 @@ func (db *DB) dmlSubqueryEnv(ctx context.Context) *DMLSubqueryEnv {
 	// as 54000 where this engine's own rule is 21000.
 	opts = append(opts, expr.WithSetRowBound(physical.MaxInlinedInSetRows()))
 	return &DMLSubqueryEnv{Runner: db.dmlSubqueryRunner(ctx), InnerCols: innerCols, Opts: opts,
-		Clock: expr.WithStatementClock(ctx), release: p.ReleaseSubqueryEnv}
+		Clock: expr.WithStatementClock(ctx), release: p.ReleaseSubqueryEnv, tsSubquery: p.TimestampSubquery}
 }
 
 // dmlSubqueryRunner executes a DML predicate's subquery through DB.Query — the

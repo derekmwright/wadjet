@@ -4,6 +4,7 @@ package physical
 
 import (
 	"strings"
+	"sync/atomic"
 
 	"github.com/derekmwright/wadjet/internal/engine/expr"
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -72,20 +73,32 @@ import (
 // instead (carriesTsDiff, tsDiffRefusal). Only IS [NOT] NULL takes it, where
 // the number and the interval are NULL on the same rows.
 //
-// The rule sees a difference only where it can type both operands
-// TIMESTAMP: a column, a CAST, a temporal expression, and (round 7,
-// withTimestampLeaves) a TIMESTAMP-valued aggregate or window function
-// (min / max / min_by / max_by / lag / lead / first_value / last_value /
-// nth_value) or a scalar subquery answering one, and any expression over
-// those. Round 6 claimed no statement could observe the millisecond number;
-// `SELECT max(ts2) - min(ts)` (9.72e+07), `ts2 - lag(ts2) OVER (…)` and
-// `(SELECT max(ts2) FROM t) - ts` still did, because the declared-type walk
-// types no aggregate, window function or aggregate-bodied subquery. A window
-// value function is typed by its VALUE argument only, so `lag(NULL, 1, ts)`
-// (the timestamp in the default) is not seen: it answers NULL text there,
-// not the number. That and any other operand the plan types TIMESTAMP and
-// this walk does not remain outside the rule; the measured cases are in
-// 1713d_r7.md.
+// What this rule SEES: a difference whose operands it can type TIMESTAMP
+// from the statement — a column, a CAST, a temporal expression, a
+// TIMESTAMP-valued aggregate or window function (withTimestampLeaves: min /
+// max / min_by / max_by / lag / lead / first_value / last_value /
+// nth_value, lag / lead over a NULL value typed by their default), a scalar
+// subquery whose body answers one (binder.timestampOut: a plain body, a star
+// body over one column, an outer column the body publishes), any expression
+// over those, and on the DML WHERE / MERGE doors a scalar subquery the
+// planner declares TIMESTAMP (RefuseIntervalWriteWith). Where it sees one it
+// gives PostgreSQL's diagnostics.
+//
+// What it does NOT see: any operand whose type only the plan knows and this
+// walk does not decide (the walk is AST typing, not the plan's), and the
+// UPDATE SET / INSERT VALUES doors' subqueries (no planner there). Round 6
+// and round 7 each claimed the rule left no such operand; reviews found
+// aggregates, windows, star bodies, outer columns and the write doors'
+// subqueries answering the millisecond number (1713d_r7.md, 1713d_r8.md).
+//
+// So this rule does NOT make "no statement observes the number" hold on its
+// own. The expression GUARD does (expr/timestamp_difference_guard.go): the
+// minus operator refuses `timestamp - timestamp` by its operands' declared
+// producers wherever it is compiled or evaluated, so an operand this walk
+// misses still yields no number — the guard's own 0A000 instead of this
+// rule's diagnostic. The guard is decided when the minus meets a row's batch;
+// a statement that evaluates no row (CTAS WITH NO DATA) is refused by this
+// rule alone.
 //
 // What this rule cannot see — the ROW's text under CAST(s AS INTERVAL), which
 // may be input this engine cannot hold (an opaque IntervalValue) — is guarded
@@ -165,6 +178,9 @@ func (t intervalTyper) isTimestampDifference(n plansql.Node) bool {
 // (`ts - '1 day'`) is no difference: the date arms refuse it 22007, as
 // PostgreSQL does. `date - date` is an integer on both sides and is not here.
 func timestampDifference(n plansql.Node, isTs func(plansql.Node) bool) bool {
+	if tsDiffRuleOff.Load() {
+		return false
+	}
 	b, ok := plansql.Unparen(n).(*plansql.BinaryOp)
 	if !ok || b.Op != "-" {
 		return false
@@ -174,6 +190,23 @@ func timestampDifference(n plansql.Node, isTs func(plansql.Node) bool) bool {
 	}
 	l, r := isTs(b.Left), isTs(b.Right)
 	return (l && r) || (l && unknown(b.Right)) || (r && unknown(b.Left))
+}
+
+// tsDiffRuleOff is the TEST seam that turns the statement rule's
+// timestamp-difference refusals off (DisableTimestampDifferenceRuleForTest):
+// with it set, no `-` is a timestamp difference to this rule, so every such
+// statement reaches execution and the expression guard
+// (expr/timestamp_difference_guard.go) alone must refuse it — the proof that
+// the guard is complete. Never set outside a test.
+var tsDiffRuleOff atomic.Bool
+
+// DisableTimestampDifferenceRuleForTest turns the statement rule's
+// timestamp-difference refusals off for a test and returns the restore. It
+// is process-wide: a test using it must not run in parallel with one that
+// expects the rule.
+func DisableTimestampDifferenceRuleForTest() (restore func()) {
+	prev := tsDiffRuleOff.Swap(true)
+	return func() { tsDiffRuleOff.Store(prev) }
 }
 
 // timestampValueArg is, for each aggregate and window function that answers
@@ -206,6 +239,13 @@ func withTimestampLeaves(d ColDecls, subquery func(*plansql.SubqueryNode) bool) 
 			if !ok || v.Star || pos >= len(v.Args) {
 				return false
 			}
+			// lag / lead over a NULL value: PostgreSQL resolves the unknown
+			// value to the DEFAULT's type, so `lag(NULL, 1, ts)` answers a
+			// TIMESTAMP (#1713d round 8).
+			if name := strings.ToLower(strings.TrimSpace(v.Name)); (name == "lag" || name == "lead") &&
+				len(v.Args) >= 3 && isNullLitNode(v.Args[pos]) {
+				pos = 2
+			}
 			t, c := nodeDeclaredType(v.Args[pos], d)
 			return c == expr.Decided && !t.Untyped && t.ID == parquet.TypeTimestamp
 		case *plansql.SubqueryNode:
@@ -214,6 +254,12 @@ func withTimestampLeaves(d ColDecls, subquery func(*plansql.SubqueryNode) bool) 
 		return false
 	}
 	return d
+}
+
+// isNullLitNode reports the NULL literal, parentheses aside.
+func isNullLitNode(n plansql.Node) bool {
+	l, ok := plansql.Unparen(n).(*plansql.Lit)
+	return ok && l.Kind == plansql.LitNull
 }
 
 // intervalTyper carries the declarations an operand's type is read from.
@@ -883,6 +929,17 @@ func (t intervalTyper) tableFuncArgs(tr *plansql.TableRef) error {
 // the target column is known (IntervalWriteRefusal into TEXT, PostgreSQL's
 // 42804 into anything else; wadjet's assignSource.check).
 func RefuseIntervalWrite(node plansql.Node, alias string, schema []parquet.Column) error {
+	return RefuseIntervalWriteWith(node, alias, schema, nil)
+}
+
+// RefuseIntervalWriteWith is RefuseIntervalWrite with a scalar subquery's
+// TIMESTAMP answer known to the timestamp-difference producer: tsSubquery
+// (Planner.TimestampSubquery; nil: no subquery is one) reports a body that
+// answers a TIMESTAMP, so `ts2 - (SELECT min(ts) FROM t) > 1000` in a DML
+// WHERE or a MERGE condition gets PostgreSQL's 42883 at plan time rather
+// than the expression guard's 0A000 at run time (#1713d round 8). Only the
+// producer reads it, as on the SELECT door.
+func RefuseIntervalWriteWith(node plansql.Node, alias string, schema []parquet.Column, tsSubquery func(sql string) bool) error {
 	if node == nil {
 		return nil
 	}
@@ -892,7 +949,17 @@ func RefuseIntervalWrite(node plansql.Node, alias string, schema []parquet.Colum
 		scope.addRowColumn(c)
 		scope.addElementType(c)
 	}
-	return newIntervalTyper(rowFieldScopeDecls(scope), nil, nil).walk(node)
+	return newIntervalTyper(rowFieldScopeDecls(scope), nil, tsSubquery).walk(node)
+}
+
+// TimestampSubquery reports a scalar subquery whose planned single output
+// column is a TIMESTAMP — the write doors' tsSubquery (RefuseIntervalWriteWith).
+func (p *Planner) TimestampSubquery(sql string) bool {
+	if p == nil {
+		return false
+	}
+	col, ok := p.SubqueryOutputColumn(sql)
+	return ok && col.Type == parquet.TypeTimestamp
 }
 
 // IntervalWriteRefusal is the rule's refusal of an interval written to a

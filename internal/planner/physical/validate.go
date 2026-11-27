@@ -950,6 +950,12 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 				}
 				declarations = append(declarations, d)
 			}
+			// A star body's one column, for the timestamp-difference
+			// producer (#1713d round 8): `(SELECT * FROM (SELECT ts …) z)`.
+			if len(names) == 1 {
+				d, c := nodeDeclaredType(&plansql.ColRef{Column: names[0]}, withTimestampLeaves(fieldInputs, nil))
+				b.setTimestampOut(info, []bool{c == expr.Decided && !d.Untyped && d.ID == parquet.TypeTimestamp})
+			}
 		}
 	}
 	b.outputDecls[info] = declarations
@@ -1012,6 +1018,20 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 		b.bodyScopes = map[*plansql.SelectInfo][2]*colScope{}
 	}
 	b.bodyScopes[info] = [2]*colScope{from, resolve}
+	// An OUTER column a body publishes (`(SELECT p_t.ts2 FROM p_s LIMIT
+	// 1)`) is typed by the enclosing level's scope, which fieldInputs (this
+	// block's own FROM) does not hold: the timestamp-difference producer
+	// reads the body's output through the resolution scope too (#1713d
+	// round 8).
+	if ts := b.timestampOut[info]; len(ts) == len(info.Columns) && outer != nil {
+		tsOuter := withTimestampLeaves(rowFieldScopeDecls(resolve), nil)
+		for i, col := range info.Columns {
+			if !ts[i] && col.ASTExpr != nil {
+				d, conf := nodeDeclaredType(col.ASTExpr, tsOuter)
+				ts[i] = conf == expr.Decided && !d.Untyped && d.ID == parquet.TypeTimestamp
+			}
+		}
+	}
 	// This block's expression subqueries, for the questions its comparisons
 	// ask of a body by text (validatedBody).
 	subs := b.blockSubqueries(info)
