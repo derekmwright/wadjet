@@ -356,15 +356,24 @@ func censusShapes() []censusShape {
 
 		// ---------------------------------------------------------------
 		// #692 — TIMESTAMP literals.
+		//
+		// A quoted literal with a NONZERO offset assigned to a stored
+		// TIMESTAMP column is refused (0A000 timestamp-zone-ambiguous, #1680
+		// line d): PostgreSQL stores the wall clock into a timestamp column
+		// and the instant into a timestamptz one, and this engine does not
+		// record which declaration a stored column had. `pg` is the answer
+		// over a column declared timestamp.
 		// ---------------------------------------------------------------
 		{name: "#692 insert a timestamp carrying an offset", tbl: "ts",
 			sql: "INSERT INTO arcb_ts (id, t) VALUES (2, '2020-01-01T05:30:00+05:30')",
 			pg:  "tag=INSERT 0 1 table=[1:2000-01-01T00:00:00Z 2:2020-01-01T05:30:00Z]",
-			emb: "tag=INSERT 0 1 table=[1:2000-01-01T00:00:00Z 2:2020-01-01T05:30:00Z]"},
+			emb: "state=0A000 table=[1:2000-01-01T00:00:00Z]",
+			bug: "#1680"},
 		{name: "#692 update to a timestamp carrying an offset", tbl: "ts",
 			sql: "UPDATE arcb_ts SET t = '2020-01-01T05:30:00+05:30' WHERE id = 1",
 			pg:  "tag=UPDATE 1 table=[1:2020-01-01T05:30:00Z]",
-			emb: "tag=UPDATE 1 table=[1:2020-01-01T05:30:00Z]"},
+			emb: "state=0A000 table=[1:2000-01-01T00:00:00Z]",
+			bug: "#1680"},
 		{name: "#692 insert an impossible day", tbl: "ts",
 			sql: "INSERT INTO arcb_ts (id, t) VALUES (2, '2020-02-30T00:00:00')",
 			pg:  "state=22008 table=[1:2000-01-01T00:00:00Z]",
@@ -922,18 +931,21 @@ func censusShapes() []censusShape {
 		{name: "B2 offset literal round trip, insert", tbl: "ts",
 			sql: "INSERT INTO arcb_ts (id, t) VALUES (2, '2020-06-01T12:00:00+05:30')",
 			pg:  "tag=INSERT 0 1 table=[1:2000-01-01T00:00:00Z 2:2020-06-01T12:00:00Z]",
-			emb: "tag=INSERT 0 1 table=[1:2000-01-01T00:00:00Z 2:2020-06-01T12:00:00Z]"},
+			emb: "state=0A000 table=[1:2000-01-01T00:00:00Z]",
+			bug: "#1680"},
 		{name: "B2 offset literal round trip, select", sql: "SELECT count(*) AS c FROM arcb_ts WHERE t = '2000-01-01 00:00:00+00:00'",
 			pg:  "rows=[1]",
 			emb: "rows=[1]"},
 		{name: "B2 space-separated offset literal", tbl: "ts",
 			sql: "INSERT INTO arcb_ts (id, t) VALUES (2, '2020-01-01 12:00:00-08:00')",
 			pg:  "tag=INSERT 0 1 table=[1:2000-01-01T00:00:00Z 2:2020-01-01T12:00:00Z]",
-			emb: "tag=INSERT 0 1 table=[1:2000-01-01T00:00:00Z 2:2020-01-01T12:00:00Z]"},
+			emb: "state=0A000 table=[1:2000-01-01T00:00:00Z]",
+			bug: "#1680"},
 		{name: "B2 two-digit offset literal", tbl: "ts",
 			sql: "INSERT INTO arcb_ts (id, t) VALUES (2, '2020-01-01 12:00:00-08')",
 			pg:  "tag=INSERT 0 1 table=[1:2000-01-01T00:00:00Z 2:2020-01-01T12:00:00Z]",
-			emb: "tag=INSERT 0 1 table=[1:2000-01-01T00:00:00Z 2:2020-01-01T12:00:00Z]"},
+			emb: "state=0A000 table=[1:2000-01-01T00:00:00Z]",
+			bug: "#1680"},
 		{name: "P9 hour 24 is the next day", tbl: "ts",
 			sql: "INSERT INTO arcb_ts (id, t) VALUES (2, '2020-01-01 24:00:00')",
 			pg:  "tag=INSERT 0 1 table=[1:2000-01-01T00:00:00Z 2:2020-01-02T00:00:00Z]",
