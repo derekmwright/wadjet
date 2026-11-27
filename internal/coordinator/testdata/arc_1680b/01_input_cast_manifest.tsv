@@ -74,39 +74,39 @@ lit/82/-infinity~text	C	supported	unmet	-
 lit/83/+infinity~text	C	supported	unmet	-
 lit/84/INFINITY~text	C	supported	unmet	-
 lit/null~text	C	supported	met	-
-std/ym~text	A	refusal typmod	unmet	-
-std/ymNeg~text	A	refusal typmod	unmet	-
-std/ds~text	A	refusal typmod	unmet	-
-std/dsFrac~text	A	refusal typmod	unmet	-
-std/year~text	A	refusal typmod	unmet	-
-std/month~text	A	refusal typmod	unmet	-
-std/day~text	A	refusal typmod	unmet	-
-std/hour~text	A	refusal typmod	unmet	-
-std/minute~text	A	refusal typmod	unmet	-
-std/second~text	A	refusal typmod	unmet	-
-std/secondFrac~text	A	refusal typmod	unmet	-
-std/dh~text	A	refusal typmod	unmet	-
-std/dm~text	A	refusal typmod	unmet	-
-std/hm~text	A	refusal typmod	unmet	-
-std/ms~text	A	refusal typmod	unmet	-
-std/hs~text	A	refusal typmod	unmet	-
-std/dayDropsTime~text	A	refusal typmod	unmet	-
-std/yearDropsMonths~text	A	refusal typmod	unmet	-
-std/monthDropsDays~text	A	refusal typmod	unmet	-
-std/hourDropsMinutes~text	A	refusal typmod	unmet	-
-std/yearFrac~text	A	refusal typmod	unmet	-
-std/dayFrac~text	A	refusal typmod	unmet	-
-std/hourNeg~text	A	refusal typmod	unmet	-
-prec/iv3~text	A	refusal typmod	unmet	-
-prec/iv0~text	A	refusal typmod	unmet	-
-prec/literal3~text	A	refusal typmod	unmet	-
-prec/second3~text	A	refusal typmod	unmet	-
-prec/ds2~text	A	refusal typmod	unmet	-
-prec/iv6~text	A	refusal typmod	unmet	-
+std/ym~text	-	not-parsed 42601	met	-
+std/ymNeg~text	-	not-parsed 42601	met	-
+std/ds~text	-	not-parsed 42601	met	-
+std/dsFrac~text	-	not-parsed 42601	met	-
+std/year~text	A	supported	met	-
+std/month~text	A	supported	met	-
+std/day~text	A	supported	met	-
+std/hour~text	A	supported	met	-
+std/minute~text	A	supported	met	-
+std/second~text	A	supported	met	-
+std/secondFrac~text	-	not-parsed 42601	met	-
+std/dh~text	-	not-parsed 42601	met	-
+std/dm~text	-	not-parsed 42601	met	-
+std/hm~text	-	not-parsed 42601	met	-
+std/ms~text	-	not-parsed 42601	met	-
+std/hs~text	-	not-parsed 42601	met	-
+std/dayDropsTime~text	-	not-parsed 22007	met	-
+std/yearDropsMonths~text	-	not-parsed 22007	met	-
+std/monthDropsDays~text	-	not-parsed 22007	met	-
+std/hourDropsMinutes~text	-	not-parsed 22007	met	-
+std/yearFrac~text	-	not-parsed 42601	met	-
+std/dayFrac~text	-	not-parsed 42601	met	-
+std/hourNeg~text	A	supported	met	-
+prec/iv3~text	-	not-parsed 22007	met	-
+prec/iv0~text	-	not-parsed 22007	met	-
+prec/literal3~text	-	not-parsed 42601	met	-
+prec/second3~text	-	not-parsed 42601	met	-
+prec/ds2~text	-	not-parsed 42601	met	-
+prec/iv6~text	-	not-parsed 22007	met	-
 prec/iv7~text	A	refusal typmod	unmet	-
-prec/castDay~text	A	refusal typmod	unmet	-
-prec/castYear~text	A	refusal typmod	unmet	-
-prec/castMonthTyp~text	A	refusal typmod	unmet	-
+prec/castDay~text	-	not-parsed 22007	met	-
+prec/castYear~text	-	not-parsed 22007	met	-
+prec/castMonthTyp~text	-	not-parsed 22007	met	-
 cast/fromText~text	C	supported	unmet	-
 cast/colon~text	C	supported	met	-
 cast/fromTime~text	A	refusal time-type	unmet	-

@@ -52,25 +52,25 @@ join/nestloop	D	supported	unmet	-
 join/left	D	supported	unmet	-
 join/semi	D	supported	unmet	-
 join/anti	D	supported	unmet	-
-setLit/union/default	A	refusal bare-interval-result	unmet	-
-setLit/unionRev/default	A	refusal bare-interval-result	unmet	-
+setLit/union/default	-	not-parsed 42601	met	-
+setLit/unionRev/default	-	not-parsed 42601	met	-
 setLit/intersect/default	A	refusal bare-interval-result	met	-
 setLit/except/default	A	refusal bare-interval-result	met	-
 setLit/exceptAll/default	A	refusal bare-interval-result	unmet	-
 setLit/intersectAll/default	A	refusal bare-interval-result	unmet	-
-setLit/valuesDistinct/default	A	refusal bare-interval-result	unmet	-
-setLit/union/sortagg	A	refusal bare-interval-result	unmet	-
-setLit/unionRev/sortagg	A	refusal bare-interval-result	unmet	-
+setLit/valuesDistinct/default	-	not-parsed 42601	met	-
+setLit/union/sortagg	-	not-parsed 42601	met	-
+setLit/unionRev/sortagg	-	not-parsed 42601	met	-
 setLit/intersect/sortagg	A	refusal bare-interval-result	met	-
 setLit/except/sortagg	A	refusal bare-interval-result	met	-
 setLit/exceptAll/sortagg	A	refusal bare-interval-result	unmet	-
 setLit/intersectAll/sortagg	A	refusal bare-interval-result	unmet	-
-setLit/valuesDistinct/sortagg	A	refusal bare-interval-result	unmet	-
+setLit/valuesDistinct/sortagg	-	not-parsed 42601	met	-
 wrap/group	D	supported	unmet	-
 wrap/join	D	supported	unmet	-
-wrap/hashCollide	A	refusal postgresql-internal-function	unmet	-
+wrap/hashCollide	-	not-parsed 22007	met	-
 adr0024/intersectNumericSort	C	supported	unmet	-
 adr0024/intersectNumericHash	C	supported	met	-
 array/group	A	refusal container	met	-
-array/eq	A	refusal container	unmet	-
+array/eq	-	not-parsed 42601	met	-
 row/group	D	supported	unmet	-

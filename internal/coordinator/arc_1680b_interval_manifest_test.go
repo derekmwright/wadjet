@@ -9,6 +9,9 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // The stage manifest (#1680b round 2; the judge's correction 3, the
@@ -390,6 +393,7 @@ func iv80Manifest(t *testing.T, sec iv80Section) []string {
 				}
 			}
 		}
+		outcome, stage, now = iv80Ruled(c, outcome, stage, now, eng[c.name], ans, x)
 		alt := "-"
 		if len(alts) > 0 {
 			var as []string
@@ -401,6 +405,71 @@ func iv80Manifest(t *testing.T, sec iv80Section) []string {
 		out = append(out, c.name+"\t"+stage+"\t"+outcome+"\t"+now+"\t"+alt)
 	}
 	return out
+}
+
+// iv80OutsideStage is the owner of a cell outside the program: no stage
+// owns it and no stage's landing requires it (ruling 2 of 1680c r3).
+const iv80OutsideStage = "-"
+
+// iv80Ruled applies the architect's three rulings on 1680c's conflicts (r3)
+// to a cell the rules gave an A refusal that today's baseline does not meet,
+// decided by the baseline when the manifest is recorded:
+//
+//  1. right on main: every arm already answers PostgreSQL's value and type,
+//     so the cell's outcome is supported (owned by A: nothing it needs waits
+//     for a later stage) and stage A must keep it right;
+//  2. not parsed: this engine's SQL parser (plansql.Parse, the statement's
+//     first boundary on every arm, the interval literal reader included)
+//     rejects the statement, so it is outside the program: outcome
+//     "not-parsed <SQLSTATE>" with no owning stage. It is "met" while every
+//     arm still refuses it with the parser's SQLSTATE, so a later change that
+//     lets it answer, or answers it differently, shows;
+//  3. the TIME cells (TIME - TIME, DATE ± TIME): unchanged, an A refusal
+//     time-type (they answer wrong on main).
+//
+// An IntervalStyle cell is decided at the door (the SET), never by its
+// statement, so neither ruling touches it. Every other cell is unchanged.
+func iv80Ruled(c iv80Cell, outcome, stage, now string, eng []string, pg string, x iv80Check) (string, string, string) {
+	if stage != "A" || !strings.HasPrefix(outcome, "refusal ") || now == "met" || iv80CellStyle(c) != "" || len(eng) == 0 {
+		return outcome, stage, now
+	}
+	right := true
+	for _, l := range eng {
+		f := strings.SplitN(l, "\t", 3)
+		if len(f) != 3 || !iv80Meets("supported", iv80Unescape(f[2]), pg, x) {
+			right = false
+		}
+	}
+	if right {
+		return "supported", "A", "met"
+	}
+	if _, err := plansql.Parse(c.sql); err != nil {
+		code := sqlerr.StateOf(err)
+		now = "met"
+		for _, l := range eng {
+			f := strings.SplitN(l, "\t", 3)
+			if len(f) != 3 {
+				now = "unmet"
+				continue
+			}
+			a := iv80Unescape(f[2])
+			if got, _ := iv80ErrCode(a); !strings.HasPrefix(a, "ERR ") || got != code {
+				now = "unmet"
+			}
+		}
+		return "not-parsed " + code, iv80OutsideStage, now
+	}
+	return outcome, stage, now
+}
+
+// iv80SQL is a section's statement by cell name ("" when none).
+func iv80SQL(sec iv80Section, name string) string {
+	for _, c := range sec.cells() {
+		if c.name == name {
+			return c.sql
+		}
+	}
+	return ""
 }
 
 // iv80CellStyle is the non-postgres IntervalStyle a cell's settings name
@@ -437,10 +506,10 @@ func TestArc1680bStageManifest(t *testing.T) {
 			if strings.HasPrefix(outcome, "refusal ") && stage != "A" {
 				t.Errorf("%s:%s: a refusal owned by %s, not A", sec.stem, name, stage)
 			}
-			if _, ok := iv80Stages[stage]; !ok {
+			kind, arg, _ := strings.Cut(outcome, " ")
+			if _, ok := iv80Stages[stage]; !ok && !(stage == iv80OutsideStage && kind == "not-parsed") {
 				t.Errorf("%s:%s: unknown stage %q", sec.stem, name, stage)
 			}
-			kind, arg, _ := strings.Cut(outcome, " ")
 			body, _ := iv80Notice(pg[name][0])
 			pgCode, _ := iv80ErrCode(body)
 			switch kind {
@@ -455,6 +524,16 @@ func TestArc1680bStageManifest(t *testing.T) {
 			case "refusal":
 				if _, ok := iv80Reasons[arg]; !ok {
 					t.Errorf("%s:%s: refusal without a known reason: %q", sec.stem, name, arg)
+				}
+			case "not-parsed":
+				// Outside the program (ruling 2 of 1680c r3): the parser
+				// rejects a statement PostgreSQL parses (it may still raise
+				// its own error running it).
+				if stage != iv80OutsideStage {
+					t.Errorf("%s:%s: not-parsed owned by %q", sec.stem, name, stage)
+				}
+				if _, err := plansql.Parse(iv80SQL(sec, name)); err == nil || sqlerr.StateOf(err) != arg {
+					t.Errorf("%s:%s: not-parsed %s, but the parser answers %v", sec.stem, name, arg, err)
 				}
 			default:
 				t.Errorf("%s:%s: outcome %q is none of the four", sec.stem, name, outcome)

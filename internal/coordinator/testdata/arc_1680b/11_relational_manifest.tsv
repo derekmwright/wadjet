@@ -40,11 +40,11 @@ mixkey/group/default	D	rep-divergence	unmet	-
 mixkey/distinct/default	D	rep-divergence	unmet	-
 mixkey/group/sortagg	D	rep-divergence	unmet	-
 mixkey/distinct/sortagg	D	rep-divergence	unmet	-
-ordagg/minMax	A	refusal ordered-aggregate	unmet	-
-ordagg/minMaxRev	A	refusal ordered-aggregate	unmet	-
+ordagg/minMax	-	not-parsed 42601	met	-
+ordagg/minMaxRev	-	not-parsed 42601	met	-
 ordagg/unordered	E	rep-divergence	unmet	-
-ordagg/sumOrdered	A	refusal ordered-aggregate	unmet	-
-ordagg/percentile	A	refusal ordered-aggregate	unmet	-
+ordagg/sumOrdered	-	not-parsed 42601	met	-
+ordagg/percentile	-	not-parsed 42601	met	-
 distagg/sumAvg/default	A	refusal distinct-aggregate	unmet	-
 distagg/sumAvgRev/default	A	refusal distinct-aggregate	unmet	-
 distagg/sumAvg/sortagg	A	refusal distinct-aggregate	unmet	-
@@ -102,8 +102,8 @@ null/group	D	supported	unmet	-
 null/order	D	supported	unmet	-
 ov/winForward	E	pg-error 22008	unmet	-
 ov/winBackward	E	supported	unmet	-
-ov/aggAsc	A	refusal ordered-aggregate	unmet	-
-ov/aggDesc	A	refusal ordered-aggregate	unmet	-
+ov/aggAsc	-	not-parsed 42601	met	-
+ov/aggDesc	-	not-parsed 42601	met	-
 ov/aggUnordered	E	pg-error 22008	unmet	supported
 ov/timeForward	E	supported	unmet	-
 ov/timeBackward	E	supported	unmet	-
@@ -118,59 +118,59 @@ sw/rows2	E	supported	unmet	-
 sw/rows3	E	supported	unmet	-
 sw/following	E	supported	unmet	-
 sw/all	E	pg-error 22008	unmet	-
-frame/monthPreceding	A	refusal range-offset-frame	unmet	-
-frame/monthFollowing	A	refusal range-offset-frame	unmet	-
-frame/desc	A	refusal range-offset-frame	unmet	-
-frame/descNullsLast	A	refusal range-offset-frame	unmet	-
-frame/nullOffset	A	refusal range-offset-frame	unmet	-
-frame/zeroNormalized	A	refusal range-offset-frame	unmet	-
-frame/mixedFields	A	refusal range-offset-frame	unmet	-
-frame/infOffset	A	refusal range-offset-frame	unmet	-
-frame/infFollowing	A	refusal range-offset-frame	unmet	-
-frame/negInfOffset	A	refusal range-offset-frame	unmet	-
-frame/negOffset	A	refusal range-offset-frame	unmet	-
+frame/monthPreceding	-	not-parsed 42601	met	-
+frame/monthFollowing	-	not-parsed 42601	met	-
+frame/desc	-	not-parsed 42601	met	-
+frame/descNullsLast	-	not-parsed 42601	met	-
+frame/nullOffset	-	not-parsed 42601	met	-
+frame/zeroNormalized	-	not-parsed 42601	met	-
+frame/mixedFields	-	not-parsed 42601	met	-
+frame/infOffset	-	not-parsed 42601	met	-
+frame/infFollowing	-	not-parsed 42601	met	-
+frame/negInfOffset	-	not-parsed 42601	met	-
+frame/negOffset	-	not-parsed 42601	met	-
 frame/tsInfRowsShift	C	supported	unmet	-
-frame/intervalOrderDesc	A	refusal range-offset-frame	unmet	-
-frame/intervalOrderAsc	A	refusal range-offset-frame	unmet	-
+frame/intervalOrderDesc	-	not-parsed 42601	met	-
+frame/intervalOrderAsc	-	not-parsed 42601	met	-
 neg/projection/toChar	A	refusal function-to_char	unmet	-
 neg/projection/dateTrunc	A	refusal function-date_trunc	unmet	-
 neg/projection/castTime	A	refusal time-type	unmet	-
-neg/projection/orderedAgg	A	refusal ordered-aggregate	unmet	-
+neg/projection/orderedAgg	-	not-parsed 42601	met	-
 neg/projection/distinctSum	A	refusal distinct-aggregate	unmet	-
-neg/projection/arrayAgg	A	refusal container	unmet	-
+neg/projection/arrayAgg	-	not-parsed 42601	met	-
 neg/projection/arrayCtor	A	refusal container	unmet	-
 neg/derived/toChar	A	refusal function-to_char	unmet	-
 neg/derived/dateTrunc	A	refusal function-date_trunc	unmet	-
 neg/derived/castTime	A	refusal time-type	unmet	-
-neg/derived/orderedAgg	A	refusal ordered-aggregate	unmet	-
+neg/derived/orderedAgg	-	not-parsed 42601	met	-
 neg/derived/distinctSum	A	refusal distinct-aggregate	unmet	-
-neg/derived/arrayAgg	A	refusal container	unmet	-
+neg/derived/arrayAgg	-	not-parsed 42601	met	-
 neg/derived/arrayCtor	A	refusal container	unmet	-
 neg/cte/toChar	A	refusal function-to_char	unmet	-
 neg/cte/dateTrunc	A	refusal function-date_trunc	unmet	-
 neg/cte/castTime	A	refusal time-type	unmet	-
-neg/cte/orderedAgg	A	refusal ordered-aggregate	unmet	-
+neg/cte/orderedAgg	-	not-parsed 42601	met	-
 neg/cte/distinctSum	A	refusal distinct-aggregate	unmet	-
-neg/cte/arrayAgg	A	refusal container	unmet	-
+neg/cte/arrayAgg	-	not-parsed 42601	met	-
 neg/cte/arrayCtor	A	refusal container	unmet	-
 neg/subquery/toChar	A	refusal function-to_char	unmet	-
 neg/subquery/dateTrunc	A	refusal function-date_trunc	unmet	-
 neg/subquery/castTime	A	refusal time-type	unmet	-
-neg/subquery/orderedAgg	A	refusal ordered-aggregate	unmet	-
+neg/subquery/orderedAgg	-	not-parsed 42601	met	-
 neg/subquery/distinctSum	A	refusal distinct-aggregate	unmet	-
-neg/subquery/arrayAgg	A	refusal container	unmet	-
+neg/subquery/arrayAgg	-	not-parsed 42601	met	-
 neg/subquery/arrayCtor	A	refusal container	unmet	-
 neg/setop/toChar	A	refusal function-to_char	unmet	-
 neg/setop/dateTrunc	A	refusal function-date_trunc	unmet	-
 neg/setop/castTime	A	refusal time-type	unmet	-
-neg/setop/orderedAgg	A	refusal ordered-aggregate	unmet	-
+neg/setop/orderedAgg	-	not-parsed 42601	met	-
 neg/setop/distinctSum	A	refusal distinct-aggregate	unmet	-
-neg/setop/arrayAgg	A	refusal container	unmet	-
+neg/setop/arrayAgg	-	not-parsed 42601	met	-
 neg/setop/arrayCtor	A	refusal container	unmet	-
 neg/join/toChar	A	refusal function-to_char	unmet	-
 neg/join/dateTrunc	A	refusal function-date_trunc	unmet	-
 neg/join/castTime	A	refusal time-type	unmet	-
-neg/join/orderedAgg	A	refusal ordered-aggregate	unmet	-
+neg/join/orderedAgg	-	not-parsed 42601	met	-
 neg/join/distinctSum	A	refusal distinct-aggregate	unmet	-
-neg/join/arrayAgg	A	refusal container	unmet	-
+neg/join/arrayAgg	-	not-parsed 42601	met	-
 neg/join/arrayCtor	A	refusal container	unmet	-

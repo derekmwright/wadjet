@@ -3,78 +3,78 @@ in/usMinUnit	A	refusal bare-interval-result	unmet	-
 in/usMaxUnit	A	refusal bare-interval-result	unmet	-
 in/usOverUnit	C	pg-error 22015	met	-
 in/usUnderUnit	C	pg-error 22015	met	-
-in/usMinUnitAgo	A	refusal bare-interval-result	unmet	-
-in/allMin	A	refusal bare-interval-result	unmet	-
-in/allMinNear	A	refusal bare-interval-result	unmet	-
-in/allMaxUnits	A	refusal bare-interval-result	unmet	-
-in/allMaxNear	A	refusal bare-interval-result	unmet	-
+in/usMinUnitAgo	-	not-parsed 22007	met	-
+in/allMin	-	not-parsed 22007	met	-
+in/allMinNear	-	not-parsed 22007	met	-
+in/allMaxUnits	-	not-parsed 22007	met	-
+in/allMaxNear	-	not-parsed 22007	met	-
 in/allMinIsNegInf	C	supported	unmet	-
 in/allMinCastText	A	refusal bare-interval-result	met	-
-in/allMinMake	A	refusal bare-interval-result	unmet	-
-frac/1.5us	A	refusal bare-interval-result	unmet	-
-frac/-1.5us	A	refusal bare-interval-result	unmet	-
-frac/2.5us	A	refusal bare-interval-result	unmet	-
-frac/3.5us	A	refusal bare-interval-result	unmet	-
-frac/0.5us	A	refusal bare-interval-result	unmet	-
-frac/clockNearSecond	A	refusal bare-interval-result	unmet	-
-frac/minuteUnit	A	refusal bare-interval-result	unmet	-
-frac/years1	A	refusal bare-interval-result	unmet	-
-frac/years2	A	refusal bare-interval-result	unmet	-
-frac/decade	A	refusal bare-interval-result	unmet	-
-frac/months	A	refusal bare-interval-result	unmet	-
-frac/weeks1	A	refusal bare-interval-result	unmet	-
-frac/weeks2	A	refusal bare-interval-result	unmet	-
+in/allMinMake	-	not-parsed 42601	met	-
+frac/1.5us	-	not-parsed 42601	met	-
+frac/-1.5us	-	not-parsed 42601	met	-
+frac/2.5us	-	not-parsed 42601	met	-
+frac/3.5us	-	not-parsed 42601	met	-
+frac/0.5us	-	not-parsed 42601	met	-
+frac/clockNearSecond	-	not-parsed 42601	met	-
+frac/minuteUnit	-	not-parsed 22007	met	-
+frac/years1	-	not-parsed 22007	met	-
+frac/years2	-	not-parsed 22007	met	-
+frac/decade	-	not-parsed 22007	met	-
+frac/months	-	not-parsed 22007	met	-
+frac/weeks1	-	not-parsed 22007	met	-
+frac/weeks2	-	not-parsed 22007	met	-
 ago/P1D ago	C	pg-error 22007	met	-
 ago/P1Y2M ago	C	pg-error 22007	met	-
 ago/infinity ago	C	pg-error 22007	met	-
 ago/-infinity ago	C	pg-error 22007	met	-
-ago/1 day 02:00:00 ago	A	refusal bare-interval-result	unmet	-
-ago/1-2 ago	A	refusal bare-interval-result	unmet	-
-ago/3 4:05:06 ago	A	refusal bare-interval-result	unmet	-
-ago/-1 day +02:00:00 ago	A	refusal bare-interval-result	unmet	-
+ago/1 day 02:00:00 ago	-	not-parsed 22007	met	-
+ago/1-2 ago	-	not-parsed 22007	met	-
+ago/3 4:05:06 ago	-	not-parsed 22007	met	-
+ago/-1 day +02:00:00 ago	-	not-parsed 22007	met	-
 ago/1 day ago ago	C	pg-error 22007	met	-
 ago/ago	C	pg-error 22007	unmet	-
-ago/2147483647 days ago	A	refusal bare-interval-result	unmet	-
+ago/2147483647 days ago	-	not-parsed 22007	met	-
 ago/-2147483648 days ago	C	pg-error 22015	unmet	-
 ago/-2147483648 months ago	C	pg-error 22015	unmet	-
-ago/@ 1 mon ago	A	refusal bare-interval-result	unmet	-
-typmod/bareHM	A	refusal bare-interval-result	unmet	-
-typmod/hm	A	refusal typmod	unmet	-
-typmod/ms	A	refusal typmod	unmet	-
-typmod/dm	A	refusal typmod	unmet	-
+ago/@ 1 mon ago	-	not-parsed 22007	met	-
+typmod/bareHM	-	not-parsed 42601	met	-
+typmod/hm	-	not-parsed 42601	met	-
+typmod/ms	-	not-parsed 42601	met	-
+typmod/dm	-	not-parsed 42601	met	-
 typmod/bareNumber	A	refusal bare-interval-result	met	-
 typmod/minute	A	refusal typmod	unmet	-
-typmod/dayToHour	A	refusal typmod	unmet	-
-typmod/yearToMonth	A	refusal typmod	unmet	-
-typmod/hourFrac	A	refusal typmod	unmet	-
-typmod/secondTyp5	A	refusal typmod	unmet	-
-typmod/prec7	A	refusal typmod	unmet	-
-typmod/prec7Literal	A	refusal typmod	unmet	-
-typmod/prec7Half	A	refusal typmod	unmet	-
-ar/mulMixed	A	refusal bare-interval-result	unmet	-
-ar/divMixed2	A	refusal bare-interval-result	unmet	-
-ar/divMixed3	A	refusal bare-interval-result	unmet	-
-ar/mulCarry	A	refusal bare-interval-result	unmet	-
+typmod/dayToHour	-	not-parsed 42601	met	-
+typmod/yearToMonth	-	not-parsed 42601	met	-
+typmod/hourFrac	-	not-parsed 42601	met	-
+typmod/secondTyp5	-	not-parsed 42601	met	-
+typmod/prec7	-	not-parsed 22007	met	-
+typmod/prec7Literal	-	not-parsed 42601	met	-
+typmod/prec7Half	-	not-parsed 22007	met	-
+ar/mulMixed	-	not-parsed 22007	met	-
+ar/divMixed2	-	not-parsed 22007	met	-
+ar/divMixed3	-	not-parsed 22007	met	-
+ar/mulCarry	-	not-parsed 22007	met	-
 ar/infFactorZeroSign	C	pg-error 22008	unmet	-
-ar/infFactorNegSign	A	refusal bare-interval-result	unmet	-
-ar/infFactorPosSign	A	refusal bare-interval-result	unmet	-
-ar/negInfFactorNegSign	A	refusal bare-interval-result	unmet	-
-ar/infDivFiniteSign	A	refusal bare-interval-result	unmet	-
+ar/infFactorNegSign	-	not-parsed 22007	met	-
+ar/infFactorPosSign	-	not-parsed 22007	met	-
+ar/negInfFactorNegSign	-	not-parsed 22007	met	-
+ar/infDivFiniteSign	-	not-parsed 22007	met	-
 ar/divRecipMonths	A	refusal bare-interval-result	unmet	-
 ar/divRecipDays	A	refusal bare-interval-result	met	-
 ar/divRecipJudge	A	refusal bare-interval-result	unmet	-
-justify/bigDays24h	A	refusal bare-interval-result	unmet	-
-justify/bigDays24h/hoursOfDays	A	refusal bare-interval-result	unmet	-
+justify/bigDays24h	-	not-parsed 22007	met	-
+justify/bigDays24h/hoursOfDays	-	not-parsed 22007	met	-
 justify/bigDays24h/daysOfHours	C	pg-error 22008	unmet	-
-justify/negBigDays24h	A	refusal bare-interval-result	unmet	-
-justify/negBigDays24h/hoursOfDays	A	refusal bare-interval-result	unmet	-
+justify/negBigDays24h	-	not-parsed 22007	met	-
+justify/negBigDays24h/hoursOfDays	-	not-parsed 22007	met	-
 justify/negBigDays24h/daysOfHours	C	pg-error 22008	unmet	-
-justify/monMinus25h	A	refusal bare-interval-result	unmet	-
-justify/monMinus25h/hoursOfDays	A	refusal bare-interval-result	unmet	-
-justify/monMinus25h/daysOfHours	A	refusal bare-interval-result	unmet	-
-justify/negMonPlus25h	A	refusal bare-interval-result	unmet	-
-justify/negMonPlus25h/hoursOfDays	A	refusal bare-interval-result	unmet	-
-justify/negMonPlus25h/daysOfHours	A	refusal bare-interval-result	unmet	-
+justify/monMinus25h	-	not-parsed 22007	met	-
+justify/monMinus25h/hoursOfDays	-	not-parsed 22007	met	-
+justify/monMinus25h/daysOfHours	-	not-parsed 22007	met	-
+justify/negMonPlus25h	-	not-parsed 22007	met	-
+justify/negMonPlus25h/hoursOfDays	-	not-parsed 22007	met	-
+justify/negMonPlus25h/daysOfHours	-	not-parsed 22007	met	-
 infop/tsInfPlusNegInf	C	pg-error 22008	unmet	-
 infop/tsNegInfPlusInf	C	pg-error 22008	unmet	-
 infop/tsNegInfMinusNegInf	C	pg-error 22008	unmet	-
@@ -86,19 +86,19 @@ infop/tsInfAlone	C	supported	met	-
 infop/dateInfPlusFinite	C	supported	met	-
 infop/dateInfPlusNegInf	C	pg-error 22008	unmet	-
 infop/dateFinitePlusInf	C	supported	unmet	-
-infop/ivInfMinusNegInf	A	refusal bare-interval-result	unmet	-
+infop/ivInfMinusNegInf	-	not-parsed 42601	met	-
 epoch/yearVs360	C	supported	unmet	-
 epoch/yearVs360Float	C	supported	met	-
 epoch/bigFinite	C	supported	unmet	-
 epoch/bigFiniteNeg	C	supported	unmet	-
-epoch/negInf	A	refusal numeric-infinity	unmet	-
+epoch/negInf	-	not-parsed 42601	met	-
 sentinel/minusToNegInf	C	pg-error 22008	unmet	-
 sentinel/plusToNegInf	C	pg-error 22008	unmet	-
 sentinel/sumToNegInf	E	pg-error 22008	unmet	-
-sentinel/negOfNearMax	A	refusal bare-interval-result	unmet	-
+sentinel/negOfNearMax	-	not-parsed 22007	met	-
 sentinel/negOfNearMin	C	pg-error 22008	unmet	-
-sentinel/negOfInfinityTriple	A	refusal bare-interval-result	unmet	-
-sentinel/mulNegInfinityTriple	A	refusal bare-interval-result	unmet	-
+sentinel/negOfInfinityTriple	-	not-parsed 22007	met	-
+sentinel/mulNegInfinityTriple	-	not-parsed 22007	met	-
 age/borrow	A	refusal bare-interval-result	unmet	-
 age/timeBorrow	A	refusal timestamp-millisecond-carrier	unmet	-
 age/null	A	refusal bare-interval-result	unmet	-
@@ -178,10 +178,10 @@ fn/binInfStride	C	pg-error 22008	unmet	-
 fn/binInfSource	C	supported	unmet	-
 fn/binDaysStride	C	supported	unmet	-
 fn/binBeforeOrigin	C	supported	unmet	-
-fn/truncMixedSign	A	refusal function-date_trunc	unmet	-
-fn/tocharNeg	A	refusal function-to_char	unmet	-
-fn/overlapsNegEnd	A	refusal function-overlaps	unmet	-
-fn/overlapsInf	A	refusal function-overlaps	unmet	-
+fn/truncMixedSign	-	not-parsed 22007	met	-
+fn/tocharNeg	-	not-parsed 22007	met	-
+fn/overlapsNegEnd	-	not-parsed 42601	met	-
+fn/overlapsInf	-	not-parsed 42601	met	-
 fn/seriesTsMonthEnd	A	refusal function-generate_series	unmet	-
 fn/seriesNegStepWrongWay	A	refusal function-generate_series	met	-
 fn/widthBucketNumeric	C	supported	unmet	-

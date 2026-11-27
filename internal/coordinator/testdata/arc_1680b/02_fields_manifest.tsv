@@ -19,10 +19,10 @@ fields/16/1.5 months	C	supported	unmet	-
 fields/17/-1 day +02:03:04.5	C	supported	unmet	-
 fields/18/14 months	C	supported	unmet	-
 fields/19/1 year -1 second	C	supported	unmet	-
-fields/20/infinity	A	refusal numeric-infinity	unmet	-
-fields/21/-infinity	A	refusal numeric-infinity	unmet	-
+fields/20/infinity	-	not-parsed 42601	met	-
+fields/21/-infinity	-	not-parsed 42601	met	-
 fields/22/NULL	C	supported	unmet	-
-print/postgres	A	refusal bare-interval-result	unmet	-
+print/postgres	-	not-parsed 42601	met	-
 print/text/postgres	D	supported	unmet	-
 print/postgres_verbose	A	refusal intervalstyle	unmet	-
 print/text/postgres_verbose	A	refusal intervalstyle	unmet	-

@@ -38,8 +38,8 @@ order/descNullsLast	D	supported	unmet	-
 order/idDesc	A	refusal bare-interval-result	met	-
 order/minMax	A	refusal bare-interval-result	unmet	-
 order/minMaxFinite	A	refusal bare-interval-result	unmet	-
-order/minTieFwd	A	refusal bare-interval-result	unmet	-
-order/minTieRev	A	refusal bare-interval-result	unmet	-
+order/minTieFwd	-	not-parsed 42601	met	-
+order/minTieRev	-	not-parsed 42601	met	-
 order/minTieTable	A	refusal bare-interval-result	unmet	-
 order/greatestTie	A	refusal bare-interval-result	unmet	-
 order/topN	D	supported	unmet	-
