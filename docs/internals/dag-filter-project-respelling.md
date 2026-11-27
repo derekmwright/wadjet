@@ -49,6 +49,26 @@ line j). The outer-join residual follows the same rule
 (`residualWithStageSpellings`). Probe-arm definitions stay bare: binding the
 probe is what they mean.
 
+Which references the build arm brought in is decided by origin, not by node:
+the probe arm's references are re-made as fresh nodes before the build arm is
+walked, and only what the build walk splices in is qualified. A CTE read on
+both sides hands both arms the same definition nodes, so telling them apart by
+node left the build side bare (`(upper(s)) < (upper(s))`). A definition's
+reference that is already qualified keeps its qualifier only when the join's
+stream carries that name (the build alias, or a scan alias in
+`BuildColOrigins`); any other — the table's own name, `upper(t.s)` over `FROM
+t` — is re-qualified the same way.
+
+An OUTER join stage whose filter reads a derived table's column refuses the
+DAG plan (`ErrOuterJoinDerivedFilterDistributed`) and runs on the
+coordinator-local pipeline. The re-spelled filter is right; what fails is a
+task whose padded side's partition is empty, which shapes that side from the
+plan-declared side schema — a computed column first, the source columns the
+stream carries left out — so its file names its columns differently from its
+siblings' and the gather refuses the statement under ADR-0010. That
+declared-schema disagreement predates this rule and is reached by plain
+LEFT JOINs with no filter; it is recorded on #1678.
+
 It also stops at a Sort or a LIMIT. Those DO emit stages, carrying the
 names above them, so a predicate re-spelled past one would name a column
 the stage below the Project has and the stage the filter lands on does not.

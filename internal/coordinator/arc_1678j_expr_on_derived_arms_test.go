@@ -70,8 +70,8 @@ func ejCells(t *testing.T) []ejCell {
 		}
 		out = append(out, ejCell{p[0], p[1], p[2]})
 	}
-	if len(out) != 44 {
-		t.Fatalf("read %d cells, want 44", len(out))
+	if len(out) != 89 {
+		t.Fatalf("read %d cells, want 89", len(out))
 	}
 	return out
 }
@@ -233,12 +233,36 @@ func ejArms(t *testing.T, ctx context.Context) []ejArm {
 // EXISTS / NOT EXISTS it cannot run per row (a loud 'per-row execution'
 // refusal), and refuses a SELECT list naming a computed column of a nested
 // derived table (#656's 'computed no SELECT list'); both the same at the base.
+// The parser refuses a schema-qualified COLUMN reference (`public.ej_u.s`)
+// on every arm (42601), where PostgreSQL answers it. And a plain LEFT JOIN
+// that selects a derived table's computed column fails on the two partitioned
+// DAG arms: a task whose build partition is empty shapes its side from the
+// declared side schema, which names the computed column first and omits the
+// source column the stream carries, and the gather refuses its file (ADR-0010,
+// uncoded). That last one is the declared-schema defect behind
+// dagplan.ErrOuterJoinDerivedFilterDistributed, reached here with no filter at
+// all; it is the same at the base and is not this line's to repair.
 // A pin fails when the arm's answer moves.
-var ejKnown = map[string]map[string]string{
-	"kind/exists":    {"async": "per-row execution", "async-probesplit": "per-row execution"},
-	"kind/notExists": {"async": "per-row execution", "async-probesplit": "per-row execution"},
-	"rhs/nestedExpr": {"async": "computed no SELECT list", "async-probesplit": "computed no SELECT list"},
-}
+var ejKnown = func() map[string]map[string]string {
+	noList := map[string]string{"async": "computed no SELECT list", "async-probesplit": "computed no SELECT list"}
+	declared := map[string]string{"dag-shuffled": "(ADR-0010)", "dag-skew": "(ADR-0010)"}
+	parse := map[string]string{}
+	for _, a := range []string{"single", "spilled512k", "dag", "dag-shuffled", "dag-morsel4", "dag-skew",
+		"fastpath", "async", "async-probesplit"} {
+		parse[a] = "42601"
+	}
+	return map[string]map[string]string{
+		"kind/exists":      {"async": "per-row execution", "async-probesplit": "per-row execution"},
+		"kind/notExists":   {"async": "per-row execution", "async-probesplit": "per-row execution"},
+		"rhs/nestedExpr":   noList,
+		"cte/joinDefK":     noList,
+		"inl/joinDefK":     noList,
+		"inl/nestedK":      noList,
+		"qual/schemaTable": parse,
+		"od/leftSelectK":   declared,
+		"od/leftWhereBS":   declared,
+	}
+}()
 
 // A JOIN'S ON CONDITION THAT COMPARES AN EXPRESSION WITH A DERIVED TABLE'S
 // COLUMN IS APPLIED ON EVERY ARM (#1678 line j). The ON's left side {bare
@@ -255,6 +279,21 @@ var ejKnown = map[string]map[string]string{
 // carries — `upper(a.s) = b.k` with `b.k = upper(s)` arrived on the join stage
 // as `upper(a.s) = upper(s)`, and the bare `s` bound the PROBE's: the probe
 // compared with itself, every pair with a non-NULL probe value admitted.
+//
+// Round 2's cells: a CTE read on both sides of the join — twice, three times,
+// joined to a base table and to itself, over a join, nested — beside the same
+// shapes written as inline derived tables, which round 1 already answered
+// (it told the arms apart by definition NODE, and a CTE shares its nodes); a
+// definition qualified by its table's name, by a schema-qualified FROM, by an
+// alias inside the table, and unqualified; a WHERE above a LEFT, RIGHT or
+// FULL join comparing a probe expression with the derived column, the table
+// on either side, with and without the `IS NULL` disjuncts that keep the
+// NULL-padded rows (those run single-process now,
+// dagplan.ErrOuterJoinDerivedFilterDistributed); and the review's probe
+// shapes — constant definitions, a window, an aggregate, ORDER BY with LIMIT
+// above the join, a three-way join with two expression conjuncts, a column
+// list on the table, a definition's bare column also selected, a self-join
+// with both sides derived.
 func TestArc1678jExprOnDerivedEveryArm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: nine arms over the expression-against-derived-column ON table")

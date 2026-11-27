@@ -4,6 +4,7 @@
 # INSERT INTO ej_t VALUES (1,'a',2),(2,'A',3),(3,'b',1),(4,NULL,NULL),(5,'c',6),(6,'B',2),(7,'a',8),(8,'d',5);
 # INSERT INTO ej_u VALUES (1,'A',3),(2,'b',1),(3,'x',9),(4,NULL,4),(5,'C',NULL),(6,'a',7);
 # INSERT INTO ej_w VALUES (1,'A'),(2,'b'),(3,'x'),(4,NULL),(5,'C'),(6,'a');
+# Cells from cte2/lt on were added in round 2 (2026-11-26, same installation, the first 44 re-measured unchanged): a CTE read on both sides, a definition qualified by its table's name, a WHERE above an outer join, and the reviewer's probe shapes.
 # name<TAB>sql<TAB>rows=N <rows sorted, cells joined by ',', NULL spelled NULL, rows joined by ' | '> (psql -At -F , -P null=NULL).
 sighting/self	SELECT a.id, b.id FROM ej_t a JOIN (SELECT id, upper(s) AS k FROM ej_t) b ON upper(a.s) = b.k WHERE a.id < b.id	rows=4 1,2 | 1,7 | 2,7 | 3,6
 sighting/selfNoWhere	SELECT a.id, b.id FROM ej_t a JOIN (SELECT id, upper(s) AS k FROM ej_t) b ON upper(a.s) = b.k	rows=15 1,1 | 1,2 | 1,7 | 2,1 | 2,2 | 2,7 | 3,3 | 3,6 | 5,5 | 6,3 | 6,6 | 7,1 | 7,2 | 7,7 | 8,8
@@ -49,3 +50,48 @@ conj/or	SELECT a.id, b.id FROM ej_t a JOIN (SELECT id, upper(s) AS k FROM ej_u) 
 conj/orRename	SELECT a.id, b.id FROM ej_t a JOIN (SELECT id, s AS k FROM ej_u) b ON a.s = b.k OR a.id = b.id	rows=10 1,1 | 1,6 | 2,1 | 2,2 | 3,2 | 3,3 | 4,4 | 5,5 | 6,6 | 7,6
 conj/eqRename	SELECT a.id, b.id FROM ej_t a JOIN (SELECT id, s AS k FROM ej_u) b ON a.s = b.k	rows=4 1,6 | 2,1 | 3,2 | 7,6
 rhs/innerAlias	SELECT a.id, b.k FROM ej_t a JOIN (SELECT x.id, upper(x.s) AS k FROM ej_u x) b ON upper(a.s) = b.k	rows=9 1,A | 1,A | 2,A | 2,A | 3,B | 5,C | 6,B | 7,A | 7,A
+cte2/lt	WITH c AS (SELECT id, upper(s) AS k FROM ej_t) SELECT a.id, b.id FROM c a JOIN c b ON a.k < b.k	rows=17 1,3 | 1,5 | 1,6 | 1,8 | 2,3 | 2,5 | 2,6 | 2,8 | 3,5 | 3,8 | 5,8 | 6,5 | 6,8 | 7,3 | 7,5 | 7,6 | 7,8
+cte2/lowerEq	WITH c AS (SELECT id, upper(s) AS k FROM ej_t) SELECT a.id, b.id FROM c a JOIN c b ON lower(a.k) = lower(b.k) || '' AND a.id < b.id	rows=4 1,2 | 1,7 | 2,7 | 3,6
+cte2/whereAbove	WITH c AS (SELECT id, upper(s) AS k FROM ej_t) SELECT a.id, b.id FROM c a JOIN c b ON a.id + 1 = b.id WHERE a.k <> b.k	rows=4 2,3 | 5,6 | 6,7 | 7,8
+cte3/chain	WITH c AS (SELECT id, upper(s) AS k FROM ej_t) SELECT a.id, b.id, d.id FROM c a JOIN c b ON a.k < b.k JOIN c d ON b.k || '' = d.k AND b.id < d.id	rows=3 1,3,6 | 2,3,6 | 7,3,6
+cte/baseAndSelf	WITH c AS (SELECT id, upper(s) AS k FROM ej_u) SELECT a.id, x.id, y.id FROM ej_t a JOIN c x ON upper(a.s) = x.k JOIN c y ON x.k < y.k	rows=23 1,1,2 | 1,1,3 | 1,1,5 | 1,6,2 | 1,6,3 | 1,6,5 | 2,1,2 | 2,1,3 | 2,1,5 | 2,6,2 | 2,6,3 | 2,6,5 | 3,2,3 | 3,2,5 | 5,5,3 | 6,2,3 | 6,2,5 | 7,1,2 | 7,1,3 | 7,1,5 | 7,6,2 | 7,6,3 | 7,6,5
+cte/nested	WITH c AS (SELECT id, upper(s) AS k FROM ej_t), d AS (SELECT id, k || 'z' AS k2 FROM c) SELECT a.id, b.id FROM d a JOIN d b ON a.k2 < b.k2	rows=17 1,3 | 1,5 | 1,6 | 1,8 | 2,3 | 2,5 | 2,6 | 2,8 | 3,5 | 3,8 | 5,8 | 6,5 | 6,8 | 7,3 | 7,5 | 7,6 | 7,8
+cte/nestedMixed	WITH c AS (SELECT id, upper(s) AS k FROM ej_t), d AS (SELECT id, k || 'z' AS k2 FROM c) SELECT a.id, b.id FROM c a JOIN d b ON a.k || 'z' < b.k2	rows=17 1,3 | 1,5 | 1,6 | 1,8 | 2,3 | 2,5 | 2,6 | 2,8 | 3,5 | 3,8 | 5,8 | 6,5 | 6,8 | 7,3 | 7,5 | 7,6 | 7,8
+cte/tableQual	WITH c AS (SELECT ej_t.id, upper(ej_t.s) AS k FROM ej_t) SELECT a.id, b.id FROM c a JOIN c b ON a.k < b.k	rows=17 1,3 | 1,5 | 1,6 | 1,8 | 2,3 | 2,5 | 2,6 | 2,8 | 3,5 | 3,8 | 5,8 | 6,5 | 6,8 | 7,3 | 7,5 | 7,6 | 7,8
+inl2/lt	SELECT a.id, b.id FROM (SELECT id, upper(s) AS k FROM ej_t) a JOIN (SELECT id, upper(s) AS k FROM ej_t) b ON a.k < b.k	rows=17 1,3 | 1,5 | 1,6 | 1,8 | 2,3 | 2,5 | 2,6 | 2,8 | 3,5 | 3,8 | 5,8 | 6,5 | 6,8 | 7,3 | 7,5 | 7,6 | 7,8
+inl2/lowerEq	SELECT a.id, b.id FROM (SELECT id, upper(s) AS k FROM ej_t) a JOIN (SELECT id, upper(s) AS k FROM ej_t) b ON lower(a.k) = lower(b.k) || '' AND a.id < b.id	rows=4 1,2 | 1,7 | 2,7 | 3,6
+inl3/chain	SELECT a.id, b.id, d.id FROM (SELECT id, upper(s) AS k FROM ej_t) a JOIN (SELECT id, upper(s) AS k FROM ej_t) b ON a.k < b.k JOIN (SELECT id, upper(s) AS k FROM ej_t) d ON b.k || '' = d.k AND b.id < d.id	rows=3 1,3,6 | 2,3,6 | 7,3,6
+inl/baseAndSelf	SELECT a.id, x.id, y.id FROM ej_t a JOIN (SELECT id, upper(s) AS k FROM ej_u) x ON upper(a.s) = x.k JOIN (SELECT id, upper(s) AS k FROM ej_u) y ON x.k < y.k	rows=23 1,1,2 | 1,1,3 | 1,1,5 | 1,6,2 | 1,6,3 | 1,6,5 | 2,1,2 | 2,1,3 | 2,1,5 | 2,6,2 | 2,6,3 | 2,6,5 | 3,2,3 | 3,2,5 | 5,5,3 | 6,2,3 | 6,2,5 | 7,1,2 | 7,1,3 | 7,1,5 | 7,6,2 | 7,6,3 | 7,6,5
+inl/joinDef	SELECT a.id, b.id FROM (SELECT id, upper(s) || coalesce(w, '-') AS k FROM ej_u JOIN ej_w ON id = wid) a JOIN (SELECT id, upper(s) || coalesce(w, '-') AS k FROM ej_u JOIN ej_w ON id = wid) b ON a.k < b.k	rows=10 1,2 | 1,3 | 1,5 | 1,6 | 2,3 | 2,5 | 5,3 | 6,2 | 6,3 | 6,5
+qual/table	SELECT a.id, b.id FROM ej_t a JOIN (SELECT ej_u.id, upper(ej_u.s) AS k FROM ej_u) b ON upper(a.s) = b.k	rows=9 1,1 | 1,6 | 2,1 | 2,6 | 3,2 | 5,5 | 6,2 | 7,1 | 7,6
+qual/tableSelf	SELECT a.id, b.id FROM ej_t a JOIN (SELECT ej_t.id, upper(ej_t.s) AS k FROM ej_t) b ON upper(a.s) = b.k WHERE a.id < b.id	rows=4 1,2 | 1,7 | 2,7 | 3,6
+qual/alias	SELECT a.id, b.k FROM ej_t a JOIN (SELECT x.id, upper(x.s) AS k FROM ej_u x) b ON upper(a.s) = b.k	rows=9 1,A | 1,A | 2,A | 2,A | 3,B | 5,C | 6,B | 7,A | 7,A
+qual/schemaTable	SELECT a.id, b.id FROM ej_t a JOIN (SELECT public.ej_u.id, upper(public.ej_u.s) AS k FROM public.ej_u) b ON upper(a.s) = b.k	rows=9 1,1 | 1,6 | 2,1 | 2,6 | 3,2 | 5,5 | 6,2 | 7,1 | 7,6
+qual/schemaFrom	SELECT a.id, b.id FROM ej_t a JOIN (SELECT ej_u.id, upper(ej_u.s) AS k FROM public.ej_u) b ON upper(a.s) = b.k	rows=9 1,1 | 1,6 | 2,1 | 2,6 | 3,2 | 5,5 | 6,2 | 7,1 | 7,6
+qual/none	SELECT a.id, b.id FROM ej_t a JOIN (SELECT id, upper(s) AS k FROM ej_u) b ON upper(a.s) = b.k WHERE a.id <> b.id	rows=7 1,6 | 2,1 | 2,6 | 3,2 | 6,2 | 7,1 | 7,6
+ow/left	SELECT a.id, b.id FROM ej_t a LEFT JOIN (SELECT id, upper(s) AS k FROM ej_u) b ON a.id = b.id WHERE upper(a.s) <> b.k	rows=3 2,2 | 3,3 | 6,6
+ow/leftOrNull	SELECT a.id, b.id FROM ej_t a LEFT JOIN (SELECT id, upper(s) AS k FROM ej_u) b ON a.id = b.id WHERE upper(a.s) <> b.k OR b.k IS NULL	rows=6 2,2 | 3,3 | 4,4 | 6,6 | 7,NULL | 8,NULL
+ow/right	SELECT a.id, b.id FROM ej_t a RIGHT JOIN (SELECT id, upper(s) AS k FROM ej_u) b ON a.id = b.id WHERE upper(a.s) <> b.k	rows=3 2,2 | 3,3 | 6,6
+ow/rightOrNull	SELECT a.id, b.id FROM ej_t a RIGHT JOIN (SELECT id, upper(s) AS k FROM ej_u) b ON a.id = b.id WHERE upper(a.s) <> b.k OR a.s IS NULL	rows=4 2,2 | 3,3 | 4,4 | 6,6
+ow/full	SELECT a.id, b.id FROM ej_t a FULL JOIN (SELECT id, upper(s) AS k FROM ej_u) b ON a.id = b.id WHERE upper(a.s) <> b.k	rows=3 2,2 | 3,3 | 6,6
+ow/fullOrNull	SELECT a.id, b.id FROM ej_t a FULL JOIN (SELECT id, upper(s) AS k FROM ej_u) b ON a.id = b.id WHERE upper(a.s) <> b.k OR b.k IS NULL OR a.s IS NULL	rows=6 2,2 | 3,3 | 4,4 | 6,6 | 7,NULL | 8,NULL
+owd/left	SELECT a.id, b.id FROM (SELECT id, upper(s) AS k FROM ej_u) b LEFT JOIN ej_t a ON b.id = a.id WHERE b.k <> upper(a.s)	rows=3 2,2 | 3,3 | 6,6
+owd/leftOrNull	SELECT a.id, b.id FROM (SELECT id, upper(s) AS k FROM ej_u) b LEFT JOIN ej_t a ON b.id = a.id WHERE b.k <> upper(a.s) OR a.s IS NULL	rows=4 2,2 | 3,3 | 4,4 | 6,6
+owd/right	SELECT a.id, b.id FROM (SELECT id, upper(s) AS k FROM ej_u) b RIGHT JOIN ej_t a ON b.id = a.id WHERE b.k <> upper(a.s)	rows=3 2,2 | 3,3 | 6,6
+owd/rightOrNull	SELECT a.id, b.id FROM (SELECT id, upper(s) AS k FROM ej_u) b RIGHT JOIN ej_t a ON b.id = a.id WHERE b.k <> upper(a.s) OR b.id IS NULL	rows=5 2,2 | 3,3 | 6,6 | 7,NULL | 8,NULL
+owd/full	SELECT a.id, b.id FROM (SELECT id, upper(s) AS k FROM ej_u) b FULL JOIN ej_t a ON b.id = a.id WHERE b.k <> upper(a.s)	rows=3 2,2 | 3,3 | 6,6
+owd/fullOrNull	SELECT a.id, b.id FROM (SELECT id, upper(s) AS k FROM ej_u) b FULL JOIN ej_t a ON b.id = a.id WHERE b.k <> upper(a.s) OR b.id IS NULL OR a.id IS NULL	rows=5 2,2 | 3,3 | 6,6 | 7,NULL | 8,NULL
+w/innerKeyWhere	SELECT a.id, b.id FROM ej_t a JOIN (SELECT id, upper(s) AS k FROM ej_u) b ON a.id = b.id WHERE upper(a.s) <> b.k	rows=3 2,2 | 3,3 | 6,6
+w/constDefs	SELECT a.id, b.id FROM ej_t a JOIN (SELECT id, 'A' AS k, true AS t, current_date AS d FROM ej_u) b ON upper(a.s) = b.k AND b.t AND b.d = current_date	rows=18 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 7,1 | 7,2 | 7,3 | 7,4 | 7,5 | 7,6
+w/windowAbove	SELECT a.id, b.id, row_number() OVER (ORDER BY a.id, b.id) FROM ej_t a JOIN (SELECT id, upper(s) AS k FROM ej_u) b ON upper(a.s) = b.k	rows=9 1,1,1 | 1,6,2 | 2,1,3 | 2,6,4 | 3,2,5 | 5,5,6 | 6,2,7 | 7,1,8 | 7,6,9
+w/aggAbove	SELECT count(*), sum(a.id * 10 + b.id) FROM ej_t a JOIN (SELECT id, upper(s) AS k FROM ej_u) b ON upper(a.s) = b.k	rows=1 9,370
+w/orderLimit	SELECT a.id, b.id FROM ej_t a JOIN (SELECT id, upper(s) AS k FROM ej_u) b ON upper(a.s) = b.k ORDER BY a.id DESC, b.id LIMIT 3	rows=3 6,2 | 7,1 | 7,6
+w/threeWayTwoConj	SELECT a.id, b.id, w.wid FROM ej_t a JOIN (SELECT id, upper(s) AS k FROM ej_u) b ON upper(a.s) = b.k JOIN (SELECT wid, lower(w) AS lw FROM ej_w) w ON lower(a.s) = w.lw AND b.id <> w.wid	rows=6 1,1,6 | 1,6,1 | 2,1,6 | 2,6,1 | 7,1,6 | 7,6,1
+w/colList	SELECT a.id, b.bid FROM ej_t a JOIN (SELECT id, upper(s) FROM ej_u) AS b(bid, k) ON upper(a.s) = b.k	rows=9 1,1 | 1,6 | 2,1 | 2,6 | 3,2 | 5,5 | 6,2 | 7,1 | 7,6
+w/defBareColSelected	SELECT a.id, b.id, b.s FROM ej_t a JOIN (SELECT id, s, upper(s) AS k FROM ej_u) b ON upper(a.s) = b.k	rows=9 1,1,A | 1,6,a | 2,1,A | 2,6,a | 3,2,b | 5,5,C | 6,2,b | 7,1,A | 7,6,a
+w/selfDerivedBoth	SELECT a.id, b.id FROM (SELECT id, upper(s) AS k FROM ej_t) a JOIN (SELECT id, lower(s) AS k FROM ej_t) b ON a.k = upper(b.k) AND a.id < b.id	rows=4 1,2 | 1,7 | 2,7 | 3,6
+cte/joinDefK	WITH c AS (SELECT id, upper(s) || coalesce(w, '-') AS k FROM ej_u JOIN ej_w ON id = wid) SELECT a.k, b.k FROM c a JOIN c b ON a.k < b.k	rows=10 AA,Aa | AA,Bb | AA,CC | AA,Xx | Aa,Bb | Aa,CC | Aa,Xx | Bb,CC | Bb,Xx | CC,Xx
+inl/joinDefK	SELECT a.k, b.k FROM (SELECT id, upper(s) || coalesce(w, '-') AS k FROM ej_u JOIN ej_w ON id = wid) a JOIN (SELECT id, upper(s) || coalesce(w, '-') AS k FROM ej_u JOIN ej_w ON id = wid) b ON a.k < b.k	rows=10 AA,Aa | AA,Bb | AA,CC | AA,Xx | Aa,Bb | Aa,CC | Aa,Xx | Bb,CC | Bb,Xx | CC,Xx
+inl/nestedK	SELECT a.k2, b.k2 FROM (SELECT id, k || 'z' AS k2 FROM (SELECT id, upper(s) AS k FROM ej_t) i) a JOIN (SELECT id, k || 'z' AS k2 FROM (SELECT id, upper(s) AS k FROM ej_t) j) b ON a.k2 < b.k2	rows=17 Az,Bz | Az,Bz | Az,Bz | Az,Bz | Az,Bz | Az,Bz | Az,Cz | Az,Cz | Az,Cz | Az,Dz | Az,Dz | Az,Dz | Bz,Cz | Bz,Cz | Bz,Dz | Bz,Dz | Cz,Dz
+od/leftSelectK	SELECT a.id, b.id, b.k FROM ej_t a LEFT JOIN (SELECT id, upper(s) AS k FROM ej_u) b ON a.id = b.id	rows=8 1,1,A | 2,2,B | 3,3,X | 4,4,NULL | 5,5,C | 6,6,A | 7,NULL,NULL | 8,NULL,NULL
+od/leftWhereBS	SELECT a.id, b.id, b.k FROM ej_t a LEFT JOIN (SELECT id, s, upper(s) AS k FROM ej_u) b ON a.id = b.id WHERE b.s IS NULL OR b.s <> 'zz'	rows=8 1,1,A | 2,2,B | 3,3,X | 4,4,NULL | 5,5,C | 6,6,A | 7,NULL,NULL | 8,NULL,NULL
