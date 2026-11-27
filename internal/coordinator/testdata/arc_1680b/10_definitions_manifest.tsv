@@ -79,7 +79,11 @@ infop/tsInfPlusNegInf	C	pg-error 22008	unmet
 infop/tsNegInfPlusInf	C	pg-error 22008	unmet
 infop/tsNegInfMinusNegInf	C	pg-error 22008	unmet
 infop/tsNegInfMinusInf	C	supported	unmet
-infop/tsInfPlusFinite	C	supported	unmet
+infop/tsInfPlusFinite	C	supported	met
+infop/tsInfPlusPosFinite	C	supported	met
+infop/tsNegInfMinusFinite	C	supported	unmet
+infop/tsInfAlone	C	supported	met
+infop/dateInfPlusFinite	C	supported	met
 infop/dateInfPlusNegInf	C	pg-error 22008	unmet
 infop/dateFinitePlusInf	C	supported	unmet
 infop/ivInfMinusNegInf	F	refusal bare-interval-result	unmet

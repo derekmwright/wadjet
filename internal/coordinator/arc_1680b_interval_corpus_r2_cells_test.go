@@ -258,6 +258,10 @@ func iv80Definitions() []iv80Cell {
 		{"tsNegInfMinusNegInf", "TIMESTAMP '-infinity' - INTERVAL '-infinity'"},
 		{"tsNegInfMinusInf", "TIMESTAMP '-infinity' - INTERVAL 'infinity'"},
 		{"tsInfPlusFinite", "TIMESTAMP 'infinity' + INTERVAL '-1 day'"},
+		{"tsInfPlusPosFinite", "TIMESTAMP 'infinity' + INTERVAL '1 day'"},
+		{"tsNegInfMinusFinite", "TIMESTAMP '-infinity' - INTERVAL '1 mon'"},
+		{"tsInfAlone", "TIMESTAMP 'infinity'"},
+		{"dateInfPlusFinite", "DATE 'infinity' - INTERVAL '1 day'"},
 		{"dateInfPlusNegInf", "DATE 'infinity' + INTERVAL '-infinity'"},
 		{"dateFinitePlusInf", "DATE '2024-01-01' + INTERVAL 'infinity'"},
 		{"ivInfMinusNegInf", "INTERVAL 'infinity' - INTERVAL '-infinity'"},
@@ -601,6 +605,7 @@ func iv80Relational() []iv80Cell {
 	} {
 		b.add("frame/"+f.k, "SELECT id, count(*) OVER ("+f.frame+") AS n FROM iv80_fr ORDER BY id")
 	}
+	b.add("frame/tsInfRowsShift", "SELECT id, CAST(ts + INTERVAL '-1 day' AS TEXT) AS a, CAST(ts - INTERVAL '1 mon' AS TEXT) AS b, ts + INTERVAL '1 day' > TIMESTAMP '2024-01-01' AS c FROM iv80_fr WHERE id IN (5, 7, 8) ORDER BY id")
 	b.add("frame/intervalOrderDesc", "SELECT id, count(*) OVER (ORDER BY "+c+" DESC RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW) AS n FROM iv80_r ORDER BY id")
 	b.add("frame/intervalOrderAsc", "SELECT id, count(*) OVER (ORDER BY "+c+" RANGE BETWEEN CURRENT ROW AND INTERVAL '1 day' FOLLOWING) AS n FROM iv80_r ORDER BY id")
 	return b.out

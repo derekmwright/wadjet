@@ -159,5 +159,6 @@ frame/infOffset	-	sql	SELECT id, count(*) OVER (ORDER BY ts RANGE BETWEEN INTERV
 frame/infFollowing	-	sql	SELECT id, count(*) OVER (ORDER BY ts RANGE BETWEEN CURRENT ROW AND INTERVAL 'infinity' FOLLOWING) AS n FROM iv80_fr ORDER BY id
 frame/negInfOffset	-	sql	SELECT id, count(*) OVER (ORDER BY ts RANGE BETWEEN INTERVAL '-infinity' PRECEDING AND CURRENT ROW) AS n FROM iv80_fr ORDER BY id
 frame/negOffset	-	sql	SELECT id, count(*) OVER (ORDER BY ts RANGE BETWEEN INTERVAL '-1 day' PRECEDING AND CURRENT ROW) AS n FROM iv80_fr ORDER BY id
+frame/tsInfRowsShift	-	sql	SELECT id, CAST(ts + INTERVAL '-1 day' AS TEXT) AS a, CAST(ts - INTERVAL '1 mon' AS TEXT) AS b, ts + INTERVAL '1 day' > TIMESTAMP '2024-01-01' AS c FROM iv80_fr WHERE id IN (5, 7, 8) ORDER BY id
 frame/intervalOrderDesc	-	sql	SELECT id, count(*) OVER (ORDER BY CAST(s AS INTERVAL) DESC RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW) AS n FROM iv80_r ORDER BY id
 frame/intervalOrderAsc	-	sql	SELECT id, count(*) OVER (ORDER BY CAST(s AS INTERVAL) RANGE BETWEEN CURRENT ROW AND INTERVAL '1 day' FOLLOWING) AS n FROM iv80_r ORDER BY id

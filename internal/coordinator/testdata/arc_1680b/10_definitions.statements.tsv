@@ -80,6 +80,10 @@ infop/tsNegInfPlusInf	-	sql	SELECT TIMESTAMP '-infinity' + INTERVAL 'infinity' A
 infop/tsNegInfMinusNegInf	-	sql	SELECT TIMESTAMP '-infinity' - INTERVAL '-infinity' AS a
 infop/tsNegInfMinusInf	-	sql	SELECT TIMESTAMP '-infinity' - INTERVAL 'infinity' AS a
 infop/tsInfPlusFinite	-	sql	SELECT TIMESTAMP 'infinity' + INTERVAL '-1 day' AS a
+infop/tsInfPlusPosFinite	-	sql	SELECT TIMESTAMP 'infinity' + INTERVAL '1 day' AS a
+infop/tsNegInfMinusFinite	-	sql	SELECT TIMESTAMP '-infinity' - INTERVAL '1 mon' AS a
+infop/tsInfAlone	-	sql	SELECT TIMESTAMP 'infinity' AS a
+infop/dateInfPlusFinite	-	sql	SELECT DATE 'infinity' - INTERVAL '1 day' AS a
 infop/dateInfPlusNegInf	-	sql	SELECT DATE 'infinity' + INTERVAL '-infinity' AS a
 infop/dateFinitePlusInf	-	sql	SELECT DATE '2024-01-01' + INTERVAL 'infinity' AS a
 infop/ivInfMinusNegInf	-	sql	SELECT INTERVAL 'infinity' - INTERVAL '-infinity' AS a

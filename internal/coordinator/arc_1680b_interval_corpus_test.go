@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"math"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -413,10 +414,18 @@ func iv80EngineText(ans string) string {
 		}
 		for _, i := range tsCols {
 			ms, err := strconv.ParseInt(f[i], 10, 64)
-			if err != nil {
+			switch {
+			case err != nil:
 				continue
+			case ms == math.MaxInt64:
+				// The carrier's extremes are the infinite values (ADR-0012
+				// temporal, E36), printed as the engine's printers do.
+				f[i] = "infinity"
+			case ms == math.MinInt64:
+				f[i] = "-infinity"
+			default:
+				f[i] = time.UnixMilli(ms).UTC().Format("2006-01-02 15:04:05.999999")
 			}
-			f[i] = time.UnixMilli(ms).UTC().Format("2006-01-02 15:04:05.999999")
 		}
 		rows[r] = strings.Join(f, ",")
 	}

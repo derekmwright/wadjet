@@ -80,7 +80,11 @@ infop/tsInfPlusNegInf	*	wrong-sqlstate	ERR 42601: syntax error at or near "AS"
 infop/tsNegInfPlusInf	*	wrong-sqlstate	ERR 42601: syntax error at or near "AS"
 infop/tsNegInfMinusNegInf	*	wrong-sqlstate	ERR 42601: syntax error at or near "AS"
 infop/tsNegInfMinusInf	*	error	ERR 42601: syntax error at or near "AS"
-infop/tsInfPlusFinite	*	differs	a:TIMESTAMP | 292278994-08-17 07:12:55.807
+infop/tsInfPlusFinite	*	agree	a:TIMESTAMP | infinity
+infop/tsInfPlusPosFinite	*	agree	a:TIMESTAMP | infinity
+infop/tsNegInfMinusFinite	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+infop/tsInfAlone	*	agree	a:TIMESTAMP | infinity
+infop/dateInfPlusFinite	*	agree	a:TIMESTAMP | infinity
 infop/dateInfPlusNegInf	*	wrong-sqlstate	ERR 42601: syntax error at or near "AS"
 infop/dateFinitePlusInf	*	error	ERR 42601: syntax error at or near "AS"
 infop/ivInfMinusNegInf	*	error	ERR 42601: syntax error at or near "-"

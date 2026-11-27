@@ -82,6 +82,10 @@ infop/tsNegInfPlusInf	ERR 22008: timestamp out of range
 infop/tsNegInfMinusNegInf	ERR 22008: timestamp out of range
 infop/tsNegInfMinusInf	a:timestamp(1114) | -infinity
 infop/tsInfPlusFinite	a:timestamp(1114) | infinity
+infop/tsInfPlusPosFinite	a:timestamp(1114) | infinity
+infop/tsNegInfMinusFinite	a:timestamp(1114) | -infinity
+infop/tsInfAlone	a:timestamp(1114) | infinity
+infop/dateInfPlusFinite	a:timestamp(1114) | infinity
 infop/dateInfPlusNegInf	ERR 22008: timestamp out of range
 infop/dateFinitePlusInf	a:timestamp(1114) | infinity
 infop/ivInfMinusNegInf	a:interval(1186) | infinity

@@ -160,5 +160,6 @@ frame/infOffset	*	error	ERR 42601: syntax error at or near "INTERVAL"
 frame/infFollowing	*	error	ERR 42601: syntax error at or near "INTERVAL"
 frame/negInfOffset	*	wrong-sqlstate	ERR 42601: syntax error at or near "INTERVAL"
 frame/negOffset	*	wrong-sqlstate	ERR 42601: syntax error at or near "INTERVAL"
+frame/tsInfRowsShift	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 frame/intervalOrderDesc	*	error	ERR 42601: syntax error at or near "INTERVAL"
 frame/intervalOrderAsc	*	error	ERR 42601: syntax error at or near "INTERVAL"

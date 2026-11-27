@@ -129,5 +129,6 @@ frame/infOffset	E	refusal range-offset-frame	unmet
 frame/infFollowing	E	refusal range-offset-frame	unmet
 frame/negInfOffset	E	refusal range-offset-frame	unmet
 frame/negOffset	E	refusal range-offset-frame	unmet
+frame/tsInfRowsShift	E	supported	unmet
 frame/intervalOrderDesc	E	refusal range-offset-frame	unmet
 frame/intervalOrderAsc	E	refusal range-offset-frame	unmet
