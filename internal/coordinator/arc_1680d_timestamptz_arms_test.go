@@ -157,6 +157,15 @@ var tzCells = []tzCell{
 	{"lin/tstzText", "SELECT count(*) AS n FROM (SELECT CAST('2024-07-01 12:00:00+05:30' AS TEXT) AS s FROM " + tzRows + " WHERE id = 1) q WHERE TIMESTAMPTZ '2024-07-01 12:00:00+05:30' = s"},
 	{"ext/datePartTzTs", "SELECT date_part('timezone', TIMESTAMP '2024-07-01 12:00:00') AS v"},
 	{"ext/tzHourDate", "SELECT extract(timezone_hour FROM DATE '2024-07-01') AS v"},
+	// AT TIME ZONE / timezone() with a zone known only at run time (round 3,
+	// the review of round 1): a non-UTC zone answered NULL, where PostgreSQL
+	// answers the converted value; it is the named 0A000 refusal. A UTC zone
+	// and a NULL zone answer as before.
+	{"lin/atzDynNY", "SELECT count(*) AS n FROM (SELECT CASE WHEN id = 1 THEN 'America/New_York' ELSE 'UTC' END AS z FROM " + tzRows + " WHERE id = 1) s WHERE (TIMESTAMP '2024-07-01 12:00:00' AT TIME ZONE z) IS NOT NULL"},
+	{"lin/atzDynTstzNY", "SELECT count(*) AS n FROM (SELECT CASE WHEN id = 1 THEN 'America/New_York' ELSE 'UTC' END AS z FROM " + tzRows + " WHERE id = 1) s WHERE (TIMESTAMPTZ '2024-07-01 12:00:00+00' AT TIME ZONE z) IS NOT NULL"},
+	{"lin/atzDynFnNY", "SELECT count(*) AS n FROM (SELECT CASE WHEN id = 1 THEN 'America/New_York' ELSE 'UTC' END AS z FROM " + tzRows + " WHERE id = 1) s WHERE timezone(z, TIMESTAMP '2024-07-01 12:00:00') IS NOT NULL"},
+	{"lin/atzDynUTC", "SELECT count(*) AS n FROM (SELECT CASE WHEN id = 1 THEN 'America/New_York' ELSE 'UTC' END AS z FROM " + tzRows + " WHERE id = 2) s WHERE (TIMESTAMP '2024-07-01 12:00:00' AT TIME ZONE z) = TIMESTAMPTZ '2024-07-01 12:00:00+00'"},
+	{"lin/atzDynNull", "SELECT count(*) AS n FROM (SELECT CASE WHEN id = 1 THEN 'America/New_York' END AS z FROM " + tzRows + " WHERE id = 2) s WHERE (TIMESTAMP '2024-07-01 12:00:00' AT TIME ZONE z) IS NULL"},
 }
 
 var tzZones = []string{"UTC", "America/New_York", "Asia/Kolkata"}
@@ -366,10 +375,15 @@ var tzAllArms = []string{"single", "spilled512k", "dag", "dag-shuffled", "dag-mo
 // column it is refused, which the door test and the wadjet test pin (this
 // matrix's relations are derived, as PostgreSQL measures them).
 var tzKnown = map[string]string{
-	"ar/diff":            "ERR 0A000",
-	"ar/plusInterval":    "ERR 0A000",
-	"atz/tstzNY":         "ERR 0A000",
-	"atz/tsIST":          "ERR 0A000",
+	"ar/diff":         "ERR 0A000",
+	"ar/plusInterval": "ERR 0A000",
+	"atz/tstzNY":      "ERR 0A000",
+	"atz/tsIST":       "ERR 0A000",
+	// A non-UTC zone known only at run time: the named refusal `timezone`
+	// (round 3; it answered NULL, so these counted 0).
+	"lin/atzDynNY":       "ERR 0A000",
+	"lin/atzDynTstzNY":   "ERR 0A000",
+	"lin/atzDynFnNY":     "ERR 0A000",
 	"in/lit/withTZ":      "ERR 42601",
 	"in/lit/zoneName":    "ERR 22007",
 	"in/lit/zoneUTCName": "ERR 22007",

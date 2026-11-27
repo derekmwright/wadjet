@@ -33,9 +33,13 @@ import (
 // stored timestamp column, whose declaration no door records (round 1 left
 // the carried cells answering false, a regression from the base's true).
 // pgwire, the only door with a session,
-// refuses a SET TimeZone / SET TIME ZONE naming any zone but UTC on both arms
-// and both protocols, and the session keeps answering at UTC after it; the
-// embedded, HTTP and gRPC doors have no SET and refuse the statement. The
+// refuses a SET TimeZone / SET TIME ZONE naming a known zone other than UTC
+// on both arms and both protocols (0A000, identity `timezone`), answers an
+// unknown zone with PostgreSQL's 22023, and the session keeps answering at
+// UTC after it; the embedded, HTTP and gRPC doors have no SET: every SET is
+// 42601 `syntax error at or near "SET"` there (gRPC: code Internal). A
+// non-UTC AT TIME ZONE zone known only at run time is the named refusal on
+// every door. The
 // pgwire column of a timestamptz value is OID 1114 (timestamp) with no
 // offset printed — the documented "no timestamptz" divergence, pinned here
 // so a change to it is seen.
@@ -236,6 +240,10 @@ func TestTimestamptzOnEveryDoor(t *testing.T) {
 		{"SELECT count(*) AS n FROM (SELECT ts FROM tzs) q WHERE ts BETWEEN " + ofs + " AND '2024-07-02 00:00:00'", "0A000", ambiguous},
 		{"SELECT count(*) AS n FROM vld WHERE " + tz + " = sd", "42883", "operator does not exist: timestamp with time zone = text"},
 		{"SELECT date_part('timezone', TIMESTAMP '2024-07-01 12:00:00') AS n FROM vld WHERE id = 1", "0A000", `unit "timezone" not supported for type timestamp without time zone`},
+		// A non-UTC zone known only at run time: it answered NULL (PostgreSQL
+		// 17.11 under UTC answers 1 here); the named refusal `timezone`.
+		{"SELECT count(*) AS n FROM (SELECT CASE WHEN id = 1 THEN 'America/New_York' ELSE 'UTC' END AS z FROM vld WHERE id = 1) s " +
+			"WHERE (TIMESTAMP '2024-07-01 12:00:00' AT TIME ZONE z) IS NOT NULL", "0A000", `AT TIME ZONE "America/New_York" is not supported`},
 	} {
 		var got []string
 		_, err := db.Query(ctx, c.sql)
@@ -290,12 +298,29 @@ func TestTimestamptzOnEveryDoor(t *testing.T) {
 	// timestamptz value is timestamp (1114), printed with no offset.
 	probe := "SELECT TIMESTAMPTZ '2024-03-10 02:30:00' AS r"
 	for name, conn := range conns {
-		for _, set := range []string{"SET TimeZone = 'America/New_York'", "SET TIME ZONE 'Asia/Kolkata'"} {
-			if _, err := conn.Exec(ctx, set).ReadAll(); pgState(err) != "0A000" {
-				t.Errorf("%s/simple %s: %v, want 0A000", name, set, err)
+		routine := func(err error) string {
+			var pe *pgconn.PgError
+			if errors.As(err, &pe) {
+				return pe.Routine
 			}
-			if r := conn.ExecParams(ctx, set, nil, nil, nil, nil).Read(); pgState(r.Err) != "0A000" {
-				t.Errorf("%s/extended %s: %v, want 0A000", name, set, r.Err)
+			return ""
+		}
+		for _, set := range []string{"SET TimeZone = 'America/New_York'", "SET TIME ZONE 'Asia/Kolkata'"} {
+			if _, err := conn.Exec(ctx, set).ReadAll(); pgState(err) != "0A000" || routine(err) != "timezone" {
+				t.Errorf("%s/simple %s: %v, want 0A000 with identity timezone", name, set, err)
+			}
+			if r := conn.ExecParams(ctx, set, nil, nil, nil, nil).Read(); pgState(r.Err) != "0A000" || routine(r.Err) != "timezone" {
+				t.Errorf("%s/extended %s: %v, want 0A000 with identity timezone", name, set, r.Err)
+			}
+		}
+		// A zone PostgreSQL does not know is its own 22023, not the
+		// capability refusal (round 3).
+		for _, set := range []string{"SET TimeZone = 'Not/AZone'", "SET TIME ZONE 'Z'"} {
+			if _, err := conn.Exec(ctx, set).ReadAll(); pgState(err) != "22023" || !strings.Contains(fmt.Sprint(err), `invalid value for parameter "TimeZone"`) {
+				t.Errorf("%s/simple %s: %v, want 22023", name, set, err)
+			}
+			if r := conn.ExecParams(ctx, set, nil, nil, nil, nil).Read(); pgState(r.Err) != "22023" {
+				t.Errorf("%s/extended %s: %v, want 22023", name, set, r.Err)
 			}
 		}
 		if _, err := conn.Exec(ctx, "SET TimeZone = 'UTC'").ReadAll(); err != nil {
@@ -316,18 +341,27 @@ func TestTimestamptzOnEveryDoor(t *testing.T) {
 		}
 	}
 	// No other door has a session: SET is not a statement there.
-	set := "SET TimeZone = 'America/New_York'"
-	if _, err := db.Query(ctx, set); err == nil {
-		t.Errorf("embedded: %s accepted", set)
-	}
-	for name, base := range map[string]string{"http/local": local.URL, "http/distributed": dist.URL} {
-		if _, e, _ := post(base, set); e == "" {
-			t.Errorf("%s: %s accepted", name, set)
+	// Exactly what they return (measured, round 3): every SET — a non-UTC
+	// zone, UTC itself, an unknown zone and an unrelated variable alike — is
+	// 42601 `syntax error at or near "SET"` on the embedded and HTTP doors,
+	// and gRPC code Internal `query error: syntax error at or near "SET"`.
+	// The named 0A000 refusal (identity `timezone`) and the 22023 are
+	// pgwire's alone; on these doors no session zone can be set at all.
+	const noSet = `syntax error at or near "SET"`
+	for _, set := range []string{"SET TimeZone = 'America/New_York'", "SET TimeZone = 'UTC'", "SET TimeZone = 'Not/AZone'", "SET search_path = public"} {
+		if _, err := db.Query(ctx, set); sqlerr.StateOf(err) != "42601" || fmt.Sprint(err) != noSet {
+			t.Errorf("embedded %s: %q %v, want 42601 %s", set, sqlerr.StateOf(err), err, noSet)
 		}
-	}
-	for name, g := range map[string]*GRPCServer{"grpc/embedded": gEmbedded, "grpc/distributed": gDist} {
-		if _, err := g.Query(ctx, &wadjetv1.QueryRequest{Sql: set}); err == nil {
-			t.Errorf("%s: %s accepted", name, set)
+		for name, base := range map[string]string{"http/local": local.URL, "http/distributed": dist.URL} {
+			if _, e, st := post(base, set); st != "42601" || e != noSet {
+				t.Errorf("%s %s: %q %q, want 42601 %s", name, set, st, e, noSet)
+			}
+		}
+		for name, g := range map[string]*GRPCServer{"grpc/embedded": gEmbedded, "grpc/distributed": gDist} {
+			_, err := g.Query(ctx, &wadjetv1.QueryRequest{Sql: set})
+			if want := "rpc error: code = Internal desc = query error: " + noSet; fmt.Sprint(err) != want {
+				t.Errorf("%s %s: %v, want %s", name, set, err, want)
+			}
 		}
 	}
 }
