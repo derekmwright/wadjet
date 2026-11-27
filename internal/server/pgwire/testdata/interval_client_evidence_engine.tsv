@@ -26,8 +26,8 @@ publishParam/describe	params=[1186] fields=[]
 publishParam/execute	ERR 0A000
 publishParamText/describe	params=[1186] fields=[a:oid=25:typmod=-1:len=-1:fmt=0]
 publishParamText/execute	ERR 0A000
-typmod/describe	params=[] fields=[]
-typmod/describeDay	params=[] fields=[]
+typmod/describe	ERR 0A000
+typmod/describeDay	ERR 0A000
 intervalstyle/set	ERR 0A000
 intervalstyle/show	fields=[IntervalStyle:oid=25:typmod=-1:len=-1:fmt=0] rows=[postgres]
 intervalstyle/text	fields=[t:oid=25:typmod=-1:len=-1:fmt=0] rows=[1 day]
