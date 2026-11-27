@@ -127,8 +127,10 @@ func TestTimestampDifferenceOnTheWriteDoors(t *testing.T) {
 	const diff = "TIMESTAMP '2024-01-02 00:00:00' - TIMESTAMP '2024-01-01 00:00:00'"
 	const sentence = "a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as"
 	for _, tc := range []struct{ sql, state, reason string }{
-		{"INSERT INTO tdw (id, s) SELECT 2, ts2 - ts FROM tdw", "0A000", sentence + " a query result column"},
-		{"INSERT INTO tdw (id, n) SELECT 3, ts2 - ts FROM tdw", "0A000", sentence + " a query result column"},
+		// #1680c: a write door whose source is a query reports the source's
+		// interval result column as the written value it would be.
+		{"INSERT INTO tdw (id, s) SELECT 2, ts2 - ts FROM tdw", "0A000", sentence + " a written value"},
+		{"INSERT INTO tdw (id, n) SELECT 3, ts2 - ts FROM tdw", "0A000", sentence + " a written value"},
 		{"INSERT INTO tdw (id, n) VALUES (4, " + diff + ")", "42804", `column "n" is of type bigint but expression is of type interval`},
 		{"INSERT INTO tdw (id, s) VALUES (5, " + diff + ")", "0A000", sentence + " a written value"},
 		{"UPDATE tdw SET n = ts2 - ts", "42804", `column "n" is of type bigint but expression is of type interval`},
@@ -137,19 +139,19 @@ func TestTimestampDifferenceOnTheWriteDoors(t *testing.T) {
 		{"UPDATE tdw SET n = 1 WHERE ts2 - ts > 1000", "42883", "operator does not exist: interval > integer"},
 		{"DELETE FROM tdw WHERE ts2 - ts > INTERVAL '1 hour'", "0A000", sentence + " an operand of a comparison (>)"},
 		{"MERGE INTO tdw t USING tdw src ON t.id = src.id WHEN MATCHED THEN UPDATE SET s = src.ts2 - src.ts", "0A000", sentence + " a written value"},
-		{"CREATE TABLE tdc1 AS SELECT ts2 - ts AS d FROM tdw", "0A000", sentence + " a query result column"},
-		{"CREATE TABLE tdc2 AS SELECT ts2 - ts AS d FROM tdw WITH NO DATA", "0A000", sentence + " a query result column"},
+		{"CREATE TABLE tdc1 AS SELECT ts2 - ts AS d FROM tdw", "0A000", sentence + " a written value"},
+		{"CREATE TABLE tdc2 AS SELECT ts2 - ts AS d FROM tdw WITH NO DATA", "0A000", sentence + " a written value"},
 		// Round 7: the difference of an aggregate, a window function or a
 		// scalar subquery result (each answered its millisecond number
 		// through round 6: `SELECT max(ts2) - min(ts)` was 9.72e+07).
-		{"INSERT INTO tdw (id, s) SELECT 6, max(ts2) - min(ts) FROM tdw", "0A000", sentence + " a query result column"},
+		{"INSERT INTO tdw (id, s) SELECT 6, max(ts2) - min(ts) FROM tdw", "0A000", sentence + " a written value"},
 		{"INSERT INTO tdw (id, s) SELECT 7, CAST(max(ts2) - min(ts) AS TEXT) FROM tdw", "0A000", sentence + " the operand of a cast to text"},
 		{"INSERT INTO tdw (id, s) SELECT id + 10, CAST(ts2 - lag(ts2) OVER (ORDER BY id) AS TEXT) FROM tdw", "0A000", sentence + " the operand of a cast to text"},
 		{"INSERT INTO tdw (id, s) SELECT id + 20, CAST((SELECT max(ts2) FROM tdw) - ts AS TEXT) FROM tdw", "0A000", sentence + " the operand of a cast to text"},
 		{"MERGE INTO tdw t USING tdw src ON t.id = src.id WHEN MATCHED THEN UPDATE SET s = (SELECT max(ts2) FROM tdw) - src.ts", "0A000", sentence + " a written value"},
-		{"CREATE TABLE tdc3 AS SELECT max(ts2) - min(ts) AS d FROM tdw", "0A000", sentence + " a query result column"},
-		{"CREATE TABLE tdc4 AS SELECT id, ts2 - lag(ts2) OVER (ORDER BY id) AS d FROM tdw WITH NO DATA", "0A000", sentence + " a query result column"},
-		{"CREATE TABLE tdc5 AS SELECT id, (SELECT max(ts2) FROM tdw) - ts AS d FROM tdw", "0A000", sentence + " a query result column"},
+		{"CREATE TABLE tdc3 AS SELECT max(ts2) - min(ts) AS d FROM tdw", "0A000", sentence + " a written value"},
+		{"CREATE TABLE tdc4 AS SELECT id, ts2 - lag(ts2) OVER (ORDER BY id) AS d FROM tdw WITH NO DATA", "0A000", sentence + " a written value"},
+		{"CREATE TABLE tdc5 AS SELECT id, (SELECT max(ts2) FROM tdw) - ts AS d FROM tdw", "0A000", sentence + " a written value"},
 		// Round 8 (the round-7 review's write doors): a scalar subquery
 		// operand on the MERGE SET, DML WHERE and MERGE WHEN routes. Each
 		// stored or acted on the millisecond number at b0a3e59d and at
