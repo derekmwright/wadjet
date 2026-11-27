@@ -1,0 +1,264 @@
+# #1678k: pinned (cell, arm) answers that are not PostgreSQL 17.11's; see ekPinsPath in arc_1678k_derived_scope_arms_test.go.
+# cell<TAB>arm<TAB>answer<TAB>reason (dag-respell | dag-nocollision | dag-0A000 | async-nostage).
+filed/1	dag	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+filed/1	dag-shuffled	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+filed/1	dag-morsel4	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+filed/1	dag-skew	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+filed/2	dag	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+filed/2	dag-shuffled	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+filed/2	dag-morsel4	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+filed/2	dag-skew	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+filed/3	dag	ERR 0A000	dag-0A000
+filed/3	dag-shuffled	ERR 0A000	dag-0A000
+filed/3	dag-morsel4	ERR 0A000	dag-0A000
+filed/3	dag-skew	ERR 0A000	dag-0A000
+kind/aa/onExpr	dag	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+kind/aa/onExpr	dag-shuffled	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+kind/aa/onExpr	dag-morsel4	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+kind/aa/onExpr	dag-skew	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+kind/aa/aggAbove	dag	rows=1 24,60,84	dag-respell
+kind/aa/aggAbove	dag-shuffled	rows=1 24,60,84	dag-respell
+kind/aa/aggAbove	dag-morsel4	rows=1 24,60,84	dag-respell
+kind/aa/aggAbove	dag-skew	rows=1 24,60,84	dag-respell
+kind/aa/bareOuter	dag	ERR 0A000	dag-0A000
+kind/aa/bareOuter	dag-shuffled	ERR 0A000	dag-0A000
+kind/aa/bareOuter	dag-morsel4	ERR 0A000	dag-0A000
+kind/aa/bareOuter	dag-skew	ERR 0A000	dag-0A000
+kind/at/onExpr	dag	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+kind/at/onExpr	dag-shuffled	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+kind/at/onExpr	dag-morsel4	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+kind/at/onExpr	dag-skew	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+kind/at/aggAbove	dag	rows=1 24,60,84	dag-respell
+kind/at/aggAbove	dag-shuffled	rows=1 24,60,84	dag-respell
+kind/at/aggAbove	dag-morsel4	rows=1 24,60,84	dag-respell
+kind/at/aggAbove	dag-skew	rows=1 24,60,84	dag-respell
+kind/at/bareOuter	dag	ERR 0A000	dag-0A000
+kind/at/bareOuter	dag-shuffled	ERR 0A000	dag-0A000
+kind/at/bareOuter	dag-morsel4	ERR 0A000	dag-0A000
+kind/at/bareOuter	dag-skew	ERR 0A000	dag-0A000
+kind/tt/onExpr	dag	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+kind/tt/onExpr	dag-shuffled	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+kind/tt/onExpr	dag-morsel4	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+kind/tt/onExpr	dag-skew	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+kind/tt/aggAbove	dag	rows=1 20,50,60	dag-respell
+kind/tt/aggAbove	dag-shuffled	rows=1 20,50,60	dag-respell
+kind/tt/aggAbove	dag-morsel4	rows=1 20,50,60	dag-respell
+kind/tt/aggAbove	dag-skew	rows=1 20,50,60	dag-respell
+kind/tt/bareOuter	dag	ERR 0A000	dag-0A000
+kind/tt/bareOuter	dag-shuffled	ERR 0A000	dag-0A000
+kind/tt/bareOuter	dag-morsel4	ERR 0A000	dag-0A000
+kind/tt/bareOuter	dag-skew	ERR 0A000	dag-0A000
+kind/ad/bareOuter	dag	ERR 0A000	dag-0A000
+kind/ad/bareOuter	dag-shuffled	ERR 0A000	dag-0A000
+kind/ad/bareOuter	dag-morsel4	ERR 0A000	dag-0A000
+kind/ad/bareOuter	dag-skew	ERR 0A000	dag-0A000
+kind/ta/bareOuter	dag	ERR 0A000	dag-0A000
+kind/ta/bareOuter	dag-shuffled	ERR 0A000	dag-0A000
+kind/ta/bareOuter	dag-morsel4	ERR 0A000	dag-0A000
+kind/ta/bareOuter	dag-skew	ERR 0A000	dag-0A000
+kind/none/bareOuter	dag	ERR 0A000	dag-0A000
+kind/none/bareOuter	dag-shuffled	ERR 0A000	dag-0A000
+kind/none/bareOuter	dag-morsel4	ERR 0A000	dag-0A000
+kind/none/bareOuter	dag-skew	ERR 0A000	dag-0A000
+pos/aa/where/onExpr	dag	rows=15 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+pos/aa/where/onExpr	dag-shuffled	rows=15 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+pos/aa/where/onExpr	dag-morsel4	rows=15 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+pos/aa/where/onExpr	dag-skew	rows=15 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+pos/aa/groupBy/onExpr	async	ERR 	async-nostage
+pos/aa/groupBy/onExpr	async-probesplit	ERR 	async-nostage
+pos/aa/groupBy/whereAbove	async	ERR 	async-nostage
+pos/aa/groupBy/whereAbove	async-probesplit	ERR 	async-nostage
+pos/aa/innerJoin/onExpr	dag	rows=16 1,1 | 1,2 | 1,4 | 1,5 | 2,1 | 2,2 | 2,4 | 2,5 | 3,1 | 3,2 | 3,4 | 3,5 | 4,1 | 4,2 | 4,4 | 4,5	dag-respell
+pos/aa/innerJoin/onExpr	dag-shuffled	rows=16 1,1 | 1,2 | 1,4 | 1,5 | 2,1 | 2,2 | 2,4 | 2,5 | 3,1 | 3,2 | 3,4 | 3,5 | 4,1 | 4,2 | 4,4 | 4,5	dag-respell
+pos/aa/innerJoin/onExpr	dag-morsel4	rows=16 1,1 | 1,2 | 1,4 | 1,5 | 2,1 | 2,2 | 2,4 | 2,5 | 3,1 | 3,2 | 3,4 | 3,5 | 4,1 | 4,2 | 4,4 | 4,5	dag-respell
+pos/aa/innerJoin/onExpr	dag-skew	rows=16 1,1 | 1,2 | 1,4 | 1,5 | 2,1 | 2,2 | 2,4 | 2,5 | 3,1 | 3,2 | 3,4 | 3,5 | 4,1 | 4,2 | 4,4 | 4,5	dag-respell
+pos/aa/orderLimit/onExpr	dag	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+pos/aa/orderLimit/onExpr	dag-shuffled	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+pos/aa/orderLimit/onExpr	dag-morsel4	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+pos/aa/orderLimit/onExpr	dag-skew	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+pos/tt/where/onExpr	dag	rows=12 1,2 | 1,3 | 1,5 | 2,2 | 2,3 | 2,5 | 3,2 | 3,3 | 3,5 | 4,2 | 4,3 | 4,5	dag-respell
+pos/tt/where/onExpr	dag-shuffled	rows=12 1,2 | 1,3 | 1,5 | 2,2 | 2,3 | 2,5 | 3,2 | 3,3 | 3,5 | 4,2 | 4,3 | 4,5	dag-respell
+pos/tt/where/onExpr	dag-morsel4	rows=12 1,2 | 1,3 | 1,5 | 2,2 | 2,3 | 2,5 | 3,2 | 3,3 | 3,5 | 4,2 | 4,3 | 4,5	dag-respell
+pos/tt/where/onExpr	dag-skew	rows=12 1,2 | 1,3 | 1,5 | 2,2 | 2,3 | 2,5 | 3,2 | 3,3 | 3,5 | 4,2 | 4,3 | 4,5	dag-respell
+pos/tt/groupBy/onExpr	async	ERR 	async-nostage
+pos/tt/groupBy/onExpr	async-probesplit	ERR 	async-nostage
+pos/tt/groupBy/whereAbove	async	ERR 	async-nostage
+pos/tt/groupBy/whereAbove	async-probesplit	ERR 	async-nostage
+pos/tt/innerJoin/onExpr	dag	rows=16 1,1 | 1,2 | 1,4 | 1,5 | 2,1 | 2,2 | 2,4 | 2,5 | 3,1 | 3,2 | 3,4 | 3,5 | 4,1 | 4,2 | 4,4 | 4,5	dag-respell
+pos/tt/innerJoin/onExpr	dag-shuffled	rows=16 1,1 | 1,2 | 1,4 | 1,5 | 2,1 | 2,2 | 2,4 | 2,5 | 3,1 | 3,2 | 3,4 | 3,5 | 4,1 | 4,2 | 4,4 | 4,5	dag-respell
+pos/tt/innerJoin/onExpr	dag-morsel4	rows=16 1,1 | 1,2 | 1,4 | 1,5 | 2,1 | 2,2 | 2,4 | 2,5 | 3,1 | 3,2 | 3,4 | 3,5 | 4,1 | 4,2 | 4,4 | 4,5	dag-respell
+pos/tt/innerJoin/onExpr	dag-skew	rows=16 1,1 | 1,2 | 1,4 | 1,5 | 2,1 | 2,2 | 2,4 | 2,5 | 3,1 | 3,2 | 3,4 | 3,5 | 4,1 | 4,2 | 4,4 | 4,5	dag-respell
+pos/tt/orderLimit/onExpr	dag	rows=16 1,1 | 1,2 | 1,3 | 1,4 | 2,1 | 2,2 | 2,3 | 2,4 | 3,1 | 3,2 | 3,3 | 3,4 | 4,1 | 4,2 | 4,3 | 4,4	dag-respell
+pos/tt/orderLimit/onExpr	dag-shuffled	rows=16 1,1 | 1,2 | 1,3 | 1,4 | 2,1 | 2,2 | 2,3 | 2,4 | 3,1 | 3,2 | 3,3 | 3,4 | 4,1 | 4,2 | 4,3 | 4,4	dag-respell
+pos/tt/orderLimit/onExpr	dag-morsel4	rows=16 1,1 | 1,2 | 1,3 | 1,4 | 2,1 | 2,2 | 2,3 | 2,4 | 3,1 | 3,2 | 3,3 | 3,4 | 4,1 | 4,2 | 4,3 | 4,4	dag-respell
+pos/tt/orderLimit/onExpr	dag-skew	rows=16 1,1 | 1,2 | 1,3 | 1,4 | 2,1 | 2,2 | 2,3 | 2,4 | 3,1 | 3,2 | 3,3 | 3,4 | 4,1 | 4,2 | 4,3 | 4,4	dag-respell
+pos/none/where/onExpr	dag	rows=3 1,1 | 3,3 | 4,4	dag-nocollision
+pos/none/where/onExpr	dag-shuffled	rows=3 1,1 | 3,3 | 4,4	dag-nocollision
+pos/none/where/onExpr	dag-morsel4	rows=3 1,1 | 3,3 | 4,4	dag-nocollision
+pos/none/where/onExpr	dag-skew	rows=3 1,1 | 3,3 | 4,4	dag-nocollision
+pos/none/groupBy/onExpr	async	ERR 	async-nostage
+pos/none/groupBy/onExpr	async-probesplit	ERR 	async-nostage
+pos/none/groupBy/whereAbove	async	ERR 	async-nostage
+pos/none/groupBy/whereAbove	async-probesplit	ERR 	async-nostage
+pos/none/orderLimit/onExpr	dag	rows=4 1,1 | 2,2 | 3,3 | 4,4	dag-nocollision
+pos/none/orderLimit/onExpr	dag-shuffled	rows=4 1,1 | 2,2 | 3,3 | 4,4	dag-nocollision
+pos/none/orderLimit/onExpr	dag-morsel4	rows=4 1,1 | 2,2 | 3,3 | 4,4	dag-nocollision
+pos/none/orderLimit/onExpr	dag-skew	rows=4 1,1 | 2,2 | 3,3 | 4,4	dag-nocollision
+box/aa/cteOnce	dag	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+box/aa/cteOnce	dag-shuffled	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+box/aa/cteOnce	dag-morsel4	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+box/aa/cteOnce	dag-skew	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+box/aa/cteTwice	dag	rows=24 1,1,1 | 1,2,2 | 1,3,3 | 1,4,4 | 1,5,5 | 1,6,6 | 2,1,1 | 2,2,2 | 2,3,3 | 2,4,4 | 2,5,5 | 2,6,6 | 3,1,1 | 3,2,2 | 3,3,3 | 3,4,4 | 3,5,5 | 3,6,6 | 4,1,1 | 4,2,2 | 4,3,3 | 4,4,4 | 4,5,5 | 4,6,6	dag-respell
+box/aa/cteTwice	dag-shuffled	rows=24 1,1,1 | 1,2,2 | 1,3,3 | 1,4,4 | 1,5,5 | 1,6,6 | 2,1,1 | 2,2,2 | 2,3,3 | 2,4,4 | 2,5,5 | 2,6,6 | 3,1,1 | 3,2,2 | 3,3,3 | 3,4,4 | 3,5,5 | 3,6,6 | 4,1,1 | 4,2,2 | 4,3,3 | 4,4,4 | 4,5,5 | 4,6,6	dag-respell
+box/aa/cteTwice	dag-morsel4	rows=24 1,1,1 | 1,2,2 | 1,3,3 | 1,4,4 | 1,5,5 | 1,6,6 | 2,1,1 | 2,2,2 | 2,3,3 | 2,4,4 | 2,5,5 | 2,6,6 | 3,1,1 | 3,2,2 | 3,3,3 | 3,4,4 | 3,5,5 | 3,6,6 | 4,1,1 | 4,2,2 | 4,3,3 | 4,4,4 | 4,5,5 | 4,6,6	dag-respell
+box/aa/cteTwice	dag-skew	rows=24 1,1,1 | 1,2,2 | 1,3,3 | 1,4,4 | 1,5,5 | 1,6,6 | 2,1,1 | 2,2,2 | 2,3,3 | 2,4,4 | 2,5,5 | 2,6,6 | 3,1,1 | 3,2,2 | 3,3,3 | 3,4,4 | 3,5,5 | 3,6,6 | 4,1,1 | 4,2,2 | 4,3,3 | 4,4,4 | 4,5,5 | 4,6,6	dag-respell
+box/aa/nested2	dag	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+box/aa/nested2	dag-shuffled	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+box/aa/nested2	dag-morsel4	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+box/aa/nested2	dag-skew	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+box/aa/nested2Inner	dag	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+box/aa/nested2Inner	dag-shuffled	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+box/aa/nested2Inner	dag-morsel4	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+box/aa/nested2Inner	dag-skew	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-respell
+box/tt/cteOnce	dag	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+box/tt/cteOnce	dag-shuffled	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+box/tt/cteOnce	dag-morsel4	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+box/tt/cteOnce	dag-skew	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+box/tt/cteTwice	dag	rows=20 1,1,1 | 1,2,2 | 1,3,3 | 1,4,4 | 1,5,5 | 2,1,1 | 2,2,2 | 2,3,3 | 2,4,4 | 2,5,5 | 3,1,1 | 3,2,2 | 3,3,3 | 3,4,4 | 3,5,5 | 4,1,1 | 4,2,2 | 4,3,3 | 4,4,4 | 4,5,5	dag-respell
+box/tt/cteTwice	dag-shuffled	rows=20 1,1,1 | 1,2,2 | 1,3,3 | 1,4,4 | 1,5,5 | 2,1,1 | 2,2,2 | 2,3,3 | 2,4,4 | 2,5,5 | 3,1,1 | 3,2,2 | 3,3,3 | 3,4,4 | 3,5,5 | 4,1,1 | 4,2,2 | 4,3,3 | 4,4,4 | 4,5,5	dag-respell
+box/tt/cteTwice	dag-morsel4	rows=20 1,1,1 | 1,2,2 | 1,3,3 | 1,4,4 | 1,5,5 | 2,1,1 | 2,2,2 | 2,3,3 | 2,4,4 | 2,5,5 | 3,1,1 | 3,2,2 | 3,3,3 | 3,4,4 | 3,5,5 | 4,1,1 | 4,2,2 | 4,3,3 | 4,4,4 | 4,5,5	dag-respell
+box/tt/cteTwice	dag-skew	rows=20 1,1,1 | 1,2,2 | 1,3,3 | 1,4,4 | 1,5,5 | 2,1,1 | 2,2,2 | 2,3,3 | 2,4,4 | 2,5,5 | 3,1,1 | 3,2,2 | 3,3,3 | 3,4,4 | 3,5,5 | 4,1,1 | 4,2,2 | 4,3,3 | 4,4,4 | 4,5,5	dag-respell
+box/tt/nested2	dag	rows=20 1,1 | 1,1 | 1,1 | 1,1 | 1,1 | 2,2 | 2,2 | 2,2 | 2,2 | 2,2 | 3,3 | 3,3 | 3,3 | 3,3 | 3,3 | 4,4 | 4,4 | 4,4 | 4,4 | 4,4	dag-respell
+box/tt/nested2	dag-shuffled	rows=20 1,1 | 1,1 | 1,1 | 1,1 | 1,1 | 2,2 | 2,2 | 2,2 | 2,2 | 2,2 | 3,3 | 3,3 | 3,3 | 3,3 | 3,3 | 4,4 | 4,4 | 4,4 | 4,4 | 4,4	dag-respell
+box/tt/nested2	dag-morsel4	rows=20 1,1 | 1,1 | 1,1 | 1,1 | 1,1 | 2,2 | 2,2 | 2,2 | 2,2 | 2,2 | 3,3 | 3,3 | 3,3 | 3,3 | 3,3 | 4,4 | 4,4 | 4,4 | 4,4 | 4,4	dag-respell
+box/tt/nested2	dag-skew	rows=20 1,1 | 1,1 | 1,1 | 1,1 | 1,1 | 2,2 | 2,2 | 2,2 | 2,2 | 2,2 | 3,3 | 3,3 | 3,3 | 3,3 | 3,3 | 4,4 | 4,4 | 4,4 | 4,4 | 4,4	dag-respell
+box/tt/nested2Inner	dag	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+box/tt/nested2Inner	dag-shuffled	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+box/tt/nested2Inner	dag-morsel4	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+box/tt/nested2Inner	dag-skew	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+box/none/cteOnce	dag	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-nocollision
+box/none/cteOnce	dag-shuffled	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-nocollision
+box/none/cteOnce	dag-morsel4	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-nocollision
+box/none/cteOnce	dag-skew	rows=24 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 4,6	dag-nocollision
+box/none/cteTwice	dag	rows=24 1,1,1 | 1,2,2 | 1,3,3 | 1,4,4 | 1,5,5 | 1,6,6 | 2,1,1 | 2,2,2 | 2,3,3 | 2,4,4 | 2,5,5 | 2,6,6 | 3,1,1 | 3,2,2 | 3,3,3 | 3,4,4 | 3,5,5 | 3,6,6 | 4,1,1 | 4,2,2 | 4,3,3 | 4,4,4 | 4,5,5 | 4,6,6	dag-nocollision
+box/none/cteTwice	dag-shuffled	rows=24 1,1,1 | 1,2,2 | 1,3,3 | 1,4,4 | 1,5,5 | 1,6,6 | 2,1,1 | 2,2,2 | 2,3,3 | 2,4,4 | 2,5,5 | 2,6,6 | 3,1,1 | 3,2,2 | 3,3,3 | 3,4,4 | 3,5,5 | 3,6,6 | 4,1,1 | 4,2,2 | 4,3,3 | 4,4,4 | 4,5,5 | 4,6,6	dag-nocollision
+box/none/cteTwice	dag-morsel4	rows=24 1,1,1 | 1,2,2 | 1,3,3 | 1,4,4 | 1,5,5 | 1,6,6 | 2,1,1 | 2,2,2 | 2,3,3 | 2,4,4 | 2,5,5 | 2,6,6 | 3,1,1 | 3,2,2 | 3,3,3 | 3,4,4 | 3,5,5 | 3,6,6 | 4,1,1 | 4,2,2 | 4,3,3 | 4,4,4 | 4,5,5 | 4,6,6	dag-nocollision
+box/none/cteTwice	dag-skew	rows=24 1,1,1 | 1,2,2 | 1,3,3 | 1,4,4 | 1,5,5 | 1,6,6 | 2,1,1 | 2,2,2 | 2,3,3 | 2,4,4 | 2,5,5 | 2,6,6 | 3,1,1 | 3,2,2 | 3,3,3 | 3,4,4 | 3,5,5 | 3,6,6 | 4,1,1 | 4,2,2 | 4,3,3 | 4,4,4 | 4,5,5 | 4,6,6	dag-nocollision
+box/none/scalar	async	ERR 	async-nostage
+box/none/scalar	async-probesplit	ERR 	async-nostage
+box/none/exists	async	ERR 	async-nostage
+box/none/exists	async-probesplit	ERR 	async-nostage
+box/corr/exists	async	ERR 	async-nostage
+box/corr/exists	async-probesplit	ERR 	async-nostage
+box/corr/notExists	async	ERR 	async-nostage
+box/corr/notExists	async-probesplit	ERR 	async-nostage
+box/corr/scalar	async	ERR 	async-nostage
+box/corr/scalar	async-probesplit	ERR 	async-nostage
+jk/aa/left	dag	rows=25 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 5,1 | 5,2 | 5,3 | 5,4 | 5,5	dag-nocollision
+jk/aa/left	dag-shuffled	rows=25 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 5,1 | 5,2 | 5,3 | 5,4 | 5,5	dag-nocollision
+jk/aa/left	dag-morsel4	rows=25 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 5,1 | 5,2 | 5,3 | 5,4 | 5,5	dag-nocollision
+jk/aa/left	dag-skew	rows=25 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 5,1 | 5,2 | 5,3 | 5,4 | 5,5	dag-nocollision
+jk/aa/leftMixed	dag	rows=5 1,1 | 3,3 | 4,4 | NULL,2 | NULL,5	dag-respell
+jk/aa/leftMixed	dag-shuffled	rows=5 1,1 | 3,3 | 4,4 | NULL,2 | NULL,5	dag-respell
+jk/aa/leftMixed	dag-morsel4	rows=5 1,1 | 3,3 | 4,4 | NULL,2 | NULL,5	dag-respell
+jk/aa/leftMixed	dag-skew	rows=5 1,1 | 3,3 | 4,4 | NULL,2 | NULL,5	dag-respell
+jk/aa/right	dag	rows=26 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 5,1 | 5,2 | 5,3 | 5,4 | 5,5 | 6,NULL	dag-nocollision
+jk/aa/right	dag-shuffled	rows=26 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 5,1 | 5,2 | 5,3 | 5,4 | 5,5 | 6,NULL	dag-nocollision
+jk/aa/right	dag-morsel4	rows=26 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 5,1 | 5,2 | 5,3 | 5,4 | 5,5 | 6,NULL	dag-nocollision
+jk/aa/right	dag-skew	rows=26 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 5,1 | 5,2 | 5,3 | 5,4 | 5,5 | 6,NULL	dag-nocollision
+jk/aa/rightMixed	dag	rows=6 1,NULL | 2,2 | 3,3 | 4,NULL | 5,5 | 6,NULL	dag-nocollision
+jk/aa/rightMixed	dag-shuffled	rows=6 1,NULL | 2,2 | 3,3 | 4,NULL | 5,5 | 6,NULL	dag-nocollision
+jk/aa/rightMixed	dag-morsel4	rows=6 1,NULL | 2,2 | 3,3 | 4,NULL | 5,5 | 6,NULL	dag-nocollision
+jk/aa/rightMixed	dag-skew	rows=6 1,NULL | 2,2 | 3,3 | 4,NULL | 5,5 | 6,NULL	dag-nocollision
+jk/aa/full	dag	rows=26 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 5,1 | 5,2 | 5,3 | 5,4 | 5,5 | 6,NULL	dag-nocollision
+jk/aa/full	dag-shuffled	rows=26 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 5,1 | 5,2 | 5,3 | 5,4 | 5,5 | 6,NULL	dag-nocollision
+jk/aa/full	dag-morsel4	rows=26 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 5,1 | 5,2 | 5,3 | 5,4 | 5,5 | 6,NULL	dag-nocollision
+jk/aa/full	dag-skew	rows=26 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 5,1 | 5,2 | 5,3 | 5,4 | 5,5 | 6,NULL	dag-nocollision
+jk/aa/fullMixed	dag	rows=8 1,1 | 2,NULL | 3,3 | 4,4 | 5,NULL | 6,NULL | NULL,2 | NULL,5	dag-nocollision
+jk/aa/fullMixed	dag-shuffled	rows=8 1,1 | 2,NULL | 3,3 | 4,4 | 5,NULL | 6,NULL | NULL,2 | NULL,5	dag-nocollision
+jk/aa/fullMixed	dag-morsel4	rows=8 1,1 | 2,NULL | 3,3 | 4,4 | 5,NULL | 6,NULL | NULL,2 | NULL,5	dag-nocollision
+jk/aa/fullMixed	dag-skew	rows=8 1,1 | 2,NULL | 3,3 | 4,4 | 5,NULL | 6,NULL | NULL,2 | NULL,5	dag-nocollision
+jk/aa/crossWhere	dag	rows=25 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 5,1 | 5,2 | 5,3 | 5,4 | 5,5	dag-respell
+jk/aa/crossWhere	dag-shuffled	rows=25 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 5,1 | 5,2 | 5,3 | 5,4 | 5,5	dag-respell
+jk/aa/crossWhere	dag-morsel4	rows=25 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 5,1 | 5,2 | 5,3 | 5,4 | 5,5	dag-respell
+jk/aa/crossWhere	dag-skew	rows=25 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5 | 5,1 | 5,2 | 5,3 | 5,4 | 5,5	dag-respell
+jk/aa/comma	dag	rows=12 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6	dag-respell
+jk/aa/comma	dag-shuffled	rows=12 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6	dag-respell
+jk/aa/comma	dag-morsel4	rows=12 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6	dag-respell
+jk/aa/comma	dag-skew	rows=12 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6	dag-respell
+jk/tt/crossWhere	dag	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+jk/tt/crossWhere	dag-shuffled	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+jk/tt/crossWhere	dag-morsel4	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+jk/tt/crossWhere	dag-skew	rows=20 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 4,1 | 4,2 | 4,3 | 4,4 | 4,5	dag-respell
+jk/tt/comma	dag	rows=10 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5	dag-respell
+jk/tt/comma	dag-shuffled	rows=10 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5	dag-respell
+jk/tt/comma	dag-morsel4	rows=10 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5	dag-respell
+jk/tt/comma	dag-skew	rows=10 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5	dag-respell
+jk/none/left	dag	rows=6 1,1 | 2,2 | 2,2 | 3,3 | 4,4 | 5,5	dag-nocollision
+jk/none/left	dag-shuffled	rows=6 1,1 | 2,2 | 2,2 | 3,3 | 4,4 | 5,5	dag-nocollision
+jk/none/left	dag-morsel4	rows=6 1,1 | 2,2 | 2,2 | 3,3 | 4,4 | 5,5	dag-nocollision
+jk/none/left	dag-skew	rows=6 1,1 | 2,2 | 2,2 | 3,3 | 4,4 | 5,5	dag-nocollision
+jk/none/leftMixed	dag	rows=5 1,1 | 2,2 | 3,3 | 4,4 | 5,5	dag-nocollision
+jk/none/leftMixed	dag-shuffled	rows=5 1,1 | 2,2 | 3,3 | 4,4 | 5,5	dag-nocollision
+jk/none/leftMixed	dag-morsel4	rows=5 1,1 | 2,2 | 3,3 | 4,4 | 5,5	dag-nocollision
+jk/none/leftMixed	dag-skew	rows=5 1,1 | 2,2 | 3,3 | 4,4 | 5,5	dag-nocollision
+jk/none/right	dag	rows=7 1,1 | 2,2 | 2,2 | 3,3 | 4,4 | NULL,NULL | NULL,NULL	dag-nocollision
+jk/none/right	dag-shuffled	rows=7 1,1 | 2,2 | 2,2 | 3,3 | 4,4 | NULL,NULL | NULL,NULL	dag-nocollision
+jk/none/right	dag-morsel4	rows=7 1,1 | 2,2 | 2,2 | 3,3 | 4,4 | NULL,NULL | NULL,NULL	dag-nocollision
+jk/none/right	dag-skew	rows=7 1,1 | 2,2 | 2,2 | 3,3 | 4,4 | NULL,NULL | NULL,NULL	dag-nocollision
+jk/none/rightMixed	dag	rows=6 2,2 | 3,3 | 5,5 | NULL,NULL | NULL,NULL | NULL,NULL	dag-nocollision
+jk/none/rightMixed	dag-shuffled	rows=6 2,2 | 3,3 | 5,5 | NULL,NULL | NULL,NULL | NULL,NULL	dag-nocollision
+jk/none/rightMixed	dag-morsel4	rows=6 2,2 | 3,3 | 5,5 | NULL,NULL | NULL,NULL | NULL,NULL	dag-nocollision
+jk/none/rightMixed	dag-skew	rows=6 2,2 | 3,3 | 5,5 | NULL,NULL | NULL,NULL | NULL,NULL	dag-nocollision
+jk/none/full	dag	rows=8 1,1 | 2,2 | 2,2 | 3,3 | 4,4 | 5,5 | NULL,NULL | NULL,NULL	dag-nocollision
+jk/none/full	dag-shuffled	rows=8 1,1 | 2,2 | 2,2 | 3,3 | 4,4 | 5,5 | NULL,NULL | NULL,NULL	dag-nocollision
+jk/none/full	dag-morsel4	rows=8 1,1 | 2,2 | 2,2 | 3,3 | 4,4 | 5,5 | NULL,NULL | NULL,NULL	dag-nocollision
+jk/none/full	dag-skew	rows=8 1,1 | 2,2 | 2,2 | 3,3 | 4,4 | 5,5 | NULL,NULL | NULL,NULL	dag-nocollision
+jk/none/fullMixed	dag	rows=8 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | NULL,NULL | NULL,NULL | NULL,NULL	dag-nocollision
+jk/none/fullMixed	dag-shuffled	rows=8 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | NULL,NULL | NULL,NULL | NULL,NULL	dag-nocollision
+jk/none/fullMixed	dag-morsel4	rows=8 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | NULL,NULL | NULL,NULL | NULL,NULL	dag-nocollision
+jk/none/fullMixed	dag-skew	rows=8 1,1 | 2,2 | 3,3 | 4,4 | 5,5 | NULL,NULL | NULL,NULL | NULL,NULL	dag-nocollision
+jk/none/crossWhere	dag	rows=5 1,1 | 2,2 | 2,2 | 3,3 | 4,4	dag-nocollision
+jk/none/crossWhere	dag-shuffled	rows=5 1,1 | 2,2 | 2,2 | 3,3 | 4,4	dag-nocollision
+jk/none/crossWhere	dag-morsel4	rows=5 1,1 | 2,2 | 2,2 | 3,3 | 4,4	dag-nocollision
+jk/none/crossWhere	dag-skew	rows=5 1,1 | 2,2 | 2,2 | 3,3 | 4,4	dag-nocollision
+s3/asFiled	dag	ERR 0A000	dag-0A000
+s3/asFiled	dag-shuffled	ERR 0A000	dag-0A000
+s3/asFiled	dag-morsel4	ERR 0A000	dag-0A000
+s3/asFiled	dag-skew	ERR 0A000	dag-0A000
+s3/noN	dag	ERR 0A000	dag-0A000
+s3/noN	dag-shuffled	ERR 0A000	dag-0A000
+s3/noN	dag-morsel4	ERR 0A000	dag-0A000
+s3/noN	dag-skew	ERR 0A000	dag-0A000
+s3/qualified	dag	ERR 0A000	dag-0A000
+s3/qualified	dag-shuffled	ERR 0A000	dag-0A000
+s3/qualified	dag-morsel4	ERR 0A000	dag-0A000
+s3/qualified	dag-skew	ERR 0A000	dag-0A000
+s3/where	dag	ERR 0A000	dag-0A000
+s3/where	dag-shuffled	ERR 0A000	dag-0A000
+s3/where	dag-morsel4	ERR 0A000	dag-0A000
+s3/where	dag-skew	ERR 0A000	dag-0A000
+s3/renamedN	dag	ERR 0A000	dag-0A000
+s3/renamedN	dag-shuffled	ERR 0A000	dag-0A000
+s3/renamedN	dag-morsel4	ERR 0A000	dag-0A000
+s3/renamedN	dag-skew	ERR 0A000	dag-0A000
+s3/innerNoN	dag	ERR 0A000	dag-0A000
+s3/innerNoN	dag-shuffled	ERR 0A000	dag-0A000
+s3/innerNoN	dag-morsel4	ERR 0A000	dag-0A000
+s3/innerNoN	dag-skew	ERR 0A000	dag-0A000
+s3/derivedN	dag	ERR 0A000	dag-0A000
+s3/derivedN	dag-shuffled	ERR 0A000	dag-0A000
+s3/derivedN	dag-morsel4	ERR 0A000	dag-0A000
+s3/derivedN	dag-skew	ERR 0A000	dag-0A000
+s3/bareId	dag	ERR 0A000	dag-0A000
+s3/bareId	dag-shuffled	ERR 0A000	dag-0A000
+s3/bareId	dag-morsel4	ERR 0A000	dag-0A000
+s3/bareId	dag-skew	ERR 0A000	dag-0A000
+s3/bareIdLeft	dag	rows=6 1,1 | 2,2 | 2,2 | 3,3 | 4,4 | 5,5	dag-respell
+s3/bareIdLeft	dag-shuffled	rows=6 1,1 | 2,2 | 2,2 | 3,3 | 4,4 | 5,5	dag-respell
+s3/bareIdLeft	dag-morsel4	rows=6 1,1 | 2,2 | 2,2 | 3,3 | 4,4 | 5,5	dag-respell
+s3/bareIdLeft	dag-skew	rows=6 1,1 | 2,2 | 2,2 | 3,3 | 4,4 | 5,5	dag-respell
+s3/cte	dag	ERR 0A000	dag-0A000
+s3/cte	dag-shuffled	ERR 0A000	dag-0A000
+s3/cte	dag-morsel4	ERR 0A000	dag-0A000
+s3/cte	dag-skew	ERR 0A000	dag-0A000

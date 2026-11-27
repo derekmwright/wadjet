@@ -802,6 +802,50 @@ func Corpus() []Case {
 				T2 + ") y) x ORDER BY c",
 			Ordered: true,
 			Want:    []string{"c=t0-a", "c=t0-a", "c=t0-b", "c=t0-b"}},
+		// A RELATION name declared inside a derived table (or a CTE body)
+		// that equals one outside it (#1678 line k). The body's name is the
+		// body's own: the join around it sees the block's alias and its
+		// output columns, nothing else. Every one of these pushed the outer
+		// conjunct INSIDE the block, where its spelling bound the inner
+		// relation (0 rows for the first four; the bare c1 filtered clt2's
+		// c1). The DAG arms respell the conjunct that stays above the join
+		// through the block's projection into its inner spelling, which binds
+		// the outer relation at the join stage: a separate defect in the
+		// stage planner's filter respelling, pinned on those arms.
+		{Name: "derived_inner_alias_equals_outer_alias",
+			SQL: "SELECT x.c2 AS a, d.c2 AS b FROM " + T1 + " x JOIN (SELECT x.c0, x.c2 FROM " + T2 +
+				" x) d ON x.c0 = d.c0 AND x.c2 < d.c2 ORDER BY a, b",
+			Ordered:      true,
+			Want:         []string{"a=t1-a b=t2-a", "a=t1-b b=t2-b"},
+			KnownBug:     "the stage DAG respells the conjunct through the block's projection into the inner spelling, which binds the outer relation at the join stage",
+			Issue:        "#1678",
+			KnownBugArms: []string{"dag", "dag-shuffled"}},
+		{Name: "derived_inner_table_equals_outer_table",
+			SQL: "SELECT " + T1 + ".c1 AS a, d.c1 AS b FROM " + T1 + " JOIN (SELECT " + T1 + ".c1, " +
+				T1 + ".c2 FROM " + T1 + ") d ON " + T1 + ".c1 < d.c1 ORDER BY a, b",
+			Ordered: true,
+			Want:    []string{"a=7 b=9"}},
+		{Name: "derived_unpublished_bare_name_is_the_outer_one",
+			SQL: "SELECT x.c2 AS a, d.k AS b FROM " + T1 + " x JOIN (SELECT c2 AS k FROM " + T2 +
+				") d ON x.c0 = (d.k = 't2-a') AND c1 = 9 ORDER BY a, b",
+			Ordered:      true,
+			Want:         []string{"a=t1-b b=t2-b"},
+			KnownBug:     "the stage DAG refuses it loudly: sort key column \"b\" does not exist in the input schema",
+			Issue:        "#1678",
+			KnownBugArms: []string{"dag", "dag-shuffled"}},
+		{Name: "cte_inner_alias_equals_outer_alias",
+			SQL: "WITH d AS (SELECT x.c0, x.c2 FROM " + T2 + " x) SELECT x.c2 AS a, d.c2 AS b FROM " +
+				T1 + " x JOIN d ON x.c0 = d.c0 AND x.c2 < d.c2 ORDER BY a, b",
+			Ordered: true,
+			Want:    []string{"a=t1-a b=t2-a", "a=t1-b b=t2-b"}},
+		{Name: "derived_inner_alias_equals_outer_alias_cross_where",
+			SQL: "SELECT x.c2 AS a, d.c2 AS b FROM " + T1 + " x CROSS JOIN (SELECT x.c2 FROM " + T2 +
+				" x) d WHERE x.c2 < d.c2 AND x.c1 > 8 ORDER BY a, b",
+			Ordered:      true,
+			Want:         []string{"a=t1-b b=t2-a", "a=t1-b b=t2-b"},
+			KnownBug:     "the stage DAG respells the conjunct through the block's projection into the inner spelling, which binds the outer relation at the join stage",
+			Issue:        "#1678",
+			KnownBugArms: []string{"dag", "dag-shuffled"}},
 	})
 }
 

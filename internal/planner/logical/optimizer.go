@@ -3065,6 +3065,36 @@ func collectScanInfoRec(n *Node, tables map[string]bool, colToTable map[string]s
 	if n == nil {
 		return
 	}
+	// A DERIVED TABLE IS ONE RELATION TO THE JOIN AROUND IT (#1678 line k).
+	// Attributing the sides of a join, a derived table that is not one of
+	// the ambient ones (those enclose the join itself) shows this join its
+	// alias and its OUTPUT columns, and nothing written inside it: the names
+	// its body declares are its own scope's, exactly as PostgreSQL resolves
+	// them. Descending into it published its scans' aliases, table names and
+	// columns as names of this side, so in
+	//
+	//	ej_t a JOIN (SELECT a.id, upper(a.s) AS k FROM ej_u a) b ON upper(a.s) = b.k
+	//
+	// both of the ON's references "belonged" to the derived side, the whole
+	// ON was pushed inside it and compared ej_u's s with itself (a cross
+	// product), and a bare `n` the block does not publish was attributed to
+	// it because its scan carries one (`… AND n > 1` filtered ej_u's n).
+	// A LATERAL arm (DerivedAlias is its alias) is the same kind of scope: a
+	// lowered correlation names the body's relations, which then belong to
+	// neither side here, so it stays on the join, where it is resolved
+	// against the join's own inputs.
+	if ambient != nil && n.DerivedAlias != "" && !ambient[n.DerivedAlias] {
+		tables[n.DerivedAlias] = true
+		for _, col := range subtreeOutputNames(n) {
+			low := strings.ToLower(col)
+			colToTable[low] = n.DerivedAlias
+			// An unaliased qualified item (`a.id`) is published as `id`.
+			if i := strings.LastIndexByte(low, '.'); i >= 0 && i+1 < len(low) {
+				colToTable[low[i+1:]] = n.DerivedAlias
+			}
+		}
+		return
+	}
 	if n.Type == NodeScan {
 		// Both halves are OUTER-scope questions, so both go through the
 		// scope helpers rather than through TableAlias: which names may
@@ -3126,6 +3156,10 @@ func collectScanInfoRec(n *Node, tables map[string]bool, colToTable map[string]s
 		}
 		for _, col := range subtreeOutputNames(n) {
 			colToTable[strings.ToLower(col)] = scope
+		}
+		// Its body's names are its own, as a derived table's are (above).
+		if ambient != nil {
+			return
 		}
 	}
 	// A DERIVED TABLE is the same kind of scope: the enclosing query names its
