@@ -187,6 +187,19 @@ func (db *DB) executeInsertSelect(ctx context.Context, info *plansql.InsertInfo)
 		return nil, err
 	}
 
+	// A quoted literal with a zone offset written as a select item is
+	// ASSIGNED to the target column: refused into a stored timestamp column,
+	// whose declaration is not recorded (#1680 line d).
+	if q, err := plansql.ExtractSelect(info.Select); err == nil && q != nil && q.Union == nil {
+		for i, c := range q.Columns {
+			if i >= len(cols) || c.Star {
+				break
+			}
+			if err := physical.RefuseZonedLiteralAssignment(c.ASTExpr, cols[i].Type); err != nil {
+				return nil, err
+			}
+		}
+	}
 	res, err := db.query(ctx, info.Select.SQL, db.querySourcedWriteBudget())
 	if err != nil {
 		return nil, querySourceError(err, db.querySourcedWriteBudget())

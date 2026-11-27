@@ -1952,6 +1952,12 @@ func assignmentClassified(t parquet.TypeID) bool {
 // difference rule (physical.RefuseIntervalWriteWith; nil where the door has
 // no planner, and a subquery there is then left to the expression guard).
 func dmlExpressionTyping(node plansql.Node, alias string, schema []parquet.Column, tsSubquery func(string) bool) error {
+	// A quoted literal with a zone offset beside a stored timestamp column
+	// is refused; beside a timestamptz producer it is read as one (#1680
+	// line d, validate_timestamptz_lineage.go).
+	if err := physical.ZonedLiteralRuleOverStored(node, alias, schema); err != nil {
+		return err
+	}
 	if err := physical.RefuseTemporalArithmetic(node, alias, schema); err != nil {
 		return err
 	}
@@ -2030,6 +2036,9 @@ func (ev *mergeEvaluator) value(text string, merged map[string]any, col parquet.
 		return nil, sqlerr.Wrap("42601", fmt.Errorf("parsing %q: %w", text, err))
 	}
 	if err := dmlExpressionTyping(node, "", ev.mergedCols, ev.planner.TimestampSubquery); err != nil {
+		return nil, err
+	}
+	if err := physical.RefuseZonedLiteralAssignment(node, col.Type); err != nil {
 		return nil, err
 	}
 	clause := "UPDATE"
@@ -3077,6 +3086,9 @@ func assignInsertValue(text string, col parquet.Column, opts ...expr.CompileOpti
 	if err := dmlExpressionTyping(node, "", nil, nil); err != nil {
 		return nil, err
 	}
+	if err := physical.RefuseZonedLiteralAssignment(node, col.Type); err != nil {
+		return nil, err
+	}
 	if err := refuseAggregateOrWindow(node, "VALUES"); err != nil {
 		return nil, err
 	}
@@ -3917,6 +3929,9 @@ func ResolveDMLSetClauses(clauses []plansql.SetClause, target plansql.DMLTarget,
 			return nil, sqlerr.Wrap("42601", fmt.Errorf("SET %s: parsing %q: %w", name, sc.Value, err))
 		}
 		if err := refuseAggregateOrWindow(node, "UPDATE"); err != nil {
+			return nil, fmt.Errorf("SET %s: %w", name, err)
+		}
+		if err := physical.RefuseZonedLiteralAssignment(node, col.Type); err != nil {
 			return nil, fmt.Errorf("SET %s: %w", name, err)
 		}
 		if src := assignSourceOf(node, schema, nil, nil); src.isLiteral {
