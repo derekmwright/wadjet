@@ -4892,6 +4892,24 @@ func twoPathCorpus() []twoPathQuery {
 				JOIN (SELECT r_regionkey, NULLIF(r_regionkey, 2) AS rk2 FROM region) r
 				ON n.n_regionkey = r.r_regionkey WHERE r.rk2 > 1 ORDER BY n.n_name`,
 			wantRows: 10, wantCols: []string{"n_name", "rk2"}},
+		// #1678 line j: an ON comparing an EXPRESSION with a build-arm
+		// derived column the stage DAG keeps as a filter above a keyless
+		// join, re-spelled to the column's definition. In a SELF-join that
+		// definition's bare `n_name` binds the PROBE's on the join stage
+		// unless it is qualified by the build: the DAG compared n1 with
+		// itself and answered all 625 pairs, in either form. TPC-H's
+		// prefixed column names never collide across two different tables,
+		// which is why every other derived-table join here missed it.
+		twoPathQuery{name: "SelfJoinExprOnDerivedColumn", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT n1.n_nationkey AS a, n2.n_nationkey AS b FROM nation n1
+				JOIN (SELECT n_nationkey, lower(n_name) AS ln FROM nation) n2
+				ON lower(n1.n_name) = n2.ln`,
+			wantRows: 25, wantCols: []string{"a", "b"}},
+		twoPathQuery{name: "SelfJoinExprOnDerivedColumnOr", cmp: cmpUnordered, expectRows: true,
+			sql: `SELECT n1.n_nationkey AS a, n2.n_nationkey AS b FROM nation n1
+				JOIN (SELECT n_nationkey, n_regionkey AS rk, lower(n_name) AS ln FROM nation) n2
+				ON lower(n1.n_name) = n2.ln OR n1.n_regionkey + 1 = n2.rk`,
+			wantRows: 125, wantCols: []string{"a", "b"}},
 		// A predicate mixing the computed alias with a passthrough source
 		// column: only the alias reference is substituted. r_regionkey 2
 		// drops (rk2 NULL), the rest satisfy rk2 >= r_regionkey.
