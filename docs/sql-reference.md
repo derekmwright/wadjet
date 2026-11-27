@@ -5188,10 +5188,18 @@ and never leaves it (#1713d):
   `TIMESTAMPTZ` is the instant its offset names (`TIMESTAMPTZ
   '2024-07-01 12:00:00+05:30'` is `2024-07-01 06:30:00`; the offset used to
   be discarded), declared `timestamp` and printed without `+00` (there is no
-  timestamptz type). Comparing a timestamptz with a quoted literal that
-  carries a nonzero offset is refused `0A000` (write the literal as
-  `TIMESTAMPTZ '…'`). `extract(timezone_hour …)` and `date_part('timezone',
-  …)` answer 0.
+  timestamptz type). A quoted literal with an offset beside a timestamptz
+  (a `TIMESTAMPTZ` literal or cast, `now()`, or such a value carried by a
+  derived table, a CTE, a `UNION` arm, a scalar subquery or a join) is read
+  as a timestamptz, as PostgreSQL reads it. Beside a STORED timestamp column
+  a quoted literal with a nonzero offset is refused `0A000`
+  (`timestamp-zone-ambiguous`) in a predicate and in an `INSERT`, `UPDATE`
+  or `MERGE` value: no table records whether a column was declared
+  `timestamp` or `timestamptz`, and PostgreSQL reads the offset differently
+  for each. Write `TIMESTAMPTZ '…'` for the instant, or the literal without
+  its offset for the wall clock. `extract(timezone_hour …)` and
+  `date_part('timezone', …)` answer 0 over a timestamptz and raise
+  PostgreSQL's `0A000` over a `TIMESTAMP` literal or a `DATE`.
 - Refused `0A000`, each with a stable reason, where the engine used to
   answer `42883` (`operator does not exist`, `unknown function`) or `22007`
   for something PostgreSQL accepts: `timestamp - date` and `date - timestamp`
