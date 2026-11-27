@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/derekmwright/wadjet/internal/engine/memory"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -453,20 +454,41 @@ func TestKeyOnlyMergeRefusalAndBloomOmission(t *testing.T) {
 			tr := memory.NewTracker("cb", 256<<20)
 			peer := newCBPeer(t, tr)
 			hj := cbJoin(t, SemiJoin, src, tr, false)
+			// Hold the source a moment on every pull so the waiting workers
+			// take turns (a mutex waiting past 1 ms hands off in order): on one
+			// CPU one worker would otherwise drain the whole source, and a
+			// merge with only empty donors allocates nothing to refuse.
+			src.before = func(int) { time.Sleep(2 * time.Millisecond) }
 			var squeeze int64
+			var donors int
+			merged := false
 			restore := SetPhaseHook(func(site PhaseSite, op any) {
-				if site == PhaseKeyOnlyLocals {
+				switch site {
+				case PhaseKeyOnlyLocals:
+					for _, lb := range op.(*CompactBuildPoint).Locals {
+						if (lb.intIndex != nil && lb.intIndex.Len() > 0) || (lb.strIndex != nil && lb.strIndex.Len() > 0) {
+							donors++
+						}
+					}
 					// Leave the merge almost no room.
 					squeeze = tr.Budget() - tr.Used() - 1024
 					if err := tr.Reserve(squeeze); err != nil {
 						t.Error(err)
 					}
+				case PhaseKeyOnlyMerged:
+					merged = true
 				}
 			})
 			err := hj.Build(context.Background(), src)
 			restore()
-			if err == nil || !errors.Is(err, memory.ErrMemoryExceeded) || !strings.Contains(err.Error(), "merged key table") {
-				t.Fatalf("want the merge's refusal, got %v", err)
+			if donors < 2 {
+				t.Fatalf("only %d worker tables hold keys: the merge has nothing to grow by", donors)
+			}
+			// The refusal comes from the merge — after the locals, before the
+			// merged point — whether its table growth or an arena chunk.
+			if err == nil || !errors.Is(err, memory.ErrMemoryExceeded) || merged ||
+				!(strings.Contains(err.Error(), "merged key table") || strings.Contains(err.Error(), "key-arena chunk")) {
+				t.Fatalf("want the merge's refusal, got %v (merged point reached: %v)", err, merged)
 			}
 			tr.Release(squeeze)
 			requireDropped(t, hj)
