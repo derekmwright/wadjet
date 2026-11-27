@@ -367,6 +367,17 @@ func iv80Definitions() []iv80Cell {
 	b.add("closure/whereFalse", "SELECT x FROM (SELECT CAST(NULL AS INTERVAL) AS x) q WHERE false")
 	b.add("closure/whereFalseText", "SELECT CAST(x AS TEXT) AS t FROM (SELECT CAST(NULL AS INTERVAL) AS x) q WHERE false")
 	b.add("closure/greatestMixed", "SELECT CAST(GREATEST(INTERVAL '1 mon', '30 days', NULL) AS TEXT) AS a, CAST(LEAST(INTERVAL '30 days', '1 mon') AS TEXT) AS b")
+	// Round 3 (the second judge record, correction 3): set-operation
+	// reconciliation of an interval arm with an unknown literal, a NULL
+	// first arm, an integer arm, a text arm and a timestamp-difference arm.
+	setop := func(name, left, right string) {
+		b.add(name, "SELECT CAST(x AS TEXT) AS t FROM (SELECT "+left+" AS x UNION ALL SELECT "+right+") q ORDER BY t NULLS FIRST")
+	}
+	setop("setop/unknownArm", "INTERVAL '1 day'", "'2 days'")
+	setop("setop/nullFirstArm", "NULL", "INTERVAL '1 day'")
+	setop("setop/intArm", "INTERVAL '1 day'", "1")
+	setop("setop/textArm", "INTERVAL '1 day'", "CAST('2 days' AS TEXT)")
+	setop("setop/tsDiffArm", "INTERVAL '1 day'", "TIMESTAMP '2024-01-02 06:00:00' - TIMESTAMP '2024-01-01 00:00:00'")
 
 	// DST gap and fold TARGET times (timestamptz; refused in this program,
 	// ruling 7, measured so the refusal is judged against PostgreSQL).

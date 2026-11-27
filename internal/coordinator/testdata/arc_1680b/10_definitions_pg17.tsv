@@ -163,6 +163,11 @@ closure/unionNull	t:text(25) | NULL; 1 day
 closure/whereFalse	x:interval(1186) | (0 rows)
 closure/whereFalseText	t:text(25) | (0 rows)
 closure/greatestMixed	a:text(25),b:text(25) | 1 mon,30 days
+setop/unknownArm	t:text(25) | 1 day; 2 days
+setop/nullFirstArm	t:text(25) | NULL; 1 day
+setop/intArm	ERR 42804: UNION types interval and integer cannot be matched
+setop/textArm	ERR 42804: UNION types interval and text cannot be matched
+setop/tsDiffArm	t:text(25) | 1 day; 1 day 06:00:00
 dst/gapTarget	a:timestamp with time zone(1184) | 2024-03-10 03:30:00-04
 dst/foldTarget	a:timestamp with time zone(1184) | 2024-11-03 01:30:00-05
 dst/foldMinus	a:timestamp with time zone(1184) | 2024-11-03 01:30:00-05

@@ -160,6 +160,11 @@ closure/unionNull	D	supported	unmet	-
 closure/whereFalse	A	refusal bare-interval-result	met	-
 closure/whereFalseText	D	supported	unmet	-
 closure/greatestMixed	C	supported	unmet	-
+setop/unknownArm	D	supported	unmet	-
+setop/nullFirstArm	D	supported	unmet	-
+setop/intArm	D	pg-error 42804	unmet	-
+setop/textArm	D	pg-error 42804	unmet	-
+setop/tsDiffArm	D	supported	unmet	-
 dst/gapTarget	A	refusal timestamptz	unmet	-
 dst/foldTarget	A	refusal timestamptz	unmet	-
 dst/foldMinus	A	refusal timestamptz	unmet	-

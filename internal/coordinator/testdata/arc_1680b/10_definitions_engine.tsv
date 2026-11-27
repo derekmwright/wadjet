@@ -162,6 +162,11 @@ closure/unionNull	*	refusal	ERR 0A000: interval values cannot yet be used as a q
 closure/whereFalse	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 closure/whereFalseText	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 closure/greatestMixed	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+setop/unknownArm	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+setop/nullFirstArm	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+setop/intArm	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+setop/textArm	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+setop/tsDiffArm	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 dst/gapTarget	*	differs	a:TIMESTAMP | 2024-03-10 02:30:00
 dst/foldTarget	*	differs	a:TIMESTAMP | 2024-11-03 01:30:00
 dst/foldMinus	*	differs	a:TIMESTAMP | 2024-11-03 01:30:00
