@@ -37,7 +37,7 @@ func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
 	// A timestamp difference has no value here (PostgreSQL's is an
 	// interval): refused before any arm below can compute its number.
 	if e.tsGuard.Load() != tsGuardClear {
-		e.tsGuardCheck(b)
+		e.tsGuardCheck(b, row)
 	}
 	// Exact fixed-point arithmetic, ahead of the ToFloat64 pair below: `-a + b`
 	// over two DECIMAL columns is a numeric expression in PostgreSQL and an

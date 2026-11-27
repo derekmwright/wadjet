@@ -102,14 +102,15 @@ const (
 )
 
 // tsGuardCheck decides, once per node, whether this minus is a timestamp
-// difference, and refuses it if so. Any other operator is clear outright.
-func (e *BinOp) tsGuardCheck(b *batch.RecordBatch) {
+// difference, and refuses it if so (refuse). Any other operator is clear
+// outright.
+func (e *BinOp) tsGuardCheck(b *batch.RecordBatch, row int) {
 	g := &e.tsGuard
 	switch g.Load() {
 	case tsGuardClear:
 		return
 	case tsGuardRefuse:
-		raiseTimestampDifference()
+		e.refuse(b, row)
 	}
 	if e.Op != "-" {
 		g.Store(tsGuardClear)
@@ -120,15 +121,31 @@ func (e *BinOp) tsGuardCheck(b *batch.RecordBatch) {
 		// decide, and they are the compile-time check's. Not cached, so a
 		// later batch still resolves the column operands.
 		if isTimestampDifferenceOperands(e.Left, e.Right, nil) {
-			raiseTimestampDifference()
+			e.refuse(b, row)
 		}
 		return
 	}
 	if isTimestampDifferenceOperands(e.Left, e.Right, b) {
 		g.Store(tsGuardRefuse)
-		raiseTimestampDifference()
+		e.refuse(b, row)
 	}
 	g.Store(tsGuardClear)
+}
+
+// refuse raises the guard's refusal for this row. An infinite operand keeps
+// the 22008 the difference raised before the guard (infiniteDateArith;
+// PostgreSQL's `TIMESTAMP 'infinity' - TIMESTAMP 'infinity'` is 22008, and
+// the statement rule's constant fold reads it from here): the operands are
+// read only on this refusing path, never on a clear node's.
+func (e *BinOp) refuse(b *batch.RecordBatch, row int) {
+	lv := e.Left.Eval(b, row)
+	rv := e.Right.Eval(b, row)
+	if lv != nil && rv != nil {
+		ld, lok := temporalOperand(b, row, e.Left, lv)
+		rd, rok := temporalOperand(b, row, e.Right, rv)
+		e.infiniteDateArith(ld, lok, rd, rok, lv, rv)
+	}
+	raiseTimestampDifference()
 }
 
 // refusingTimestampDifference is the node the compiler builds for a minus

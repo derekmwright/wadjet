@@ -91,7 +91,7 @@ func TestTimestampDifferenceGuardSites(t *testing.T) {
 		{"SELECT CAST(d AS TIMESTAMP) - ts", "*expr.BinOp", "eval", "ERR 0A000 guard"},
 		{"SELECT (ts2 + INTERVAL '1 day') - ts", "*expr.BinOp", "eval", "ERR 0A000 guard"},
 		{"SELECT date_trunc('day', ts2) - date_trunc('day', ts)", "*expr.BinOp", "eval", "ERR 0A000 guard"},
-		{"SELECT now() - ts", "*expr.BinOp", "eval", "ERR 0A000 guard"},
+		{"SELECT date_trunc('hour', ts2) - ts", "*expr.BinOp", "eval", "ERR 0A000 guard"}, // now() - ts: coordinator clock cell
 		// timestamp - date and date - timestamp (PostgreSQL: an interval).
 		{"SELECT ts - d", "*expr.BinOpNumeric", "eval", "ERR 0A000 guard"},
 		{"SELECT d - ts", "*expr.BinOpNumeric", "eval", "ERR 0A000 guard"},
