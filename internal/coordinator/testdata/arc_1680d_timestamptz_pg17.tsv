@@ -1,0 +1,211 @@
+# #1680 line d: PostgreSQL 17.11 answers for the timestamptz matrix (TestArc1680dMeasure, arc_1680d_timestamptz_arms_test.go).
+# PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit; datcollate=C datctype=C server_encoding=UTF8; DateStyle=ISO, MDY; measured 2026-11-27 (postgres:17-alpine, initdb --locale=C --encoding=UTF8, --memory=4g).
+# Each zone is the connection's TimeZone startup parameter (SHOW TimeZone confirms it per zone below).
+# name<TAB>zone<TAB>sql<TAB>answer: type(oid),... | row; row, or ERR <SQLSTATE>: message
+in/lit/gap	UTC	SELECT TIMESTAMPTZ '2024-03-10 02:30:00' AS v	timestamp with time zone(1184) | 2024-03-10 02:30:00+00
+in/lit/fold	UTC	SELECT TIMESTAMPTZ '2024-11-03 01:30:00' AS v	timestamp with time zone(1184) | 2024-11-03 01:30:00+00
+in/lit/ordinary	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00' AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00+00
+in/lit/ofsIST	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS v	timestamp with time zone(1184) | 2024-07-01 06:30:00+00
+in/lit/ofsM4	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00-04' AS v	timestamp with time zone(1184) | 2024-07-01 16:00:00+00
+in/lit/ofsZ	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00Z' AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00+00
+in/lit/ofsP00	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00+00
+in/lit/ofsGapInstant	UTC	SELECT TIMESTAMPTZ '2024-03-10 02:30:00-05' AS v	timestamp with time zone(1184) | 2024-03-10 07:30:00+00
+in/lit/ofsFrac	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00.123+05:30' AS v	timestamp with time zone(1184) | 2024-07-01 06:30:00.123+00
+in/lit/ofsDayCross	UTC	SELECT TIMESTAMPTZ '2024-07-01 02:00:00+05:30' AS v	timestamp with time zone(1184) | 2024-06-30 20:30:00+00
+in/lit/ofsCompact	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+0530' AS v	timestamp with time zone(1184) | 2024-07-01 06:30:00+00
+in/lit/ofsSpace	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00 -04:00' AS v	timestamp with time zone(1184) | 2024-07-01 16:00:00+00
+in/lit/ofsIsoT	UTC	SELECT TIMESTAMPTZ '2024-07-01T12:00:00+05:30' AS v	timestamp with time zone(1184) | 2024-07-01 06:30:00+00
+in/lit/zoneName	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00 America/New_York' AS v	timestamp with time zone(1184) | 2024-07-01 16:00:00+00
+in/lit/zoneUTCName	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00 UTC' AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00+00
+in/lit/withTZ	UTC	SELECT TIMESTAMP WITH TIME ZONE '2024-07-01 12:00:00+05:30' AS v	timestamp with time zone(1184) | 2024-07-01 06:30:00+00
+in/lit/infinity	UTC	SELECT TIMESTAMPTZ 'infinity' AS v	timestamp with time zone(1184) | infinity
+in/lit/invalid	UTC	SELECT TIMESTAMPTZ '2024-13-01 12:00:00+05:30' AS v	ERR 22008: date/time field value out of range: "2024-13-01 12:00:00+05:30"
+in/lit/ofsRange	UTC	SELECT TIMESTAMPTZ '294276-12-31 23:00:00-15' AS v	ERR 22008: timestamp out of range: "294276-12-31 23:00:00-15"
+in/ctl/tsOfs	UTC	SELECT TIMESTAMP '2024-07-01 12:00:00+05:30' AS v	timestamp(1114) | 2024-07-01 12:00:00
+in/cast/textNoOfs	UTC	SELECT CAST('2024-07-01 12:00:00' AS TIMESTAMPTZ) AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00+00
+in/cast/textOfs	UTC	SELECT CAST('2024-07-01 12:00:00+05:30' AS TIMESTAMPTZ) AS v	timestamp with time zone(1184) | 2024-07-01 06:30:00+00
+in/cast/colonOfs	UTC	SELECT '2024-07-01 12:00:00+05:30'::timestamptz AS v	timestamp with time zone(1184) | 2024-07-01 06:30:00+00
+in/cast/textGap	UTC	SELECT CAST('2024-03-10 02:30:00' AS TIMESTAMPTZ) AS v	timestamp with time zone(1184) | 2024-03-10 02:30:00+00
+in/cast/tsToTstz	UTC	SELECT CAST(TIMESTAMP '2024-07-01 12:00:00' AS TIMESTAMPTZ) AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00+00
+in/cast/tsGapToTstz	UTC	SELECT CAST(TIMESTAMP '2024-03-10 02:30:00' AS TIMESTAMPTZ) AS v	timestamp with time zone(1184) | 2024-03-10 02:30:00+00
+in/cast/tstzToTs	UTC	SELECT CAST(TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS TIMESTAMP) AS v	timestamp(1114) | 2024-07-01 06:30:00
+in/cast/dateToTstz	UTC	SELECT CAST(DATE '2024-07-01' AS TIMESTAMPTZ) AS v	timestamp with time zone(1184) | 2024-07-01 00:00:00+00
+in/cast/dateGapToTstz	UTC	SELECT CAST(DATE '2024-03-10' AS TIMESTAMPTZ) AS v	timestamp with time zone(1184) | 2024-03-10 00:00:00+00
+in/fn/toTimestamp	UTC	SELECT to_timestamp(1720000000) AS v	timestamp with time zone(1184) | 2024-07-03 09:46:40+00
+out/text	UTC	SELECT CAST(TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS TEXT) AS v	text(25) | 2024-07-01 06:30:00+00
+out/textOrd	UTC	SELECT CAST(TIMESTAMPTZ '2024-07-01 12:00:00' AS TEXT) AS v	text(25) | 2024-07-01 12:00:00+00
+out/toChar	UTC	SELECT to_char(TIMESTAMPTZ '2024-07-01 12:00:00+05:30', 'YYYY-MM-DD HH24:MI') AS v	text(25) | 2024-07-01 06:30
+atz/tstzUTC	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AT TIME ZONE 'UTC' AS v	timestamp(1114) | 2024-07-01 06:30:00
+atz/tstzNY	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' AT TIME ZONE 'America/New_York' AS v	timestamp(1114) | 2024-07-01 08:00:00
+atz/tsUTC	UTC	SELECT TIMESTAMP '2024-07-01 12:00:00' AT TIME ZONE 'UTC' AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00+00
+atz/tsIST	UTC	SELECT TIMESTAMP '2024-07-01 12:00:00' AT TIME ZONE 'Asia/Kolkata' AS v	timestamp with time zone(1184) | 2024-07-01 06:30:00+00
+atz/fnUTC	UTC	SELECT timezone('UTC', TIMESTAMP '2024-07-01 12:00:00') AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00+00
+atz/fnTstzUTC	UTC	SELECT timezone('UTC', TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	timestamp(1114) | 2024-07-01 06:30:00
+cmp/tstzTstz	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' = TIMESTAMPTZ '2024-07-01 17:30:00+05:30' AS v	boolean(16) | t
+cmp/tstzTs	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' = TIMESTAMP '2024-07-01 12:00:00' AS v	boolean(16) | t
+cmp/tstzLitOfs	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' = '2024-07-01 17:30:00+05:30' AS v	boolean(16) | t
+cmp/tstzLitOfsZero	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' = '2024-07-01 06:30:00+00' AS v	boolean(16) | t
+cmp/tstzLitNoOfs	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' = '2024-07-01 12:00:00' AS v	boolean(16) | t
+cmp/tstzLitLt	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' < '2024-07-01 12:30:00' AS v	boolean(16) | t
+cmp/betweenOfs	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' BETWEEN '2024-07-01 17:00:00+05:30' AND '2024-07-01 18:00:00+05:30' AS v	boolean(16) | t
+cmp/inOfs	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' IN ('2024-07-01 17:30:00+05:30') AS v	boolean(16) | t
+cmp/nullifOfs	UTC	SELECT NULLIF(TIMESTAMPTZ '2024-07-01 12:00:00+00', '2024-07-01 17:30:00+05:30') IS NULL AS v	boolean(16) | t
+cmp/tsLitOfs	UTC	SELECT TIMESTAMP '2024-07-01 12:00:00' = '2024-07-01 12:00:00+05:30' AS v	boolean(16) | t
+key/distinctOffsets	UTC	SELECT count(DISTINCT CASE id WHEN 1 THEN TIMESTAMPTZ '2024-07-01 12:00:00+00' WHEN 2 THEN TIMESTAMPTZ '2024-07-01 17:30:00+05:30' ELSE TIMESTAMPTZ '2024-07-01 08:00:00-04' END) AS n FROM (SELECT * FROM (VALUES (1), (2), (3), (4), (5), (6), (7), (8)) q(id)) ej_t WHERE id <= 3	bigint(20) | 1
+key/groupBy	UTC	SELECT x AS v, count(*) AS n FROM (SELECT CASE id WHEN 1 THEN TIMESTAMPTZ '2024-07-01 12:00:00+00' WHEN 2 THEN TIMESTAMPTZ '2024-07-01 17:30:00+05:30' ELSE TIMESTAMPTZ '2024-07-01 13:00:00+00' END AS x FROM (SELECT * FROM (VALUES (1), (2), (3), (4), (5), (6), (7), (8)) q(id)) ej_t WHERE id <= 3) s GROUP BY x	timestamp with time zone(1184),bigint(20) | 2024-07-01 12:00:00+00,2; 2024-07-01 13:00:00+00,1
+key/orderBy	UTC	SELECT x AS v, row_number() OVER (ORDER BY x) AS r FROM (SELECT CASE id WHEN 1 THEN TIMESTAMPTZ '2024-07-01 12:00:00+05:30' WHEN 2 THEN TIMESTAMPTZ '2024-07-01 08:00:00+00' ELSE TIMESTAMPTZ '2024-07-01 03:00:00-04' END AS x FROM (SELECT * FROM (VALUES (1), (2), (3), (4), (5), (6), (7), (8)) q(id)) ej_t WHERE id <= 3) s	timestamp with time zone(1184),bigint(20) | 2024-07-01 06:30:00+00,1; 2024-07-01 07:00:00+00,2; 2024-07-01 08:00:00+00,3
+key/join	UTC	SELECT count(*) AS n FROM (SELECT id, CASE WHEN id = 1 THEN TIMESTAMPTZ '2024-07-01 12:00:00+00' END AS x FROM (SELECT * FROM (VALUES (1), (2), (3), (4), (5), (6), (7), (8)) q(id)) ej_t) a JOIN (SELECT id, CASE WHEN id = 2 THEN TIMESTAMPTZ '2024-07-01 17:30:00+05:30' END AS y FROM (SELECT * FROM (VALUES (1), (2), (3), (4), (5), (6), (7), (8)) q(id)) ej_t) b ON a.x = b.y	bigint(20) | 1
+ext/hour	UTC	SELECT extract(hour FROM TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	numeric(1700) | 6
+ext/epoch	UTC	SELECT extract(epoch FROM TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	numeric(1700) | 1719815400.000000
+ext/tzHour	UTC	SELECT extract(timezone_hour FROM TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	numeric(1700) | 0
+ext/tzMinute	UTC	SELECT extract(timezone_minute FROM TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	numeric(1700) | 0
+ext/tz	UTC	SELECT extract(timezone FROM TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	numeric(1700) | 0
+ext/tzHourTs	UTC	SELECT extract(timezone_hour FROM TIMESTAMP '2024-07-01 12:00:00') AS v	ERR 0A000: unit "timezone_hour" not supported for type timestamp without time zone
+ext/datePartTzHour	UTC	SELECT date_part('timezone_hour', TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	double precision(701) | 0
+ext/datePartTz	UTC	SELECT date_part('timezone', TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	double precision(701) | 0
+ext/truncDay	UTC	SELECT date_trunc('day', TIMESTAMPTZ '2024-07-01 02:00:00+05:30') AS v	timestamp with time zone(1184) | 2024-06-30 00:00:00+00
+ext/truncDayZone	UTC	SELECT date_trunc('day', TIMESTAMPTZ '2024-07-01 02:00:00+00', 'Asia/Kolkata') AS v	timestamp with time zone(1184) | 2024-06-30 18:30:00+00
+ext/toDate	UTC	SELECT CAST(TIMESTAMPTZ '2024-07-01 02:00:00+05:30' AS DATE) AS v	date(1082) | 2024-06-30
+ext/dateBin	UTC	SELECT date_bin(INTERVAL '1 hour', TIMESTAMPTZ '2024-07-01 12:34:00+05:30', TIMESTAMPTZ '2000-01-01 00:00:00+00') AS v	timestamp with time zone(1184) | 2024-07-01 07:00:00+00
+ext/timeBucket	UTC	SELECT time_bucket(INTERVAL '1 hour', TIMESTAMPTZ '2024-07-01 12:34:00+05:30') AS v	ERR 42883: function time_bucket(interval, timestamp with time zone) does not exist
+ar/diff	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' - TIMESTAMPTZ '2024-07-01 10:00:00+00' AS v	interval(1186) | 02:00:00
+ar/plusInt	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' + 1 AS v	ERR 42883: operator does not exist: timestamp with time zone + integer
+ar/plusInterval	UTC	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' + INTERVAL '1 day' AS v	timestamp with time zone(1184) | 2024-07-02 12:00:00+00
+in/lit/gap	America/New_York	SELECT TIMESTAMPTZ '2024-03-10 02:30:00' AS v	timestamp with time zone(1184) | 2024-03-10 03:30:00-04
+in/lit/fold	America/New_York	SELECT TIMESTAMPTZ '2024-11-03 01:30:00' AS v	timestamp with time zone(1184) | 2024-11-03 01:30:00-05
+in/lit/ordinary	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00' AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00-04
+in/lit/ofsIST	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS v	timestamp with time zone(1184) | 2024-07-01 02:30:00-04
+in/lit/ofsM4	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00-04' AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00-04
+in/lit/ofsZ	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00Z' AS v	timestamp with time zone(1184) | 2024-07-01 08:00:00-04
+in/lit/ofsP00	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' AS v	timestamp with time zone(1184) | 2024-07-01 08:00:00-04
+in/lit/ofsGapInstant	America/New_York	SELECT TIMESTAMPTZ '2024-03-10 02:30:00-05' AS v	timestamp with time zone(1184) | 2024-03-10 03:30:00-04
+in/lit/ofsFrac	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00.123+05:30' AS v	timestamp with time zone(1184) | 2024-07-01 02:30:00.123-04
+in/lit/ofsDayCross	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 02:00:00+05:30' AS v	timestamp with time zone(1184) | 2024-06-30 16:30:00-04
+in/lit/ofsCompact	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+0530' AS v	timestamp with time zone(1184) | 2024-07-01 02:30:00-04
+in/lit/ofsSpace	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00 -04:00' AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00-04
+in/lit/ofsIsoT	America/New_York	SELECT TIMESTAMPTZ '2024-07-01T12:00:00+05:30' AS v	timestamp with time zone(1184) | 2024-07-01 02:30:00-04
+in/lit/zoneName	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00 America/New_York' AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00-04
+in/lit/zoneUTCName	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00 UTC' AS v	timestamp with time zone(1184) | 2024-07-01 08:00:00-04
+in/lit/withTZ	America/New_York	SELECT TIMESTAMP WITH TIME ZONE '2024-07-01 12:00:00+05:30' AS v	timestamp with time zone(1184) | 2024-07-01 02:30:00-04
+in/lit/infinity	America/New_York	SELECT TIMESTAMPTZ 'infinity' AS v	timestamp with time zone(1184) | infinity
+in/lit/invalid	America/New_York	SELECT TIMESTAMPTZ '2024-13-01 12:00:00+05:30' AS v	ERR 22008: date/time field value out of range: "2024-13-01 12:00:00+05:30"
+in/lit/ofsRange	America/New_York	SELECT TIMESTAMPTZ '294276-12-31 23:00:00-15' AS v	ERR 22008: timestamp out of range: "294276-12-31 23:00:00-15"
+in/ctl/tsOfs	America/New_York	SELECT TIMESTAMP '2024-07-01 12:00:00+05:30' AS v	timestamp(1114) | 2024-07-01 12:00:00
+in/cast/textNoOfs	America/New_York	SELECT CAST('2024-07-01 12:00:00' AS TIMESTAMPTZ) AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00-04
+in/cast/textOfs	America/New_York	SELECT CAST('2024-07-01 12:00:00+05:30' AS TIMESTAMPTZ) AS v	timestamp with time zone(1184) | 2024-07-01 02:30:00-04
+in/cast/colonOfs	America/New_York	SELECT '2024-07-01 12:00:00+05:30'::timestamptz AS v	timestamp with time zone(1184) | 2024-07-01 02:30:00-04
+in/cast/textGap	America/New_York	SELECT CAST('2024-03-10 02:30:00' AS TIMESTAMPTZ) AS v	timestamp with time zone(1184) | 2024-03-10 03:30:00-04
+in/cast/tsToTstz	America/New_York	SELECT CAST(TIMESTAMP '2024-07-01 12:00:00' AS TIMESTAMPTZ) AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00-04
+in/cast/tsGapToTstz	America/New_York	SELECT CAST(TIMESTAMP '2024-03-10 02:30:00' AS TIMESTAMPTZ) AS v	timestamp with time zone(1184) | 2024-03-10 03:30:00-04
+in/cast/tstzToTs	America/New_York	SELECT CAST(TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS TIMESTAMP) AS v	timestamp(1114) | 2024-07-01 02:30:00
+in/cast/dateToTstz	America/New_York	SELECT CAST(DATE '2024-07-01' AS TIMESTAMPTZ) AS v	timestamp with time zone(1184) | 2024-07-01 00:00:00-04
+in/cast/dateGapToTstz	America/New_York	SELECT CAST(DATE '2024-03-10' AS TIMESTAMPTZ) AS v	timestamp with time zone(1184) | 2024-03-10 00:00:00-05
+in/fn/toTimestamp	America/New_York	SELECT to_timestamp(1720000000) AS v	timestamp with time zone(1184) | 2024-07-03 05:46:40-04
+out/text	America/New_York	SELECT CAST(TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS TEXT) AS v	text(25) | 2024-07-01 02:30:00-04
+out/textOrd	America/New_York	SELECT CAST(TIMESTAMPTZ '2024-07-01 12:00:00' AS TEXT) AS v	text(25) | 2024-07-01 12:00:00-04
+out/toChar	America/New_York	SELECT to_char(TIMESTAMPTZ '2024-07-01 12:00:00+05:30', 'YYYY-MM-DD HH24:MI') AS v	text(25) | 2024-07-01 02:30
+atz/tstzUTC	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AT TIME ZONE 'UTC' AS v	timestamp(1114) | 2024-07-01 06:30:00
+atz/tstzNY	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' AT TIME ZONE 'America/New_York' AS v	timestamp(1114) | 2024-07-01 08:00:00
+atz/tsUTC	America/New_York	SELECT TIMESTAMP '2024-07-01 12:00:00' AT TIME ZONE 'UTC' AS v	timestamp with time zone(1184) | 2024-07-01 08:00:00-04
+atz/tsIST	America/New_York	SELECT TIMESTAMP '2024-07-01 12:00:00' AT TIME ZONE 'Asia/Kolkata' AS v	timestamp with time zone(1184) | 2024-07-01 02:30:00-04
+atz/fnUTC	America/New_York	SELECT timezone('UTC', TIMESTAMP '2024-07-01 12:00:00') AS v	timestamp with time zone(1184) | 2024-07-01 08:00:00-04
+atz/fnTstzUTC	America/New_York	SELECT timezone('UTC', TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	timestamp(1114) | 2024-07-01 06:30:00
+cmp/tstzTstz	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' = TIMESTAMPTZ '2024-07-01 17:30:00+05:30' AS v	boolean(16) | t
+cmp/tstzTs	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' = TIMESTAMP '2024-07-01 12:00:00' AS v	boolean(16) | f
+cmp/tstzLitOfs	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' = '2024-07-01 17:30:00+05:30' AS v	boolean(16) | t
+cmp/tstzLitOfsZero	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' = '2024-07-01 06:30:00+00' AS v	boolean(16) | t
+cmp/tstzLitNoOfs	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' = '2024-07-01 12:00:00' AS v	boolean(16) | f
+cmp/tstzLitLt	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' < '2024-07-01 12:30:00' AS v	boolean(16) | t
+cmp/betweenOfs	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' BETWEEN '2024-07-01 17:00:00+05:30' AND '2024-07-01 18:00:00+05:30' AS v	boolean(16) | t
+cmp/inOfs	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' IN ('2024-07-01 17:30:00+05:30') AS v	boolean(16) | t
+cmp/nullifOfs	America/New_York	SELECT NULLIF(TIMESTAMPTZ '2024-07-01 12:00:00+00', '2024-07-01 17:30:00+05:30') IS NULL AS v	boolean(16) | t
+cmp/tsLitOfs	America/New_York	SELECT TIMESTAMP '2024-07-01 12:00:00' = '2024-07-01 12:00:00+05:30' AS v	boolean(16) | t
+key/distinctOffsets	America/New_York	SELECT count(DISTINCT CASE id WHEN 1 THEN TIMESTAMPTZ '2024-07-01 12:00:00+00' WHEN 2 THEN TIMESTAMPTZ '2024-07-01 17:30:00+05:30' ELSE TIMESTAMPTZ '2024-07-01 08:00:00-04' END) AS n FROM (SELECT * FROM (VALUES (1), (2), (3), (4), (5), (6), (7), (8)) q(id)) ej_t WHERE id <= 3	bigint(20) | 1
+key/groupBy	America/New_York	SELECT x AS v, count(*) AS n FROM (SELECT CASE id WHEN 1 THEN TIMESTAMPTZ '2024-07-01 12:00:00+00' WHEN 2 THEN TIMESTAMPTZ '2024-07-01 17:30:00+05:30' ELSE TIMESTAMPTZ '2024-07-01 13:00:00+00' END AS x FROM (SELECT * FROM (VALUES (1), (2), (3), (4), (5), (6), (7), (8)) q(id)) ej_t WHERE id <= 3) s GROUP BY x	timestamp with time zone(1184),bigint(20) | 2024-07-01 08:00:00-04,2; 2024-07-01 09:00:00-04,1
+key/orderBy	America/New_York	SELECT x AS v, row_number() OVER (ORDER BY x) AS r FROM (SELECT CASE id WHEN 1 THEN TIMESTAMPTZ '2024-07-01 12:00:00+05:30' WHEN 2 THEN TIMESTAMPTZ '2024-07-01 08:00:00+00' ELSE TIMESTAMPTZ '2024-07-01 03:00:00-04' END AS x FROM (SELECT * FROM (VALUES (1), (2), (3), (4), (5), (6), (7), (8)) q(id)) ej_t WHERE id <= 3) s	timestamp with time zone(1184),bigint(20) | 2024-07-01 02:30:00-04,1; 2024-07-01 03:00:00-04,2; 2024-07-01 04:00:00-04,3
+key/join	America/New_York	SELECT count(*) AS n FROM (SELECT id, CASE WHEN id = 1 THEN TIMESTAMPTZ '2024-07-01 12:00:00+00' END AS x FROM (SELECT * FROM (VALUES (1), (2), (3), (4), (5), (6), (7), (8)) q(id)) ej_t) a JOIN (SELECT id, CASE WHEN id = 2 THEN TIMESTAMPTZ '2024-07-01 17:30:00+05:30' END AS y FROM (SELECT * FROM (VALUES (1), (2), (3), (4), (5), (6), (7), (8)) q(id)) ej_t) b ON a.x = b.y	bigint(20) | 1
+ext/hour	America/New_York	SELECT extract(hour FROM TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	numeric(1700) | 2
+ext/epoch	America/New_York	SELECT extract(epoch FROM TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	numeric(1700) | 1719815400.000000
+ext/tzHour	America/New_York	SELECT extract(timezone_hour FROM TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	numeric(1700) | -4
+ext/tzMinute	America/New_York	SELECT extract(timezone_minute FROM TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	numeric(1700) | 0
+ext/tz	America/New_York	SELECT extract(timezone FROM TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	numeric(1700) | -14400
+ext/tzHourTs	America/New_York	SELECT extract(timezone_hour FROM TIMESTAMP '2024-07-01 12:00:00') AS v	ERR 0A000: unit "timezone_hour" not supported for type timestamp without time zone
+ext/datePartTzHour	America/New_York	SELECT date_part('timezone_hour', TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	double precision(701) | -4
+ext/datePartTz	America/New_York	SELECT date_part('timezone', TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	double precision(701) | -14400
+ext/truncDay	America/New_York	SELECT date_trunc('day', TIMESTAMPTZ '2024-07-01 02:00:00+05:30') AS v	timestamp with time zone(1184) | 2024-06-30 00:00:00-04
+ext/truncDayZone	America/New_York	SELECT date_trunc('day', TIMESTAMPTZ '2024-07-01 02:00:00+00', 'Asia/Kolkata') AS v	timestamp with time zone(1184) | 2024-06-30 14:30:00-04
+ext/toDate	America/New_York	SELECT CAST(TIMESTAMPTZ '2024-07-01 02:00:00+05:30' AS DATE) AS v	date(1082) | 2024-06-30
+ext/dateBin	America/New_York	SELECT date_bin(INTERVAL '1 hour', TIMESTAMPTZ '2024-07-01 12:34:00+05:30', TIMESTAMPTZ '2000-01-01 00:00:00+00') AS v	timestamp with time zone(1184) | 2024-07-01 03:00:00-04
+ext/timeBucket	America/New_York	SELECT time_bucket(INTERVAL '1 hour', TIMESTAMPTZ '2024-07-01 12:34:00+05:30') AS v	ERR 42883: function time_bucket(interval, timestamp with time zone) does not exist
+ar/diff	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' - TIMESTAMPTZ '2024-07-01 10:00:00+00' AS v	interval(1186) | 02:00:00
+ar/plusInt	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' + 1 AS v	ERR 42883: operator does not exist: timestamp with time zone + integer
+ar/plusInterval	America/New_York	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' + INTERVAL '1 day' AS v	timestamp with time zone(1184) | 2024-07-02 08:00:00-04
+in/lit/gap	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-03-10 02:30:00' AS v	timestamp with time zone(1184) | 2024-03-10 02:30:00+05:30
+in/lit/fold	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-11-03 01:30:00' AS v	timestamp with time zone(1184) | 2024-11-03 01:30:00+05:30
+in/lit/ordinary	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00' AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00+05:30
+in/lit/ofsIST	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00+05:30
+in/lit/ofsM4	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00-04' AS v	timestamp with time zone(1184) | 2024-07-01 21:30:00+05:30
+in/lit/ofsZ	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00Z' AS v	timestamp with time zone(1184) | 2024-07-01 17:30:00+05:30
+in/lit/ofsP00	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' AS v	timestamp with time zone(1184) | 2024-07-01 17:30:00+05:30
+in/lit/ofsGapInstant	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-03-10 02:30:00-05' AS v	timestamp with time zone(1184) | 2024-03-10 13:00:00+05:30
+in/lit/ofsFrac	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00.123+05:30' AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00.123+05:30
+in/lit/ofsDayCross	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 02:00:00+05:30' AS v	timestamp with time zone(1184) | 2024-07-01 02:00:00+05:30
+in/lit/ofsCompact	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+0530' AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00+05:30
+in/lit/ofsSpace	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00 -04:00' AS v	timestamp with time zone(1184) | 2024-07-01 21:30:00+05:30
+in/lit/ofsIsoT	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01T12:00:00+05:30' AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00+05:30
+in/lit/zoneName	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00 America/New_York' AS v	timestamp with time zone(1184) | 2024-07-01 21:30:00+05:30
+in/lit/zoneUTCName	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00 UTC' AS v	timestamp with time zone(1184) | 2024-07-01 17:30:00+05:30
+in/lit/withTZ	Asia/Kolkata	SELECT TIMESTAMP WITH TIME ZONE '2024-07-01 12:00:00+05:30' AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00+05:30
+in/lit/infinity	Asia/Kolkata	SELECT TIMESTAMPTZ 'infinity' AS v	timestamp with time zone(1184) | infinity
+in/lit/invalid	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-13-01 12:00:00+05:30' AS v	ERR 22008: date/time field value out of range: "2024-13-01 12:00:00+05:30"
+in/lit/ofsRange	Asia/Kolkata	SELECT TIMESTAMPTZ '294276-12-31 23:00:00-15' AS v	ERR 22008: timestamp out of range: "294276-12-31 23:00:00-15"
+in/ctl/tsOfs	Asia/Kolkata	SELECT TIMESTAMP '2024-07-01 12:00:00+05:30' AS v	timestamp(1114) | 2024-07-01 12:00:00
+in/cast/textNoOfs	Asia/Kolkata	SELECT CAST('2024-07-01 12:00:00' AS TIMESTAMPTZ) AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00+05:30
+in/cast/textOfs	Asia/Kolkata	SELECT CAST('2024-07-01 12:00:00+05:30' AS TIMESTAMPTZ) AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00+05:30
+in/cast/colonOfs	Asia/Kolkata	SELECT '2024-07-01 12:00:00+05:30'::timestamptz AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00+05:30
+in/cast/textGap	Asia/Kolkata	SELECT CAST('2024-03-10 02:30:00' AS TIMESTAMPTZ) AS v	timestamp with time zone(1184) | 2024-03-10 02:30:00+05:30
+in/cast/tsToTstz	Asia/Kolkata	SELECT CAST(TIMESTAMP '2024-07-01 12:00:00' AS TIMESTAMPTZ) AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00+05:30
+in/cast/tsGapToTstz	Asia/Kolkata	SELECT CAST(TIMESTAMP '2024-03-10 02:30:00' AS TIMESTAMPTZ) AS v	timestamp with time zone(1184) | 2024-03-10 02:30:00+05:30
+in/cast/tstzToTs	Asia/Kolkata	SELECT CAST(TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS TIMESTAMP) AS v	timestamp(1114) | 2024-07-01 12:00:00
+in/cast/dateToTstz	Asia/Kolkata	SELECT CAST(DATE '2024-07-01' AS TIMESTAMPTZ) AS v	timestamp with time zone(1184) | 2024-07-01 00:00:00+05:30
+in/cast/dateGapToTstz	Asia/Kolkata	SELECT CAST(DATE '2024-03-10' AS TIMESTAMPTZ) AS v	timestamp with time zone(1184) | 2024-03-10 00:00:00+05:30
+in/fn/toTimestamp	Asia/Kolkata	SELECT to_timestamp(1720000000) AS v	timestamp with time zone(1184) | 2024-07-03 15:16:40+05:30
+out/text	Asia/Kolkata	SELECT CAST(TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AS TEXT) AS v	text(25) | 2024-07-01 12:00:00+05:30
+out/textOrd	Asia/Kolkata	SELECT CAST(TIMESTAMPTZ '2024-07-01 12:00:00' AS TEXT) AS v	text(25) | 2024-07-01 12:00:00+05:30
+out/toChar	Asia/Kolkata	SELECT to_char(TIMESTAMPTZ '2024-07-01 12:00:00+05:30', 'YYYY-MM-DD HH24:MI') AS v	text(25) | 2024-07-01 12:00
+atz/tstzUTC	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' AT TIME ZONE 'UTC' AS v	timestamp(1114) | 2024-07-01 06:30:00
+atz/tstzNY	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' AT TIME ZONE 'America/New_York' AS v	timestamp(1114) | 2024-07-01 08:00:00
+atz/tsUTC	Asia/Kolkata	SELECT TIMESTAMP '2024-07-01 12:00:00' AT TIME ZONE 'UTC' AS v	timestamp with time zone(1184) | 2024-07-01 17:30:00+05:30
+atz/tsIST	Asia/Kolkata	SELECT TIMESTAMP '2024-07-01 12:00:00' AT TIME ZONE 'Asia/Kolkata' AS v	timestamp with time zone(1184) | 2024-07-01 12:00:00+05:30
+atz/fnUTC	Asia/Kolkata	SELECT timezone('UTC', TIMESTAMP '2024-07-01 12:00:00') AS v	timestamp with time zone(1184) | 2024-07-01 17:30:00+05:30
+atz/fnTstzUTC	Asia/Kolkata	SELECT timezone('UTC', TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	timestamp(1114) | 2024-07-01 06:30:00
+cmp/tstzTstz	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' = TIMESTAMPTZ '2024-07-01 17:30:00+05:30' AS v	boolean(16) | t
+cmp/tstzTs	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' = TIMESTAMP '2024-07-01 12:00:00' AS v	boolean(16) | f
+cmp/tstzLitOfs	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' = '2024-07-01 17:30:00+05:30' AS v	boolean(16) | t
+cmp/tstzLitOfsZero	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+05:30' = '2024-07-01 06:30:00+00' AS v	boolean(16) | t
+cmp/tstzLitNoOfs	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' = '2024-07-01 12:00:00' AS v	boolean(16) | f
+cmp/tstzLitLt	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' < '2024-07-01 12:30:00' AS v	boolean(16) | f
+cmp/betweenOfs	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' BETWEEN '2024-07-01 17:00:00+05:30' AND '2024-07-01 18:00:00+05:30' AS v	boolean(16) | t
+cmp/inOfs	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' IN ('2024-07-01 17:30:00+05:30') AS v	boolean(16) | t
+cmp/nullifOfs	Asia/Kolkata	SELECT NULLIF(TIMESTAMPTZ '2024-07-01 12:00:00+00', '2024-07-01 17:30:00+05:30') IS NULL AS v	boolean(16) | t
+cmp/tsLitOfs	Asia/Kolkata	SELECT TIMESTAMP '2024-07-01 12:00:00' = '2024-07-01 12:00:00+05:30' AS v	boolean(16) | t
+key/distinctOffsets	Asia/Kolkata	SELECT count(DISTINCT CASE id WHEN 1 THEN TIMESTAMPTZ '2024-07-01 12:00:00+00' WHEN 2 THEN TIMESTAMPTZ '2024-07-01 17:30:00+05:30' ELSE TIMESTAMPTZ '2024-07-01 08:00:00-04' END) AS n FROM (SELECT * FROM (VALUES (1), (2), (3), (4), (5), (6), (7), (8)) q(id)) ej_t WHERE id <= 3	bigint(20) | 1
+key/groupBy	Asia/Kolkata	SELECT x AS v, count(*) AS n FROM (SELECT CASE id WHEN 1 THEN TIMESTAMPTZ '2024-07-01 12:00:00+00' WHEN 2 THEN TIMESTAMPTZ '2024-07-01 17:30:00+05:30' ELSE TIMESTAMPTZ '2024-07-01 13:00:00+00' END AS x FROM (SELECT * FROM (VALUES (1), (2), (3), (4), (5), (6), (7), (8)) q(id)) ej_t WHERE id <= 3) s GROUP BY x	timestamp with time zone(1184),bigint(20) | 2024-07-01 17:30:00+05:30,2; 2024-07-01 18:30:00+05:30,1
+key/orderBy	Asia/Kolkata	SELECT x AS v, row_number() OVER (ORDER BY x) AS r FROM (SELECT CASE id WHEN 1 THEN TIMESTAMPTZ '2024-07-01 12:00:00+05:30' WHEN 2 THEN TIMESTAMPTZ '2024-07-01 08:00:00+00' ELSE TIMESTAMPTZ '2024-07-01 03:00:00-04' END AS x FROM (SELECT * FROM (VALUES (1), (2), (3), (4), (5), (6), (7), (8)) q(id)) ej_t WHERE id <= 3) s	timestamp with time zone(1184),bigint(20) | 2024-07-01 12:00:00+05:30,1; 2024-07-01 12:30:00+05:30,2; 2024-07-01 13:30:00+05:30,3
+key/join	Asia/Kolkata	SELECT count(*) AS n FROM (SELECT id, CASE WHEN id = 1 THEN TIMESTAMPTZ '2024-07-01 12:00:00+00' END AS x FROM (SELECT * FROM (VALUES (1), (2), (3), (4), (5), (6), (7), (8)) q(id)) ej_t) a JOIN (SELECT id, CASE WHEN id = 2 THEN TIMESTAMPTZ '2024-07-01 17:30:00+05:30' END AS y FROM (SELECT * FROM (VALUES (1), (2), (3), (4), (5), (6), (7), (8)) q(id)) ej_t) b ON a.x = b.y	bigint(20) | 1
+ext/hour	Asia/Kolkata	SELECT extract(hour FROM TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	numeric(1700) | 12
+ext/epoch	Asia/Kolkata	SELECT extract(epoch FROM TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	numeric(1700) | 1719815400.000000
+ext/tzHour	Asia/Kolkata	SELECT extract(timezone_hour FROM TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	numeric(1700) | 5
+ext/tzMinute	Asia/Kolkata	SELECT extract(timezone_minute FROM TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	numeric(1700) | 30
+ext/tz	Asia/Kolkata	SELECT extract(timezone FROM TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	numeric(1700) | 19800
+ext/tzHourTs	Asia/Kolkata	SELECT extract(timezone_hour FROM TIMESTAMP '2024-07-01 12:00:00') AS v	ERR 0A000: unit "timezone_hour" not supported for type timestamp without time zone
+ext/datePartTzHour	Asia/Kolkata	SELECT date_part('timezone_hour', TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	double precision(701) | 5
+ext/datePartTz	Asia/Kolkata	SELECT date_part('timezone', TIMESTAMPTZ '2024-07-01 12:00:00+05:30') AS v	double precision(701) | 19800
+ext/truncDay	Asia/Kolkata	SELECT date_trunc('day', TIMESTAMPTZ '2024-07-01 02:00:00+05:30') AS v	timestamp with time zone(1184) | 2024-07-01 00:00:00+05:30
+ext/truncDayZone	Asia/Kolkata	SELECT date_trunc('day', TIMESTAMPTZ '2024-07-01 02:00:00+00', 'Asia/Kolkata') AS v	timestamp with time zone(1184) | 2024-07-01 00:00:00+05:30
+ext/toDate	Asia/Kolkata	SELECT CAST(TIMESTAMPTZ '2024-07-01 02:00:00+05:30' AS DATE) AS v	date(1082) | 2024-07-01
+ext/dateBin	Asia/Kolkata	SELECT date_bin(INTERVAL '1 hour', TIMESTAMPTZ '2024-07-01 12:34:00+05:30', TIMESTAMPTZ '2000-01-01 00:00:00+00') AS v	timestamp with time zone(1184) | 2024-07-01 12:30:00+05:30
+ext/timeBucket	Asia/Kolkata	SELECT time_bucket(INTERVAL '1 hour', TIMESTAMPTZ '2024-07-01 12:34:00+05:30') AS v	ERR 42883: function time_bucket(interval, timestamp with time zone) does not exist
+ar/diff	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' - TIMESTAMPTZ '2024-07-01 10:00:00+00' AS v	interval(1186) | 02:00:00
+ar/plusInt	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' + 1 AS v	ERR 42883: operator does not exist: timestamp with time zone + integer
+ar/plusInterval	Asia/Kolkata	SELECT TIMESTAMPTZ '2024-07-01 12:00:00+00' + INTERVAL '1 day' AS v	timestamp with time zone(1184) | 2024-07-02 17:30:00+05:30
