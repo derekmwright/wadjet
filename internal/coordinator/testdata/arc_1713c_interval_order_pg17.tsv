@@ -518,6 +518,65 @@ tsub/case	id:bigint | 1; 2; 4
 tsub/tsMinusDiff	id:bigint,a:timestamp | 1,2024-01-01 00:00:00; 2,2024-01-01 00:00:00; 3,2024-01-01 00:00:00; 4,2024-01-01 00:00:00; 5,NULL
 tsub/epochVsNumber	id:bigint | 2; 4
 tsub/intervalTimesDiff	ERR 42883
+td/groupBy	n:bigint | 1; 1; 1; 1; 1
+td/orderBy	id:bigint | 3; 1; 2; 4; 5
+td/distinct	v:interval | -1 days; 30 days 10:00:00; 59 days 23:30:00; 60 days 12:00:00; NULL
+td/avg	v:interval | 37 days 11:22:30
+td/min	v:interval | -1 days
+td/max	v:interval | 60 days 12:00:00
+td/count	v:bigint | 4
+td/ltNumber	ERR 42883
+td/eqNumber	ERR 42883
+td/div	id:bigint,v:interval | 1,00:43:48; 2,01:26:22.2; 3,-00:01:26.4; 4,01:27:07.2; 5,NULL
+td/divWhere	ERR 42883
+td/times2	id:bigint,v:interval | 1,60 days 20:00:00; 2,118 days 47:00:00; 3,-2 days; 4,120 days 24:00:00; 5,NULL
+td/plus1	ERR 42883
+td/onePlus	ERR 42883
+td/minus1	ERR 42883
+td/negate	id:bigint,v:interval | 1,-30 days -10:00:00; 2,-59 days -23:30:00; 3,1 day; 4,-60 days -12:00:00; 5,NULL
+td/datePartEpoch	id:bigint,e:double precision | 1,2628000; 2,5182200; 3,-86400; 4,5227200; 5,NULL
+td/extractDay	id:bigint,e:numeric | 1,30; 2,59; 3,-1; 4,60; 5,NULL
+td/castBigint	ERR 42846
+td/castDouble	ERR 42846
+td/castText	id:bigint,v:text | 1,30 days 10:00:00; 2,59 days 23:30:00; 3,-1 days; 4,60 days 12:00:00; 5,NULL
+td/caseNumber	ERR 42804
+td/caseAlone	id:bigint,v:interval | 1,30 days 10:00:00; 2,NULL; 3,NULL; 4,NULL; 5,NULL
+td/coalesceNumber	ERR 42804
+td/nullifNumber	ERR 42883
+td/greatestNumber	ERR 42804
+td/leastInterval	id:bigint,v:interval | 1,30 days 10:00:00; 2,40 days; 3,-1 days; 4,40 days; 5,40 days
+td/abs	ERR 42883
+td/round	ERR 42883
+td/toChar	id:bigint,v:text | 1,30 10; 2,59 23; 3,-1 00; 4,60 12; 5,NULL
+td/joinKey	l:bigint,r:bigint | 1,1; 2,2; 3,3; 4,4
+td/joinNumber	ERR 42883
+td/windowArg	id:bigint,v:interval | 1,NULL; 2,30 days 10:00:00; 3,59 days 23:30:00; 4,-1 days; 5,60 days 12:00:00
+td/windowSum	id:bigint,v:interval | 1,30 days 10:00:00; 2,89 days 33:30:00; 3,88 days 33:30:00; 4,148 days 45:30:00; 5,148 days 45:30:00
+td/windowOrder	id:bigint,v:numeric | 1,4; 2,6; 3,3; 4,10; 5,15
+td/windowPartition	id:bigint,v:bigint | 1,1; 2,1; 3,1; 4,1; 5,1
+td/havingInterval	id:bigint | 2; 4
+td/derived	n:bigint | 5
+td/derivedWhere	n:bigint | 2
+td/cte	n:bigint | 5
+td/cteUnused	n:bigint | 5
+td/scalarSubquery	v:interval | 60 days 12:00:00
+td/unionArm	v:interval | -1 days; 1 day; 30 days 10:00:00; 59 days 23:30:00; 60 days 12:00:00; NULL
+td/array	v:oid1187 | {"30 days 10:00:00"}
+td/concat	id:bigint,v:text | 1,30 days 10:00:00x
+td/vsUnknown	id:bigint | 1; 2; 4
+td/unknownRight	id:bigint,v:interval | 1,30 days 10:00:00; 2,59 days 23:30:00; 3,-1 days; 4,60 days 12:00:00; 5,NULL
+td/unknownLeft	id:bigint,v:interval | 1,29 days 14:00:00; 2,00:30:00; 3,61 days; 4,-12:00:00; 5,NULL
+td/nullRight	id:bigint,v:interval | 1,NULL; 2,NULL; 3,NULL; 4,NULL; 5,NULL
+td/tzCast	id:bigint,v:interval | 1,30 days 10:00:00; 2,59 days 23:30:00; 3,-1 days; 4,60 days 12:00:00; 5,NULL
+td/dateCast	id:bigint,v:interval | 1,-10:00:00; 2,-23:30:00; 3,00:00:00; 4,-12:00:00; 5,NULL
+td/shiftedMinus	id:bigint,v:interval | 1,1 day; 2,1 day; 3,1 day; 4,1 day; 5,NULL
+td/isNull	id:bigint,b:boolean | 1,f; 2,f; 3,f; 4,f; 5,t
+td/isNotNull	id:bigint | 1; 2; 3; 4
+td/ctlEpochDiff	id:bigint,b:boolean | 1,f; 2,t; 3,f; 4,t; 5,NULL
+td/ctlDateDiffDays	id:bigint,v:integer | 1,30; 2,59; 3,-1; 4,60; 5,NULL
+td/ctlShiftKey	id:bigint | 3; 1; 2; 4; 5
+td/ctlUnknownInterval	ERR 22007
+td/ctlCompareTs	l:bigint,r:bigint | 2,3; 4,3
 lp/plusNull	a:interval | NULL
 lp/casePlusNull	a:interval | NULL
 lp/multiField	a:text | 1 day 02:00:00

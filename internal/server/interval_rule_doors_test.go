@@ -84,14 +84,27 @@ func TestIntervalRuleOnEveryDoor(t *testing.T) {
 		{"SELECT id FROM vld ORDER BY INTERVAL '1 day' * id, id", "0A000", sentence},
 		{"SELECT max(INTERVAL '1 day') AS r FROM vld", "0A000", "max over an interval argument is not supported"},
 		{"SELECT CASE WHEN id = 1 THEN INTERVAL '1 day' ELSE id END AS r FROM vld", "42804", "cannot be matched"},
-		// A timestamp difference beside an interval (#1713d round 3):
-		// PostgreSQL answers it, the difference is milliseconds here.
+		// A timestamp difference is an interval (#1713d rounds 3 and 6):
+		// PostgreSQL answers each 0A000 statement, the difference is
+		// milliseconds here; `> 1000` is PostgreSQL's own 42883.
 		{"SELECT count(*) AS n FROM vld WHERE CAST(d AS TIMESTAMP) - TIMESTAMP '1998-01-01 00:00:00' > INTERVAL '30 days'", "0A000",
-			"a timestamp difference (timestamp - timestamp) cannot yet be compared with an interval (>)"},
+			"a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as an operand of a comparison (>)"},
+		{"SELECT CAST(d AS TIMESTAMP) - TIMESTAMP '1998-01-01 00:00:00' AS r FROM vld WHERE id = 1", "0A000",
+			"a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column"},
+		{"SELECT sum(CAST(d AS TIMESTAMP) - TIMESTAMP '1998-01-01 00:00:00') AS r FROM vld", "0A000",
+			"a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as an argument of sum"},
+		{"SELECT extract(epoch FROM CAST(d AS TIMESTAMP) - TIMESTAMP '1998-01-01 00:00:00') AS r FROM vld", "0A000",
+			"a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as an argument of extract"},
+		{"SELECT count(*) AS n FROM vld WHERE CAST(d AS TIMESTAMP) - TIMESTAMP '1998-01-01 00:00:00' > 1000", "42883",
+			"operator does not exist: interval > integer"},
+		{"SELECT count(*) AS n FROM vld GROUP BY CAST(d AS TIMESTAMP) - TIMESTAMP '1998-01-01 00:00:00'", "0A000",
+			"a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a GROUP BY key"},
 		{"SELECT count(*) AS n FROM vld WHERE d - DATE '1998-01-01' > INTERVAL '30 days'", "42883", "operator does not exist"},
 		// Controls.
 		{"SELECT count(*) AS n FROM vld WHERE d + INTERVAL '1 month' > TIMESTAMP '1998-12-15 00:00:00'", "", ""},
 		{"SELECT CAST(INTERVAL '1 day' * 2 AS TEXT) AS r FROM vld WHERE id = 1", "", ""},
+		{"SELECT extract(epoch FROM CAST(d AS TIMESTAMP)) - extract(epoch FROM TIMESTAMP '1998-01-01 00:00:00') AS r FROM vld WHERE id = 1", "", ""},
+		{"SELECT d - DATE '1998-01-01' AS r FROM vld WHERE id = 1", "", ""},
 	} {
 		var got []string
 		check := func(door, state, text string) {

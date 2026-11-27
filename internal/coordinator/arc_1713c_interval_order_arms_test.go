@@ -724,20 +724,18 @@ func TestArc1713cMeasure(t *testing.T) {
 //   - obs/dateAdd*, ctl/dateAdd: date_add answers PostgreSQL's instant as a
 //     timestamp where PostgreSQL's date_add is timestamptz ("+00"): the zone
 //     type this engine lacks (temporal r9 / r10's family), not the interval.
-//   - tsub/*: timestamp subtraction is a double of milliseconds here and an
-//     interval there (temporal r16); date - date is bigint here, integer
-//     there; timestamp - date is 42883 here. Measured and left unchanged (the
-//     brief's correction 1). Beside an interval (compared, combined by + or
-//     -, a CASE / COALESCE / NULLIF / GREATEST / LEAST branch) the difference
-//     is refused 0A000 (ivRefused, #1713d round 3): PostgreSQL answers those
-//     statements, so its 42883 would be a false claim, and base's answers
-//     compared milliseconds with an interval. tsub/tsDateVsInterval and
-//     tsub/tsMinusDiff: 42883 at base already (timestamp - date and
-//     timestamp - double have no operator here), unchanged.
-//     tsub/epochVsNumber: EXTRACT(epoch) of the difference is its millisecond
-//     count (frozen by the dispatch). tsub/intervalTimesDiff: interval ×
-//     the double is 22008 here (the product overflows), 42883 there
-//     (interval * interval), unchanged from round 2.
+//   - tsub/*, td/*: a timestamp difference is an interval there (temporal
+//     r16) and a double of milliseconds here, so since #1713d round 6 it is
+//     an interval-valued PRODUCER in the rule (ivRefused): every use but IS
+//     [NOT] NULL is refused 0A000, or PostgreSQL's own 42883 / 42804 / 42846
+//     where PostgreSQL refuses an interval there (td/ltNumber, td/plus1,
+//     td/caseNumber, td/castBigint, tsub/vsNumber, tsub/intervalTimesDiff:
+//     no pin, PostgreSQL's code). td/abs and td/round are 0A000 here, 42883
+//     there (an interval's function argument, as for a literal). date - date
+//     is bigint here, integer there (ivTypeGaps). tsub/tsDate,
+//     tsub/tsDateVsInterval and tsub/tsMinusDiff: 42883 at base already
+//     (timestamp - date and timestamp - double have no operator here; the
+//     planner's operator resolution precedes the interval rule), unchanged.
 //   - lp/multiField: a multi-field interval literal is 22007 here, accepted
 //     there (1713c's literal grammar, unchanged).
 //   - fam/opaqueEmpty@dag*, pos/divZeroEmpty@dag*: a row-dependent error
@@ -774,18 +772,10 @@ var ivKnown = map[string]string{
 	"pos/divZeroEmpty@dag":          "ERR 22012",
 	"pos/divZeroEmpty@dag-shuffled": "ERR 22012",
 	"pos/divZeroEmpty@dag-morsel4":  "ERR 22012",
-	"tsub/tsTs":                     "a | 97200000",
 	"tsub/tsDate":                   "ERR 42883",
-	"tsub/rows":                     "l,r,dt | 2,1,2554200000; 3,2,-5268600000; 4,3,5313600000; 5,4,NULL",
 	"tsub/tsDateVsInterval":         "ERR 42883",
 	"tsub/tsMinusDiff":              "ERR 42883",
-	"tsub/epochVsNumber":            "id | 1; 2; 4",
-	"tsub/intervalTimesDiff":        "ERR 22008",
 	"lp/multiField":                 "ERR 22007",
-	"tsub/vsNumber":                 "id | 1; 2; 4",
-	"tsub/groupKey":                 "k,n | -86400000,1; 2628000000,1; 5182200000,1; 5227200000,1",
-	"tsub/sum":                      "s | 12951000000",
-	"tsub/epoch":                    "id,e | 1,2628000000; 2,5182200000; 3,-86400000; 4,5227200000; 5,NULL",
 	"ddl/intervalArray":             "ERR 42601",
 }
 
@@ -1022,6 +1012,53 @@ var ivRefused = map[string]bool{
 	"tsub/leastWide":           true,
 	"tsub/nullif":              true,
 	"tsub/case":                true,
+	// #1713d round 6: the timestamp difference is an interval-valued
+	// producer; every use but IS [NOT] NULL is refused (ivCellsTD).
+	"tsub/tsTs":          true,
+	"tsub/rows":          true,
+	"tsub/epochVsNumber": true,
+	"tsub/groupKey":      true,
+	"tsub/sum":           true,
+	"tsub/epoch":         true,
+	"td/groupBy":         true,
+	"td/orderBy":         true,
+	"td/distinct":        true,
+	"td/avg":             true,
+	"td/min":             true,
+	"td/max":             true,
+	"td/count":           true,
+	"td/div":             true,
+	"td/times2":          true,
+	"td/negate":          true,
+	"td/datePartEpoch":   true,
+	"td/extractDay":      true,
+	"td/castText":        true,
+	"td/caseAlone":       true,
+	"td/leastInterval":   true,
+	"td/abs":             true,
+	"td/round":           true,
+	"td/toChar":          true,
+	"td/joinKey":         true,
+	"td/windowArg":       true,
+	"td/windowSum":       true,
+	"td/windowOrder":     true,
+	"td/windowPartition": true,
+	"td/havingInterval":  true,
+	"td/derived":         true,
+	"td/derivedWhere":    true,
+	"td/cte":             true,
+	"td/cteUnused":       true,
+	"td/scalarSubquery":  true,
+	"td/unionArm":        true,
+	"td/array":           true,
+	"td/concat":          true,
+	"td/vsUnknown":       true,
+	"td/unknownRight":    true,
+	"td/unknownLeft":     true,
+	"td/nullRight":       true,
+	"td/tzCast":          true,
+	"td/dateCast":        true,
+	"td/shiftedMinus":    true,
 }
 
 // ivTypeGaps is a cell's declared header where its VALUE agrees with
@@ -1031,7 +1068,8 @@ var ivTypeGaps = map[string]string{
 	"obs/extractTsType": "a:double precision,b:double precision",
 	// date - date is bigint here, integer there (temporal r16's class,
 	// unchanged).
-	"tsub/dateDate": "a:bigint",
+	"tsub/dateDate":      "a:bigint",
+	"td/ctlDateDiffDays": "id:bigint,v:bigint",
 	// `INTERVAL '1 day' + NULL` is NULL on both sides, published as text
 	// here (the NULL addend is not classified interval-valued, so the
 	// publication rule does not see an interval) and interval there.

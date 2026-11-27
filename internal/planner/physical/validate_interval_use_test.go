@@ -100,40 +100,81 @@ func TestIntervalRuleAtTheBinder(t *testing.T) {
 	})
 }
 
-// A timestamp difference beside an interval (#1713d round 3): the
-// difference is a double of milliseconds here (ADR-0012 temporal r16) and an
-// interval on PostgreSQL 17.11, which answers every refused statement below
-// (the coordinator's tsub/* cells). The refusal is 0A000 with the operation
-// named and the workaround that answers today; `date - date` is an integer
-// on both sides, and PostgreSQL's own 42883 for `integer > interval` stays.
-func TestTimestampDifferenceBesideAnIntervalIsRefused(t *testing.T) {
-	const ms = "it is a number of milliseconds here, not an interval; compare the timestamps themselves instead, " +
-		"for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts + INTERVAL '30 days'"
+// A timestamp difference is an INTERVAL-valued producer (#1713d round 6, the
+// maintainer's ruling on ADR-0012 temporal r16): PostgreSQL 17.11 types
+// `timestamp - timestamp` interval and this engine computes a double of
+// milliseconds, so no statement may observe that number. Each use is decided
+// as PostgreSQL decides it for an interval (1713d_r6.md's measured table, the
+// coordinator's td/* and tsub/* cells): a publication, key, aggregate,
+// function argument or comparison is refused 0A000 naming the difference; a
+// number beside it is PostgreSQL's own 42883 / 42804 / 42846; IS [NOT] NULL
+// answers. `date - date` is an integer on both sides and is not a difference.
+func TestTimestampDifferenceIsAnIntervalValuedProducer(t *testing.T) {
+	const why = "a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as "
+	const how = ": compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + " +
+		"INTERVAL '30 days' or a.ts > b.ts + INTERVAL '30 days', or take a number of seconds as " +
+		"extract(epoch FROM ts2) - extract(epoch FROM ts1)"
 	df := "c_ts - TIMESTAMP '2024-01-01 00:00:00'"
 	cells := []brCell{
-		{"SELECT id FROM tm WHERE " + df + " > INTERVAL '30 days'", "0A000", "a timestamp difference (timestamp - timestamp) cannot yet be compared with an interval (>): " + ms},
-		{"SELECT id FROM tm WHERE INTERVAL '30 days' <= " + df, "0A000", "compared with an interval (<=)"},
-		{"SELECT id, " + df + " = INTERVAL '1 day' AS b FROM tm", "0A000", "compared with an interval (=)"},
-		{"SELECT a.id FROM tm a JOIN tm b ON a.c_ts - b.c_ts <> INTERVAL '1 day'", "0A000", "compared with an interval (!=)"},
-		{"SELECT id FROM tm WHERE (" + df + ") < INTERVAL '1 day'", "0A000", "compared with an interval (<)"},
-		{"SELECT id FROM tm WHERE " + df + " >= INTERVAL '1 day'", "0A000", "compared with an interval (>=)"},
-		{"SELECT id FROM tm WHERE " + df + " BETWEEN INTERVAL '1 day' AND INTERVAL '2 days'", "0A000", "compared with an interval (between)"},
-		{"SELECT id FROM tm WHERE " + df + " IN (INTERVAL '1 day', INTERVAL '2 days')", "0A000", "compared with an interval (in)"},
-		{"SELECT id FROM tm WHERE NULLIF(" + df + ", INTERVAL '1 day') IS NULL", "0A000", "compared with an interval (=)"},
-		{"SELECT id FROM tm WHERE (" + df + ") + INTERVAL '1 day' > INTERVAL '2 days'", "0A000", "combined with an interval (+)"},
-		{"SELECT id FROM tm WHERE INTERVAL '1 day' - (" + df + ") > INTERVAL '2 days'", "0A000", "combined with an interval (-)"},
-		{"SELECT id FROM tm WHERE COALESCE(" + df + ", INTERVAL '0 days') > INTERVAL '2 days'", "0A000", "matched with an interval in COALESCE"},
-		{"SELECT id FROM tm WHERE GREATEST(" + df + ", INTERVAL '1 day') > INTERVAL '2 days'", "0A000", "matched with an interval in GREATEST"},
-		{"SELECT id FROM tm WHERE CASE WHEN id > 1 THEN " + df + " ELSE INTERVAL '1 day' END > INTERVAL '2 days'", "0A000", "matched with an interval in CASE"},
-		// PostgreSQL's own refusal: date - date is an integer there too.
+		// Published, keyed, ordered, aggregated: PostgreSQL answers each.
+		{"SELECT " + df + " AS d FROM tm", "0A000", why + "a query result column" + how},
+		{"SELECT a.c_ts - b.c_ts AS d FROM tm a, tm b", "0A000", why + "a query result column"},
+		{"SELECT count(*) AS n FROM tm GROUP BY " + df, "0A000", why + "a GROUP BY key"},
+		{"SELECT id FROM tm ORDER BY " + df, "0A000", why + "an ORDER BY key"},
+		{"SELECT sum(" + df + ") AS s FROM tm", "0A000", why + "an argument of sum"},
+		{"SELECT count(" + df + ") AS s FROM tm", "0A000", why + "an argument of count"},
+		{"SELECT max(" + df + ") AS s FROM tm", "0A000", why + "an argument of max"},
+		{"SELECT id, lag(" + df + ") OVER (ORDER BY id) AS v FROM tm", "0A000", why + "an argument of lag"},
+		{"SELECT id, sum(id) OVER (ORDER BY " + df + ") AS v FROM tm", "0A000", why + "a window ORDER BY key"},
+		{"SELECT id FROM tm WHERE extract(epoch FROM " + df + ") > 1000", "0A000", why + "an argument of extract"},
+		{"SELECT date_part('epoch', " + df + ") AS e FROM tm", "0A000", why + "an argument of date_part"},
+		{"SELECT CAST(" + df + " AS TEXT) AS v FROM tm", "0A000", why + "the operand of a cast to text"},
+		{"SELECT abs(" + df + ") AS v FROM tm", "0A000", why + "an argument of abs"},
+		{"SELECT ARRAY[" + df + "] AS v FROM tm", "0A000", why + "an array element"},
+		{"SELECT count(*) AS n FROM (SELECT " + df + " AS d FROM tm) x", "0A000", why + "a query result column"},
+		{"WITH c AS (SELECT " + df + " AS d FROM tm) SELECT 1 AS one", "0A000", why + "a query result column"},
+		{"SELECT id, (" + df + ") / 1000 AS v FROM tm", "0A000", why + "a query result column"},
+		{"SELECT id, CASE WHEN id = 1 THEN " + df + " END AS v FROM tm", "0A000", why + "a query result column"},
+		{"SELECT id, c_ts - '2024-01-01' AS v FROM tm", "0A000", why + "a query result column"},
+		{"SELECT id, '2024-01-01' - c_ts AS v FROM tm", "0A000", why + "a query result column"},
+		{"SELECT id, c_ts - NULL AS v FROM tm", "0A000", why + "a query result column"},
+		// Beside an interval (round 3's cells): compared, combined, matched.
+		{"SELECT id FROM tm WHERE " + df + " > INTERVAL '30 days'", "0A000", why + "an operand of a comparison (>)" + how},
+		{"SELECT id FROM tm WHERE INTERVAL '30 days' <= " + df, "0A000", "an operand of a comparison (<=)"},
+		{"SELECT id, " + df + " = INTERVAL '1 day' AS b FROM tm", "0A000", "an operand of a comparison (=)"},
+		{"SELECT a.id FROM tm a JOIN tm b ON a.c_ts - b.c_ts <> INTERVAL '1 day'", "0A000", "an operand of a comparison (!=)"},
+		{"SELECT a.id FROM tm a JOIN tm b ON (a.c_ts - b.c_ts) = (b.c_ts - a.c_ts)", "0A000", "an operand of a comparison (=)"},
+		{"SELECT id FROM tm WHERE " + df + " BETWEEN INTERVAL '1 day' AND INTERVAL '2 days'", "0A000", "an operand of a comparison (between)"},
+		{"SELECT id FROM tm WHERE " + df + " IN (INTERVAL '1 day', INTERVAL '2 days')", "0A000", "an operand of a comparison (in)"},
+		{"SELECT id FROM tm WHERE " + df + " > '1 day'", "0A000", "an operand of a comparison (>)"},
+		{"SELECT id FROM tm WHERE NULLIF(" + df + ", INTERVAL '1 day') IS NULL", "0A000", "an operand of a comparison (=)"},
+		{"SELECT id FROM tm WHERE (" + df + ") + INTERVAL '1 day' > INTERVAL '2 days'", "0A000", "an operand of a comparison (>)"},
+		{"SELECT id FROM tm WHERE COALESCE(" + df + ", INTERVAL '0 days') > INTERVAL '2 days'", "0A000", "an operand of a comparison (>)"},
+		{"SELECT id FROM tm WHERE GREATEST(" + df + ", INTERVAL '1 day') > INTERVAL '2 days'", "0A000", "an operand of a comparison (>)"},
+		{"SELECT id FROM tm WHERE CASE WHEN id > 1 THEN " + df + " ELSE INTERVAL '1 day' END > INTERVAL '2 days'", "0A000", "an operand of a comparison (>)"},
+		// A number beside it: PostgreSQL's own refusal for an interval.
+		{"SELECT id FROM tm WHERE " + df + " > 1000", "42883", "operator does not exist: interval > integer"},
+		{"SELECT id, (" + df + ") + 1 AS v FROM tm", "42883", "operator does not exist: interval + integer"},
+		{"SELECT id, 1 + (" + df + ") AS v FROM tm", "42883", "operator does not exist: integer + interval"},
+		{"SELECT id FROM tm WHERE (" + df + ") / 1000 > 50", "42883", "operator does not exist: interval > integer"},
+		{"SELECT CAST(" + df + " AS BIGINT) AS v FROM tm", "42846", "cannot cast type interval to bigint"},
+		{"SELECT CASE WHEN id = 1 THEN " + df + " ELSE 0 END AS v FROM tm", "42804", "CASE types integer and interval cannot be matched"},
+		{"SELECT COALESCE(" + df + ", 0) AS v FROM tm", "42804", "COALESCE types interval and integer cannot be matched"},
+		{"SELECT NULLIF(" + df + ", 0) AS v FROM tm", "42883", "operator does not exist: interval = integer"},
+		{"SELECT id FROM tm WHERE " + df, "42804", "argument of WHERE must be type boolean, not type interval"},
+		// date - date is an integer there too: PostgreSQL's own 42883.
 		{"SELECT id FROM tm WHERE c_date - DATE '2024-01-01' > INTERVAL '30 days'", "42883", "operator does not exist: bigint > interval"},
-		// Controls: the workaround, and the difference used as a value
-		// (temporal r16's millisecond double, unchanged).
+		// Controls: the workarounds the message names, date - date, IS NULL,
+		// a single timestamp's epoch, a quoted interval beside a timestamp
+		// (not a difference), and a timestamp shift as a key.
 		{"SELECT id FROM tm WHERE c_ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days'", "", ""},
 		{"SELECT a.id FROM tm a JOIN tm b ON a.c_ts > b.c_ts + INTERVAL '30 days'", "", ""},
-		{"SELECT " + df + " AS d FROM tm", "", ""},
-		{"SELECT id FROM tm WHERE " + df + " > 1000", "", ""},
-		{"SELECT id FROM tm WHERE extract(epoch FROM " + df + ") > 1000", "", ""},
+		{"SELECT extract(epoch FROM c_ts) - extract(epoch FROM TIMESTAMP '2024-01-01 00:00:00') AS s FROM tm", "", ""},
+		{"SELECT c_date - DATE '2024-01-01' AS d FROM tm ORDER BY c_date - DATE '2024-01-01'", "", ""},
+		{"SELECT id, (" + df + ") IS NULL AS b FROM tm", "", ""},
+		{"SELECT id FROM tm WHERE (" + df + ") IS NOT NULL", "", ""},
+		{"SELECT c_ts - '1 day' AS a FROM tm", "22007", "invalid input syntax for type timestamp"},
+		{"SELECT id FROM tm ORDER BY c_ts + INTERVAL '1 day'", "", ""},
 	}
 	runBRCells(t, cells)
 }

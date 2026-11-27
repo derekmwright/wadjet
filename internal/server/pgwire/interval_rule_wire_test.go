@@ -118,3 +118,101 @@ func TestIntervalRuleOverTheWire(t *testing.T) {
 		t.Errorf("Execute of a published interval: %v, want 0A000", res.Err)
 	}
 }
+
+// A timestamp difference over pgwire (#1713d round 6): `timestamp -
+// timestamp` is an interval on PostgreSQL 17.11 and a millisecond number
+// here, so no statement on either protocol, with a parameter typed timestamp
+// (OID 1114, text, binary, NULL), untyped (OID 0) or none, and no write
+// through the wire, may answer from that number. PostgreSQL answers the
+// published and compared forms (`SELECT $1 - ts` is `2 days` there) and
+// refuses `> 1000` (42883) and the bigint write (42804).
+func TestTimestampDifferenceOverTheWire(t *testing.T) {
+	ctx := context.Background()
+	db, err := wadjet.Open(ctx, wadjet.Config{Store: objstore.NewMemStore(), Bucket: "tdwire"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.Close)
+	srv := NewServer(db, Config{}, nil)
+	if err := srv.Start("127.0.0.1:0"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.Shutdown)
+	conn := connectPgconn(t, srv.Addr())
+	for _, s := range []string{"CREATE TABLE tw (id BIGINT, ts TIMESTAMP, ts2 TIMESTAMP, n BIGINT, s TEXT)",
+		"INSERT INTO tw VALUES (1, TIMESTAMP '2024-01-01 00:00:00', TIMESTAMP '2024-01-02 03:00:00', NULL, NULL)"} {
+		if _, err := conn.Exec(ctx, s).ReadAll(); err != nil {
+			t.Fatalf("%s: %v", s, err)
+		}
+	}
+	state := func(err error) string {
+		var pe *pgconn.PgError
+		if errors.As(err, &pe) {
+			return pe.Code
+		}
+		if err != nil {
+			return "uncoded: " + err.Error()
+		}
+		return ""
+	}
+	const sentence = "a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as"
+	for _, c := range []struct{ sql, state string }{
+		{"SELECT ts2 - ts AS d FROM tw", "0A000"},
+		{"SELECT sum(ts2 - ts) AS d FROM tw", "0A000"},
+		{"SELECT extract(epoch FROM ts2 - ts) AS d FROM tw", "0A000"},
+		{"SELECT id FROM tw WHERE ts2 - ts > INTERVAL '1 hour'", "0A000"},
+		{"SELECT id FROM tw WHERE ts2 - ts > 1000", "42883"},
+		{"INSERT INTO tw (id, s) SELECT 2, ts2 - ts FROM tw", "0A000"},
+		{"UPDATE tw SET n = TIMESTAMP '2024-01-02 00:00:00' - TIMESTAMP '2024-01-01 00:00:00'", "42804"},
+		{"UPDATE tw SET s = TIMESTAMP '2024-01-02 00:00:00' - TIMESTAMP '2024-01-01 00:00:00'", "0A000"},
+		{"CREATE TABLE tw2 AS SELECT ts2 - ts AS d FROM tw", "0A000"},
+		// Controls.
+		{"SELECT extract(epoch FROM ts2) - extract(epoch FROM ts) AS d FROM tw", ""},
+		{"SELECT id FROM tw WHERE ts2 > ts + INTERVAL '1 hour'", ""},
+	} {
+		for _, proto := range []string{"simple", "extended"} {
+			var err error
+			if proto == "simple" {
+				_, err = conn.Exec(ctx, c.sql).ReadAll()
+			} else {
+				err = conn.ExecParams(ctx, c.sql, nil, nil, nil, nil).Read().Err
+			}
+			if got := state(err); got != c.state {
+				t.Errorf("%s %s: SQLSTATE %q (%v), want %q", proto, c.sql, got, err, c.state)
+			} else if c.state == "0A000" && !strings.Contains(err.Error(), sentence) {
+				t.Errorf("%s %s: %v does not name the timestamp difference", proto, c.sql, err)
+			}
+		}
+	}
+	// Parameters: typed timestamp (text, binary, NULL) and untyped text.
+	const oidTimestamp = 1114
+	bin := make([]byte, 8) // 2000-01-01 00:00:00, PostgreSQL's binary epoch
+	for _, c := range []struct {
+		name, sql string
+		val       []byte
+		oid       uint32
+		format    int16
+		state     string
+	}{
+		{"text/publish", "SELECT $1 - ts AS v FROM tw", []byte("2024-01-03 00:00:00"), oidTimestamp, 0, "0A000"},
+		{"text/number", "SELECT id FROM tw WHERE ts2 - $1 > 1000", []byte("2024-01-01 00:00:00"), oidTimestamp, 0, "42883"},
+		{"text/compare", "SELECT id FROM tw WHERE ts2 - $1 > INTERVAL '1 hour'", []byte("2024-01-01 00:00:00"), oidTimestamp, 0, "0A000"},
+		{"binary/publish", "SELECT ts - $1 AS v FROM tw", bin, oidTimestamp, 1, "0A000"},
+		{"null/publish", "SELECT ts - $1 AS v FROM tw", nil, oidTimestamp, 0, "0A000"},
+		{"untyped/publish", "SELECT ts2 - $1 AS v FROM tw", []byte("2024-01-01 00:00:00"), 0, 0, "0A000"},
+		{"text/control", "SELECT id FROM tw WHERE ts2 > $1", []byte("2024-01-01 00:00:00"), oidTimestamp, 0, ""},
+	} {
+		res := conn.ExecParams(ctx, c.sql, [][]byte{c.val}, []uint32{c.oid}, []int16{c.format}, nil).Read()
+		if got := state(res.Err); got != c.state {
+			t.Errorf("extended %s: SQLSTATE %q (%v) rows %q, want %q", c.name, got, res.Err, res.Rows, c.state)
+		}
+	}
+	// Prepared once, executed: refused at Execute as at every door.
+	if _, err := conn.Prepare(ctx, "td1", "SELECT ts2 - ts AS d FROM tw", nil); err != nil && state(err) != "0A000" {
+		t.Errorf("Describe of a published difference: %v, want 0A000 or a deferred plan", err)
+	} else if err == nil {
+		if res := conn.ExecPrepared(ctx, "td1", nil, nil, nil).Read(); state(res.Err) != "0A000" {
+			t.Errorf("Execute of a published difference: %v rows %q, want 0A000", res.Err, res.Rows)
+		}
+	}
+}

@@ -14,7 +14,7 @@ import "strings"
 // NOT be refused (an explicit text cast, a TEXT column that looks like an
 // interval, timestamp shifts as keys), the clause positions, the opaque
 // runtime guard, the INTERVAL DDL refusal and timestamp subtraction's class
-// (measured, behaviour unchanged).
+// (an interval-valued producer since round 6, ivCellsTD).
 //
 // The fixtures beside iv_s: iv_t (instants, for shifts read by a worker),
 // iv_o (text that is interval input this engine's fields cannot hold).
@@ -151,7 +151,8 @@ func ivCellsD() []ivCell {
 	add("pos/divZeroEmpty", "SELECT id FROM iv_s WHERE 1 / (id - id) = 1 AND id < 0")
 	add("pos/whereBoolean", "SELECT id FROM iv_s WHERE INTERVAL '1 day' ORDER BY id")
 
-	// Timestamp subtraction (temporal r16): measured, behaviour unchanged.
+	// Timestamp subtraction (temporal r16): an interval-valued producer since
+	// #1713d round 6 (ivCellsTD), refused wherever it is used.
 	add("tsub/tsTs", "SELECT TIMESTAMP '2024-01-02 03:00:00' - TIMESTAMP '2024-01-01 00:00:00' AS a")
 	add("tsub/dateDate", "SELECT DATE '2024-03-01' - DATE '2024-02-01' AS a")
 	add("tsub/tsDate", "SELECT TIMESTAMP '2024-01-02 03:00:00' - DATE '2024-01-01' AS a")
@@ -203,6 +204,7 @@ func ivCellsD() []ivCell {
 	add("tsub/tsMinusDiff", "SELECT id, ts - (ts - "+t0+") AS a FROM iv_t ORDER BY id")
 	add("tsub/epochVsNumber", "SELECT id FROM iv_t WHERE extract(epoch FROM "+df+") > 3000000 ORDER BY id")
 	add("tsub/intervalTimesDiff", "SELECT id FROM iv_t WHERE INTERVAL '1 day' * ("+df+") > INTERVAL '1 day' ORDER BY id")
+	out = append(out, ivCellsTD()...)
 	// The reviewer's lesser points (behaviour unchanged, measured).
 	add("lp/plusNull", "SELECT INTERVAL '1 day' + NULL AS a")
 	add("lp/casePlusNull", "SELECT CASE WHEN true THEN INTERVAL '1 day' + NULL END AS a")
@@ -221,3 +223,86 @@ func ivTypeNames(h string) string {
 	}
 	return strings.Join(cols, ",")
 }
+
+// ivCellsTD is the timestamp difference as an INTERVAL-valued producer
+// (#1713d round 6, the maintainer's ruling): PostgreSQL types `timestamp -
+// timestamp` interval, this engine computes a double of milliseconds
+// (temporal r16), so no use of it may answer from that number. Each use is
+// decided as PostgreSQL decides it for an interval: a publication, key,
+// aggregate or function argument is refused 0A000; a number beside it is
+// PostgreSQL's own 42883 / 42804 / 42846; IS [NOT] NULL answers. The td/ctl*
+// cells are the controls the rule must not reach (single-timestamp epoch
+// arithmetic, date - date, timestamp ± interval as a key).
+func ivCellsTD() []ivCell {
+	var out []ivCell
+	add := func(name, sql string) { out = append(out, ivCell{name: name, sql: sql, typed: true}) }
+	t0 := "TIMESTAMP '2024-01-01 00:00:00'"
+	df := "ts - " + t0
+	add("td/groupBy", "SELECT count(*) AS n FROM iv_t GROUP BY "+df+" ORDER BY n")
+	add("td/orderBy", "SELECT id FROM iv_t ORDER BY "+df+", id")
+	add("td/distinct", "SELECT DISTINCT "+df+" AS v FROM iv_t ORDER BY v")
+	add("td/avg", "SELECT avg("+df+") AS v FROM iv_t")
+	add("td/min", "SELECT min("+df+") AS v FROM iv_t")
+	add("td/max", "SELECT max("+df+") AS v FROM iv_t")
+	add("td/count", "SELECT count("+df+") AS v FROM iv_t")
+	add("td/ltNumber", "SELECT id FROM iv_t WHERE "+df+" < 1000 ORDER BY id")
+	add("td/eqNumber", "SELECT id FROM iv_t WHERE "+df+" = 2628000000 ORDER BY id")
+	add("td/div", "SELECT id, ("+df+") / 1000 AS v FROM iv_t ORDER BY id")
+	add("td/divWhere", "SELECT id FROM iv_t WHERE ("+df+") / 1000 > 3000000 ORDER BY id")
+	add("td/times2", "SELECT id, ("+df+") * 2 AS v FROM iv_t ORDER BY id")
+	add("td/plus1", "SELECT id, ("+df+") + 1 AS v FROM iv_t ORDER BY id")
+	add("td/onePlus", "SELECT id, 1 + ("+df+") AS v FROM iv_t ORDER BY id")
+	add("td/minus1", "SELECT id, ("+df+") - 1 AS v FROM iv_t ORDER BY id")
+	add("td/negate", "SELECT id, -("+df+") AS v FROM iv_t ORDER BY id")
+	add("td/datePartEpoch", "SELECT id, date_part('epoch', "+df+") AS e FROM iv_t ORDER BY id")
+	add("td/extractDay", "SELECT id, extract(day FROM "+df+") AS e FROM iv_t ORDER BY id")
+	add("td/castBigint", "SELECT id, CAST("+df+" AS BIGINT) AS v FROM iv_t ORDER BY id")
+	add("td/castDouble", "SELECT id, CAST("+df+" AS DOUBLE PRECISION) AS v FROM iv_t ORDER BY id")
+	add("td/castText", "SELECT id, CAST("+df+" AS TEXT) AS v FROM iv_t ORDER BY id")
+	add("td/caseNumber", "SELECT id, CASE WHEN id = 1 THEN "+df+" ELSE 0 END AS v FROM iv_t ORDER BY id")
+	add("td/caseAlone", "SELECT id, CASE WHEN id = 1 THEN "+df+" END AS v FROM iv_t ORDER BY id")
+	add("td/coalesceNumber", "SELECT id, COALESCE("+df+", 0) AS v FROM iv_t ORDER BY id")
+	add("td/nullifNumber", "SELECT id, NULLIF("+df+", 0) AS v FROM iv_t ORDER BY id")
+	add("td/greatestNumber", "SELECT id, GREATEST("+df+", 0) AS v FROM iv_t ORDER BY id")
+	add("td/leastInterval", "SELECT id, LEAST("+df+", INTERVAL '40 days') AS v FROM iv_t ORDER BY id")
+	add("td/abs", "SELECT id, abs("+df+") AS v FROM iv_t ORDER BY id")
+	add("td/round", "SELECT id, round("+df+") AS v FROM iv_t ORDER BY id")
+	add("td/toChar", "SELECT id, to_char("+df+", 'DD HH24') AS v FROM iv_t ORDER BY id")
+	add("td/joinKey", "SELECT a.id AS l, b.id AS r FROM iv_t a JOIN iv_t b ON (a.ts - "+t0+") = (b.ts - "+t0+") ORDER BY l, r")
+	add("td/joinNumber", "SELECT a.id AS l, b.id AS r FROM iv_t a JOIN iv_t b ON a.id = b.id AND a.ts - b.ts > 1000 ORDER BY l, r")
+	add("td/windowArg", "SELECT id, lag("+df+") OVER (ORDER BY id) AS v FROM iv_t ORDER BY id")
+	add("td/windowSum", "SELECT id, sum("+df+") OVER (ORDER BY id) AS v FROM iv_t ORDER BY id")
+	add("td/windowOrder", "SELECT id, sum(id) OVER (ORDER BY "+df+") AS v FROM iv_t ORDER BY id")
+	add("td/windowPartition", "SELECT id, count(*) OVER (PARTITION BY "+df+") AS v FROM iv_t ORDER BY id")
+	add("td/havingInterval", "SELECT id FROM iv_t GROUP BY id HAVING sum("+df+") > INTERVAL '40 days' ORDER BY id")
+	add("td/derived", "SELECT count(*) AS n FROM (SELECT "+df+" AS d FROM iv_t) x")
+	add("td/derivedWhere", "SELECT count(*) AS n FROM (SELECT "+df+" AS d FROM iv_t) x WHERE d > INTERVAL '40 days'")
+	add("td/cte", "WITH c AS (SELECT "+df+" AS d FROM iv_t) SELECT count(*) AS n FROM c")
+	add("td/cteUnused", "WITH c AS (SELECT "+df+" AS d FROM iv_t) SELECT count(*) AS n FROM iv_t")
+	add("td/scalarSubquery", "SELECT (SELECT max("+df+") FROM iv_t) AS v")
+	add("td/unionArm", "SELECT v FROM (SELECT "+df+" AS v FROM iv_t UNION ALL SELECT INTERVAL '1 day') x ORDER BY v")
+	add("td/array", "SELECT ARRAY["+df+"] AS v FROM iv_t WHERE id = 1")
+	add("td/concat", "SELECT id, ("+df+") || 'x' AS v FROM iv_t WHERE id = 1")
+	add("td/vsUnknown", "SELECT id FROM iv_t WHERE "+df+" > '30 days' ORDER BY id")
+	add("td/unknownRight", "SELECT id, ts - '2024-01-01' AS v FROM iv_t ORDER BY id")
+	add("td/unknownLeft", "SELECT id, '2024-03-01' - ts AS v FROM iv_t ORDER BY id")
+	add("td/nullRight", "SELECT id, ts - NULL AS v FROM iv_t ORDER BY id")
+	add("td/tzCast", "SELECT id, CAST(ts AS TIMESTAMPTZ) - "+t0+" AS v FROM iv_t ORDER BY id")
+	add("td/dateCast", "SELECT id, CAST(d AS TIMESTAMP) - ts AS v FROM iv_t ORDER BY id")
+	add("td/shiftedMinus", "SELECT id, (ts + INTERVAL '1 day') - ts AS v FROM iv_t ORDER BY id")
+	add("td/isNull", "SELECT id, ("+df+") IS NULL AS b FROM iv_t ORDER BY id")
+	add("td/isNotNull", "SELECT id FROM iv_t WHERE ("+df+") IS NOT NULL ORDER BY id")
+	// Controls: not a timestamp difference.
+	add("td/ctlEpochDiff", "SELECT id, extract(epoch FROM ts) - extract(epoch FROM "+t0+") > 3000000 AS b FROM iv_t ORDER BY id")
+	add("td/ctlDateDiffDays", "SELECT id, d - DATE '2024-01-01' AS v FROM iv_t ORDER BY id")
+	add("td/ctlShiftKey", "SELECT id FROM iv_t ORDER BY ts + INTERVAL '1 day', id")
+	add("td/ctlUnknownInterval", "SELECT id, CAST(ts - '1 day' AS TEXT) AS v FROM iv_t ORDER BY id")
+	add("td/ctlCompareTs", "SELECT a.id AS l, b.id AS r FROM iv_t a JOIN iv_t b ON a.ts > b.ts + INTERVAL '60 days' ORDER BY l, r")
+	return out
+}
+
+// ivTDNumberFree are the td/* and tsub/* cells whose statement uses a
+// timestamp difference and that may ANSWER (IS [NOT] NULL: the number and the
+// interval are NULL on the same rows). Every other such cell must be a
+// refusal on every arm: TestArc1713dTimestampDifferenceIsNeverANumber.
+var ivTDNumberFree = map[string]bool{"td/isNull": true, "td/isNotNull": true}
