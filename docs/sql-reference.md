@@ -5180,6 +5180,13 @@ and never leaves it (#1713d):
   interval through `INSERT … SELECT` or `CREATE TABLE AS` is refused as a
   written value. On the PostgreSQL wire, `SET IntervalStyle` to anything but
   `postgres` is refused `0A000`: intervals display in the postgres style only.
+- Refused `0A000` where the engine used to answer `42883` for something
+  PostgreSQL has: `timestamp - date` and `date - timestamp` (compare the
+  values instead, for example `ts > CAST(d AS TIMESTAMP) + INTERVAL '30
+  days'`); `TIMESTAMPTZ + (TIMESTAMPTZ - TIMESTAMPTZ)` and `date_add` /
+  `date_subtract` over a `TIMESTAMPTZ` and an interval; and `age(...)` as a
+  query result column. `CAST(age(...) AS TEXT)` still fails as an unknown
+  function: the engine has no `age`.
 
 A TIMESTAMP result reaches the embedded API (`wadjet.QueryResult` rows), the
 HTTP and async query APIs and gRPC as epoch milliseconds, as a TIMESTAMP

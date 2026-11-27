@@ -716,6 +716,26 @@ refusal (325 cells); (3) the six TIME cells (`TIME - TIME`, `DATE ± TIME`)
 stay A refusals `time-type`. A owned 645 cells before the rulings and 320
 after.
 
+**The rulings on 1680c r3's 41 unmet cells** (`iv80R4Rulings`) rest on one
+principle: a cell's outcome is the earliest truthful rule that decides it;
+PostgreSQL's own error is never pre-empted; a code untrue of PostgreSQL (a
+42883 for a function or operator it has) becomes a named refusal. So the
+bare typmod literals are the bare-result refusal, and the two that overflow
+are PostgreSQL's 22008 / 22015. `age` is declared an interval producer.
+The binder names its refusal of `timestamp - date`, `date - timestamp`
+(`timestamp-date-difference`) and the timestamptz pairs (`timestamptz`).
+EXTRACT's and the opaque value's interim refusals decide their cells.
+
+A statement the engine does not accept as a statement form (the literal a
+later parse cannot read under `EXCEPT ALL` / `INTERSECT ALL` over VALUES; a
+write door's subquery in VALUES or SET, or a MERGE ON that is not a column
+equality) is **outside the program**: `not-accepted <SQLSTATE>`, no owning
+stage, met while every arm refuses it with that SQLSTATE and no refusal
+identity. Four A cells fit no ruling and remain unmet
+(`05_arith:mul/numeric`, `06_calendar:tsdiff/inf`,
+`07_functions:widthBucketArray`, `10_definitions:dst/gapInput`), so stage A
+is not declared landed.
+
 **Ownership: the earliest stage that admits what the cell needs**
 (`iv80EarliestStage`, `TestArc1680bStageRules`). Every refusal is owned by
 **A**: a named refusal holds at every stage from the first, so the

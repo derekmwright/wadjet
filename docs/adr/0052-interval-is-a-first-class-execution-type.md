@@ -78,6 +78,10 @@ Recommended: PostgreSQL's checked finite-width state; overflow raises 22008. Und
 
 A stage is landed when every corpus cell it owns meets its manifest outcome, which is one of exactly four: supported (value AND type equal PostgreSQL's), PostgreSQL's own error (same SQLSTATE), an intentional capability refusal (0A000 with its NAMED reason), or the approved representative divergence of §3. An internal guard error, a panic, an uncoded error or a wrong SQLSTATE meets none of them. A cell belongs to the earliest stage at which everything it needs has been admitted.
 
+A cell's outcome is the earliest truthful rule that decides it (the architect's rulings on 1680c r3, 2026-11-27). PostgreSQL's own error is never pre-empted: where the engine already raises it, that is the outcome. A code that is untrue of PostgreSQL, such as 42883 for a function or operator PostgreSQL has, becomes a named refusal.
+
+A statement the engine does not accept as a statement form is outside the program and is owned by no stage. Two kinds exist: a literal that a later parse inside the planner cannot read, and a write door's refusal of a statement's shape. Such a cell is recorded `not-accepted <SQLSTATE>` beside the parser's `not-parsed <SQLSTATE>`, and it is held only to that refusal, with no identity of the program's refusals.
+
 Typed lineage (record §9.1) is the contract that replaces the interim's assumption that a column is never an interval: the type lives in the bound output slot, is forwarded through aliases, projections, CTEs, derived tables and subqueries, is reconciled positionally across set-operation arms, is carried and validated in stage and transport schemas, and a declaration that is unresolved or disagrees with a runtime batch is a loud refusal.
 
 ## Consequences
