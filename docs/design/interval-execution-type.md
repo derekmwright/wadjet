@@ -58,12 +58,13 @@ variant as `section_cast:name~text`.
 | `…/<stem>_manifest.tsv` | the owning stage, the outcome, whether today's baseline meets it, and its legal alternatives |
 | `internal/server/pgwire/interval_client_evidence_test.go` with `testdata/interval_client_evidence_{pg17,engine}.tsv` | the client transcript (§7) and the IntervalStyle door assertions (§9) |
 
-**1,397 statements**: 1,307 queries and 23 writes under test, 34 fixtures and
+**1,398 statements**: 1,308 queries and 23 writes under test, 34 fixtures and
 33 PostgreSQL plan observations. Round 3 added 61 statements under test
 (`10_definitions:age/dateUTC`, `age/dateMonthNY`, `age/dateGapUTC`,
 `age/dateGapHavana` and their cast variants, `setop/*`; 42
 `11_relational:neg/*`; 6 `12_writes:w/neg/*`) and one plan
-(`10_definitions:explain/age/date`). Re-measuring left every earlier
+(`10_definitions:explain/age/date`). Round 4 added one
+(`01_input:cast/toChar`, §7). Re-measuring left every earlier
 PostgreSQL answer byte-identical, and every earlier engine answer is as
 recorded (`TestArc1680bEngineBaseline`).
 
@@ -438,7 +439,8 @@ applies the leading sign to every field (`02_fields:input/sqlstd/mixed`).
 (`cast/fromText`, `cast/colon`), `interval → text` (`cast/toText`, NULL
 `cast/toTextNull`), `interval → varchar` (`cast/toVarchar`, typed `character
 varying`, OID 1043), `time → interval` (`cast/fromTime`), `interval → time`
-(modulo 24 h, `cast/toTime`); `integer → interval`, `numeric → interval`,
+(modulo 24 h, `cast/toTime`), `interval → char(10)` (`cast/toChar`, typed
+`character`, OID 1042, blank-padded; outside the display path, §7); `integer → interval`, `numeric → interval`,
 `interval → bigint`, `interval → boolean` are 42846 (`cast/fromInt`,
 `cast/fromNumeric`, `cast/toBigint`, `07_functions:operand/castBool`).
 
@@ -577,19 +579,27 @@ stage, §9), **if forgotten** [inferred].
 
 **Ruling 1 (decided): a bare interval result stays refused.** Describe,
 execution, every door and zero-row results obey the same contract.
-**Display path.** Ruling 1 names an explicit scalar `CAST(<interval> AS
-TEXT)` as the only display path. The manifest holds `01_input:cast/toVarchar`
-(`CAST(INTERVAL '1 mon' AS VARCHAR)`) as `supported` in C with PostgreSQL's
-type `character varying` (OID 1043): this record reads the display path as an
-**explicit scalar cast to a character type** (TEXT, typed text; VARCHAR,
-typed character varying as PostgreSQL declares it), which is what the
-architect's character-type clarification asks the record to reconcile
-[proposed reading: the clarification's text was not in this round's inputs,
-so the architect confirms or replaces it]. The engine's VARCHAR is a TEXT
-carrier with a length channel the wire sends as 1043 (`pgColumnOID`); the
-corpus harness now names it `character varying`, so the cell's type is
-checked on every arm. Under the narrower reading (TEXT only) the cell becomes
-a named refusal and nothing else changes.
+**Display path.** Ruling 1, as the architect's addition (a) clarifies it:
+the display path is an **explicit scalar cast to a character type the engine
+declares correctly**, each measured against PostgreSQL's OID. The admitted
+set is exactly two types:
+
+| target | PostgreSQL [measured] | this engine's declaration | admitted |
+|---|---|---|---|
+| `TEXT` | `text` (25), `cast/toText`, `cast/toTextNull` | `text` (25) | yes (C) |
+| `VARCHAR` | `character varying` (1043), `cast/toVarchar` | a TEXT carrier with a length channel, sent as 1043 (`pgColumnOID`); the corpus harness names it `character varying`, so the type is checked on every arm | yes (C) |
+| `CHAR(n)` / `CHARACTER(n)` / `bpchar` | `character` (1042), blank-padded to n: `01_input:cast/toChar` (`CAST(INTERVAL '1 mon' AS CHAR(10))`) answers `a:character(1042) \| 1 mon     ` (ten characters) | **1043, unpadded**: `pgColumnOID` deliberately never sends 1042 because the engine implements neither bpchar's padding nor its trailing-blank rules (`internal/server/pgwire/server.go`, the comment above `pgColumnOID`; the residual is `docs/adr/0012-divergences/text-collation.md`) | **no**: refused, reason `char-display`, owned by A |
+
+CHAR is excluded because a stage admitting it would publish the wrong wire
+type (1043 for PostgreSQL's 1042) and an unpadded value, a silent wrong
+answer on both counts; that is a pre-existing CHAR gap, not an interval one,
+and it is not this program's to close. Today the engine answers
+`cast/toChar` with 42846 `cannot cast type interval to char(10)` on every
+arm (loud, the wrong SQLSTATE for the named refusal: the cell is `unmet`
+until A installs the `char-display` refusal). `VARCHAR` here means the
+measured unconstrained form; a length-qualified `VARCHAR(n)` (which truncates
+in PostgreSQL) is not measured by this record, and a stage admitting it
+measures it first.
 
 **Ruling 2 (decided): parameters are preserved as they are**: text and NULL
 interval parameters keep their behaviour; binary interval parameters stay
@@ -717,9 +727,9 @@ IntervalStyle. Today it is `ok` (unmet). (Negative control: a door answer of
 three sql_standard cells; a door answer of 0A000 with the bare-result
 sentence did not meet the iso_8601 cells.)
 
-**Today** (1,330 statements under test): A owns 644 (all refusals; 102 met:
+**Today** (1,331 statements under test): A owns 645 (all refusals; 102 met:
 the bare-result refusal 92, writes 3, generate_series 4, container 1,
-date_trunc 1, interval_hash 1; 542 unmet, most of them refused today with
+date_trunc 1, interval_hash 1; 543 unmet, most of them refused today with
 another reason's sentence or another SQLSTATE); C owns 536 (supported 67 met,
 361 unmet; PostgreSQL errors 54 met, 54 unmet); D owns 98 (52 supported, 44
 rep-divergence, 2 PostgreSQL errors; none met); E owns 52 (29 supported, 13
@@ -746,7 +756,7 @@ cannot discharge a relational line of D or an aggregate line of E.
 
 | stage | engagement work it owns |
 |---|---|
-| **B** | the triple and NULL carrier through selection, views, `Flatten` and pool reuse; spill round trips (sort runs, CTE spool, window passes, join partitions, the partial-aggregate codec); WSHF and gather round trips, empty streams included; an unknown type id refused loudly (§10); memory charged to its owner (ADR-0006); the encoded-Parquet refusal integration test (before the new id can reach storage) |
+| **B** | the triple and NULL carrier through selection, views, `Flatten` and pool reuse; spill round trips (sort runs, CTE spool, window passes, join partitions, the partial-aggregate codec); WSHF and gather round trips, empty streams included; the architect's two conditions on ruling 10 (§10): (1) every shuffle and spill reader validates each column's type byte in the HEADER, empty streams included, refusing an unknown id with SQLSTATE XX001 and the sentence §10 gives, and (2) the enforced homogeneous-version or capability contract that distributed admission of the type (D) requires; memory charged to its owner (ADR-0006); the encoded-Parquet refusal integration test (before the new id can reach storage) |
 | **C** | `make_interval`'s numeric-constructor sentinel handling (a result equal to a reserved triple is 22008, [pg-source] only today), with focused implementation checks; every scalar operation on both rounding paths |
 | **D** | asserted hash and sort-merge joins over interval keys; bloom on and off; key partitioning by N; top-N and late materialization; join spill; skew split; gather replay; key-only grouping / distinct precombine; representative provenance and eligibility through precombine, clone merging, spill and the final merge |
 | **E** | SUM / AVG states; clone merging of accumulators; aggregate precombine; partial-state spill; the distributed partial / final combine; window passes (frames, the inverse transition, window spill), family by family |
@@ -881,15 +891,51 @@ audits them.
 | **append one execution-only type id to the shared enum** (`storage/parquet/schema.go` `TypeID`), existing ids and DURATION's meaning unchanged, guarded so it can never be written to Parquet, Iceberg, the catalog or the wire as a column type (**recommended, architect**) | every codec keyed on the shared id (vectors, hashing, sort, spill, WSHF, gather) gains one case, and the transient codecs (WSHF, spill) gain a type byte value; the storage writers, the catalog and the doors each refuse it; `ParseTypeID("INTERVAL")` keeps answering DURATION |
 | a separate execution-type layer | a second identity beside the shared id. It need not duplicate every codec: adapters could translate at the boundary and share the physical codecs (a 16-byte fixed-width column is a shape several codecs already handle). The cost is the translation itself: every boundary between the layers (planner declarations, task wire, WSHF header, spill header, decoded vectors, doors) is a place where the identity must be mapped and could be lost |
 
-**The architect's two conditions on the recommended option** [as this
-record understands them from the second judge record's recommendation; the
-architect confirms]: (1) the transient codec extension (a new WSHF and spill
-type byte value) is explicitly authorized as part of the ruling, since it is
-a format change even if not a persistent one; (2) before any distributed
-interval admission (stage D's shuffle and gather), header validation
-refuses an unknown id including on an empty stream, and a homogeneous-version
-or capability contract is **enforced**, because changing the new reader
-cannot protect an already-deployed old one.
+**The architect's two conditions on the recommended option**, both
+**stage-B obligations** (the B row of the stage table and the engagement
+table, §9):
+
+1. **The shuffle and spill readers validate the type byte in the header,
+   empty streams included, with a coded refusal.** Every reader of a
+   transient stream (WSHF `ParseHeader` and the worker's
+   `shuffle_format.go` reader; the partial-aggregate spill header
+   `partialSpillHeader`; the columnar spill format of `join_spill.go`
+   `writeColumnarBatch` / `readColumnDecl`, shared by join partitions, sort
+   runs, CTE spool and window passes) checks each column's type byte against
+   the ids this binary knows **when it reads the header**, before and
+   independently of any chunk decode, so a stream with no rows is refused the
+   same as one with rows. [wadjet-source] The columnar spill format writes
+   the type byte per batch, not once per file, so a spill file with no
+   batches carries no type byte at all; B either gives that format a schema
+   header or shows that an empty spill file is never read back as typed
+   output (spill is written and read by one process within one query, so
+   this is defence against corruption, not against another binary). The refusal is SQLSTATE **XX001** (`data_corrupted`, the code
+   PostgreSQL raises when a file it reads is not in the format it expects),
+   sentence `<shuffle|spill> stream <path> column <i> has type id <n>, which
+   this binary does not know` [proposed, for the stage-B brief]. Not 0A000,
+   because the manifest credits 0A000 only as a named capability refusal a
+   user statement provokes (§9); not XX000 and not an uncoded error, because
+   the manifest's internal-failure exclusion rejects both (today's `unsupported
+   shuffle type` has no SQLSTATE).
+2. **Distributed admission of the type requires an enforced
+   homogeneous-version or capability contract.** Condition (1) protects only
+   a reader built with it; an already-deployed older reader still skips an
+   empty chunk and fails uncoded on a non-empty one (below). So before any
+   plan that moves an interval column between processes (stage D's shuffle,
+   gather and stage outputs) may run, the coordinator must know that every
+   process that can read it understands the id: each worker advertises its
+   build or an interval-capability marker, and the coordinator admits an
+   interval-carrying distributed plan only when every live worker it can
+   dispatch to advertises it, refusing loudly otherwise. ADR-0010's
+   wholesale-deploy rule states the policy but nothing enforces it, and no
+   worker capability or build advertisement exists today [wadjet-source:
+   none found in `internal/worker`, `internal/coordinator`,
+   `internal/distributed`]; B builds the enforcement, D depends on it.
+
+The recommendation's own clause (not one of the architect's conditions):
+approve the transient codec extension (a new WSHF and spill type byte value)
+explicitly as part of the ruling, since it is a format change even though not
+a persistent one.
 
 **Can a file carrying the new type byte outlive the query or be read by
 another binary?** [wadjet-source, corrected in round 3]
@@ -937,7 +983,7 @@ another binary?** [wadjet-source, corrected in round 3]
   chunk (`decodeChunkAt` → `minChunkBytes` → `FixedTypeLen`: `unsupported
   shuffle type`, an error with no SQLSTATE); an empty chunk is skipped before
   any decode (`decode.go`), so an older reader can accept an empty interval
-  stream without complaint. Hence condition (2) above.
+  stream without complaint. Hence conditions (1) and (2) above.
 
 ### Ruling 11: interval `sum` / `avg` overflow under parallel execution
 

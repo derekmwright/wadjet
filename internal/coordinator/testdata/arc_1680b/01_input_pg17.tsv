@@ -134,6 +134,7 @@ cast/fromText	a:interval(1186) | 1 day 02:00:00
 cast/colon	a:interval(1186) | 1 day
 cast/toText	a:text(25),b:text(25) | 1 day 02:00:00,-10 mons -3 days +04:05:06.7
 cast/toVarchar	a:character varying(1043) | 1 mon
+cast/toChar	a:character(1042) | 1 mon     
 cast/toTextNull	a:text(25) | NULL
 cast/fromInt	ERR 42846: cannot cast type integer to interval
 cast/fromNumeric	ERR 42846: cannot cast type numeric to interval

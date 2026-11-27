@@ -147,6 +147,8 @@ func iv80PGTypeName(oid uint32) string {
 		return "time with time zone"
 	case 1043:
 		return "character varying"
+	case 1042:
+		return "character"
 	case 1187:
 		return "interval[]"
 	case 1009:

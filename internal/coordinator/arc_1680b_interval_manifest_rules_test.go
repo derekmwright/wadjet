@@ -64,6 +64,7 @@ var iv80Reasons = map[string]iv80Reason{
 	"function-width_bucket":          iv80R("width_bucket over intervals (its own item)", `width_bucket`),
 	"range-offset-frame":             iv80R("a RANGE frame with an interval offset (offset RANGE frames are refused for every type today)", `RANGE.*(offset|PRECEDING|FOLLOWING)`),
 	"postgresql-internal-function":   iv80R("interval_hash / interval_hash_extended (PostgreSQL's internal hash support)", `interval_hash`),
+	"char-display":                   iv80R("an interval cast to CHAR(n) / bpchar: PostgreSQL declares OID 1042 and blank-pads to n; this engine declares CHAR as 1043 and does not pad (pgColumnOID), so only TEXT and VARCHAR are display types (ruling 1, addition (a))", `\b(char|character|bpchar)\b.*interval|interval.*\b(char|character|bpchar)\b`),
 	"timestamp-difference-to-number": iv80R("a timestamp difference compared with or written as a number", `timestamp difference`),
 }
 

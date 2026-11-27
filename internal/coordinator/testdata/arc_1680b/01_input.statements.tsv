@@ -132,6 +132,7 @@ cast/fromText	-	sql	SELECT CAST('1 day 02:00:00' AS INTERVAL) AS a
 cast/colon	-	sql	SELECT '1 day'::interval AS a
 cast/toText	-	sql	SELECT CAST(INTERVAL '1 day 2 hours' AS TEXT) AS a, CAST(INTERVAL '-1 year +2 mons -3 days 04:05:06.7' AS TEXT) AS b
 cast/toVarchar	-	sql	SELECT CAST(INTERVAL '1 mon' AS VARCHAR) AS a
+cast/toChar	-	sql	SELECT CAST(INTERVAL '1 mon' AS CHAR(10)) AS a
 cast/toTextNull	-	sql	SELECT CAST(CAST(NULL AS INTERVAL) AS TEXT) AS a
 cast/fromInt	-	sql	SELECT CAST(5 AS INTERVAL) AS a
 cast/fromNumeric	-	sql	SELECT CAST(1.5 AS INTERVAL) AS a

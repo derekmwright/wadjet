@@ -206,6 +206,9 @@ func iv80Input() []iv80Cell {
 	b.add("cast/colon", "SELECT '1 day'::interval AS a")
 	b.add("cast/toText", "SELECT CAST(INTERVAL '1 day 2 hours' AS TEXT) AS a, CAST(INTERVAL '-1 year +2 mons -3 days 04:05:06.7' AS TEXT) AS b")
 	b.add("cast/toVarchar", "SELECT CAST(INTERVAL '1 mon' AS VARCHAR) AS a")
+	// CHAR(n) / bpchar is outside the display path (§7): PostgreSQL declares
+	// OID 1042 and pads to n; this engine sends 1043 and does not pad.
+	b.add("cast/toChar", "SELECT CAST(INTERVAL '1 mon' AS CHAR(10)) AS a")
 	b.add("cast/toTextNull", "SELECT CAST(CAST(NULL AS INTERVAL) AS TEXT) AS a")
 	b.add("cast/fromInt", "SELECT CAST(5 AS INTERVAL) AS a")
 	b.add("cast/fromNumeric", "SELECT CAST(1.5 AS INTERVAL) AS a")

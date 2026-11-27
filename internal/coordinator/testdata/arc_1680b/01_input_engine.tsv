@@ -133,6 +133,7 @@ cast/fromText	*	refusal	ERR 0A000: interval values cannot yet be used as a query
 cast/colon	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 cast/toText	*	error	ERR 22007: invalid input syntax for type interval: "1 day 2 hours"
 cast/toVarchar	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+cast/toChar	*	error	ERR 42846: cannot cast type interval to char(10)
 cast/toTextNull	*	agree	a:text | NULL
 cast/fromInt	*	pg-error	ERR 42846: cannot cast type bigint to interval
 cast/fromNumeric	*	pg-error	ERR 42846: cannot cast type double precision to interval

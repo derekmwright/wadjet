@@ -95,6 +95,11 @@ func iv80Door(t *testing.T) map[string]string {
 	return out
 }
 
+// iv80CharCastRe: an interval cast to CHAR(n) / CHARACTER(n) / bpchar,
+// outside the display path (§7; ruling 1 as clarified by addition (a): a
+// character type the engine declares correctly).
+var iv80CharCastRe = regexp.MustCompile(`AS (CHAR|CHARACTER|BPCHAR)\b(\(\d+\))?\)|::(char|character|bpchar)\b`)
+
 var (
 	iv80TypmodRe    = regexp.MustCompile(`INTERVAL\(\d+\)|INTERVAL '[^']*' (YEAR|MONTH|DAY|HOUR|MINUTE|SECOND)|AS INTERVAL (YEAR|MONTH|DAY|HOUR|MINUTE|SECOND)|SECOND\(\d+\)`)
 	iv80TimeRe      = regexp.MustCompile(`\bTIME '|\bTIMETZ\b|AS TIME\)`)
@@ -195,6 +200,8 @@ func iv80ManifestOutcome(stem string, c iv80Cell, pg string) (outcome string) {
 		return "refusal time-type"
 	case iv80TypmodRe.MatchString(sql):
 		return "refusal typmod"
+	case iv80CharCastRe.MatchString(sql) && strings.Contains(sql, "INTERVAL"):
+		return "refusal char-display"
 	case strings.Contains(sql, "ARRAY[") || strings.Contains(sql, "array_agg(") || strings.Contains(strings.Join(types, ","), "[]"):
 		return "refusal container"
 	case strings.Contains(sql, "interval_hash"):

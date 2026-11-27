@@ -132,6 +132,7 @@ cast/fromText	A	refusal bare-interval-result	met	-
 cast/colon	A	refusal bare-interval-result	met	-
 cast/toText	C	supported	unmet	-
 cast/toVarchar	C	supported	unmet	-
+cast/toChar	A	refusal char-display	unmet	-
 cast/toTextNull	C	supported	met	-
 cast/fromInt	C	pg-error 42846	met	-
 cast/fromNumeric	C	pg-error 42846	met	-
