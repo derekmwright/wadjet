@@ -981,6 +981,12 @@ func (e *Executor) enforcePolicyDecision(task distributed.Task) error {
 	return nil
 }
 
+// asyncStatementStageID is the stage ID the coordinator's SubmitSQL gives the
+// one pipeline task that carries the user's statement text
+// (coordinator.go). The planner-written pipeline statements use their own
+// stage IDs ("build-cache-scan", "aggregate-cache-compute").
+const asyncStatementStageID = "pipeline-0"
+
 func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
 	if task.SQLText == "" {
 		return fmt.Errorf("pipeline task missing SQL text")
@@ -1020,10 +1026,22 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	// The binder again, over the text the coordinator validated: it is where
 	// a quoted literal beside a timestamptz by lineage is read as one — its
 	// text rewritten on the AST this plan is built from (#1680 line d,
-	// validate_timestamptz_lineage.go). The coordinator's own rewrite does
-	// not survive the hop, which carries the statement's original text.
-	if err := planner.ValidateColumns(ctx, selectInfo); err != nil {
-		return fmt.Errorf("validate: %w", err)
+	// validate_timestamptz_lineage.go) — and where a bare GROUP BY name an
+	// input column provides is taken back from the SELECT alias the parser
+	// substituted (#739). The coordinator's own binding does not survive the
+	// hop, which carries the statement's original text.
+	//
+	// ONLY the user's statement: the asynchronous door's task (SubmitSQL's
+	// one stage, "pipeline-0"), whose text SubmitSQL bound under the same
+	// rules before dispatch. Every other pipeline task carries a statement
+	// the PLANNER wrote — the build-cache pre-scan, the derived-aggregate
+	// pre-compute, whose `__scalar_N` output names are the reserved namespace
+	// a user statement is refused for — and is planned unbound, as before
+	// #1680: a user-facing refusal must never reach a statement no user wrote.
+	if task.Type == distributed.TaskTypePipeline && task.StageID == asyncStatementStageID {
+		if err := planner.ValidateColumns(ctx, selectInfo); err != nil {
+			return fmt.Errorf("validate: %w", err)
+		}
 	}
 
 	// Build and optimize logical plan
