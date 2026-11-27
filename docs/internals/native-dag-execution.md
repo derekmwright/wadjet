@@ -1512,6 +1512,70 @@ s ON …`, which loses `d` on the DAG, and the plain derived table's RENAME
 `SELECT c AS d`, which loses its alias the same way) is not covered by this
 route — nothing mints a slot there — and stays pinned in ADR-0012 until #984.
 
+## An outer join's filter over a padded derived table's computed column (refused → routed local)
+
+A WHERE above an outer join, or an outer join's own post-filter, that reads a
+derived table's COMPUTED column is re-spelled into that column's definition
+(a Project emits no stage; docs/internals/dag-filter-project-respelling.md).
+When the derived table is a side the join PADS with NULLs — the build of a
+LEFT join, the probe of a RIGHT join, either side of a FULL join — the stage
+DAG cannot run that filter:
+
+- a task whose padded side's partition is empty shapes that side from the
+  plan-declared side schema, which for a derived side that computes a column
+  disagrees with the stream (`physical.declaredJoinSchema`: the computed
+  column first, the absorbed projection's source columns left out), and the
+  gather refuses the files (`names column 2 "b.id" where an earlier file of
+  the same stage input named it "k"`, ADR-0010) whenever a NULL-padded row
+  survives the filter;
+- and the substituted definition is evaluated over the padding's NULL
+  inputs, where PostgreSQL's derived column is itself NULL: `s.r IS NULL`
+  over `(SELECT id, 1 AS r …) s` reached the LEFT join stage as `(1) is null`,
+  false on every padded row (R0's outer_constant, outer_nonstrict cells;
+  #1678 line j's ns/topLeftConst, ns/topLeftCoalesce, wrong on the DAG at
+  the base). Before #1678 line j qualified the build arm's definitions, the
+  strict cases answered wrong in silence as well.
+
+Mechanism (#1678 line j):
+
+- `dagplan.ErrOuterJoinDerivedFilterDistributed`, set in `walkStages`'s
+  NodeFilter branch (`stage_emission.go`) when
+  `logical.ResolveFilterThroughProjects` substituted a computed (not a
+  renamed) definition from a padded arm of ANY outer join its walk crosses —
+  the join carrying the filter, or one below an inner join that carries it
+  (`StagePlanner.paddedArms`, `substitutesComputedDefinition`; R0's
+  join2_outer_coalesce, `… LEFT JOIN (SELECT id, coalesce(v,0)+1 AS r …) s …
+  JOIN tb_big q ON q.v = s.r OR s.r IS NULL`, is the lower-join shape). A
+  derived table on the PRESERVED side stays on the DAG: it is never padded,
+  and a task whose preserved partition is empty emits nothing, so its
+  declaration never stands in.
+- `dagRefusalRoute` sends it to `Coordinator.runOuterJoinDerivedFilterLocal`,
+  the coordinator-local single-process pipeline over the bound plan, under
+  `runRefusedLocal`'s guards. Past the local result budget the statement
+  FAILS with the budget error (`… executes single-process on the coordinator
+  and its result exceeded the local budget (N bytes); narrow the query or
+  raise --local-fastpath-bytes`); there is no stage DAG to fall back to
+  (`TestArc1678jOuterJoinRouteOverBudgetRefuses`).
+- The asynchronous door (`SubmitSQL`) runs the statement as ONE pipeline
+  task, as it does for `ErrLateralIdentityDistributed`; the route only
+  withholds the probe split.
+- What an operator sees: the coordinator's Info log line `stage DAG refused
+  the plan, executing on the coordinator-local single-process pipeline` with
+  `construct="an outer join's filter over a derived table's computed column"`
+  and `refusal="an outer join's filter over a derived table's computed column
+  is not evaluable on the distributed path: stage join-N, filter \"…\""`,
+  then `refused plan answered on the local pipeline` with the row count (on
+  the asynchronous door: `stage DAG refused the plan, running it as one
+  pipeline task`). The counter is `Coordinator.OuterJoinDerivedFilterLocalRoutes()`,
+  a Go accessor like its sibling routes' (no metrics endpoint carries it).
+  No TPC-H query takes it (`TestTPCHNeverTakesTheOuterJoinDerivedFilterRoute`).
+
+The permanent repair is the declared side schema itself (#1678): declare a
+computed column after its input's columns and declare the source columns the
+absorbed projection keeps. The same disagreement is reached with no filter at
+all (a plain LEFT JOIN selecting a derived table's computed column, loud on
+the partitioned arms), which this route does not cover.
+
 ## Correlated subqueries (refused → routed local)
 
 A subquery whose correlation SURVIVES decorrelation (a non-equi correlation —

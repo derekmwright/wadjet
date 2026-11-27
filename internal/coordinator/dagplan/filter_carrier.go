@@ -220,8 +220,9 @@ func resolveFilterAliasSpelling(stages []Stage) {
 	}
 }
 
-// joinCarrierBuildQualifier answers, for a filter whose carrier is a JOIN
-// stage, the qualifier that names a BUILD-side column on that stage's stream:
+// joinCarrierBuildQualifier answers, for a JOIN stage — the one carrying a
+// filter, or any join below it (joinBuildQualifierFor) — the qualifier that
+// names a BUILD-side column on that stage's stream:
 // the scan that owns it when the build spans several (BuildColOrigins), the
 // build alias otherwise — the two names the worker qualifies the build's
 // columns by. Nil for every other carrier, and for a join with no build alias.
@@ -267,10 +268,29 @@ func joinCarrierBuildQualifier(s *Stage) func(table, col string) string {
 	}
 }
 
+// joinBuildQualifierFor answers, for a logical join this pass emitted a join
+// stage for, that stage's joinCarrierBuildQualifier; nil for any other node.
+// logical.ResolveFilterThroughProjects asks it at EVERY join its walk
+// crosses, not only the one whose stage carries the filter: a derived table
+// that is a lower join's build reaches the streams above under the name the
+// lower join's stream gave its columns, and its definition's bare names bind
+// the probe there as surely as on the lower join itself — round 2 qualified
+// only the first join and `upper(a.s) <> b.k OR lower(w.w) = lower(b.k)`
+// over `a JOIN b … JOIN w` reached the upper stage as
+// `upper(a.s) != (upper(s)) or …`, the probe compared with itself
+// (#1678 line j, round 3).
+func (p *StagePlanner) joinBuildQualifierFor(join *logical.Node) func(table, col string) string {
+	return p.joinBuildQualifiers[join]
+}
+
 // ErrOuterJoinDerivedFilterDistributed hands the coordinator's single-process
-// pipeline a plan in which an OUTER join stage carries a filter that
-// ResolveFilterThroughProjects re-spelled into a derived table's COMPUTED
-// definition (#1678 line j; substitutesComputedDefinition).
+// pipeline a plan in which a filter was re-spelled by
+// ResolveFilterThroughProjects into the COMPUTED definition of a derived
+// table that an outer join pads — the join carrying the filter, or one below
+// it (#1678 line j; paddedArms, substitutesComputedDefinition). Round 3 widened
+// it from the carrying join to every outer join the resolution crosses, for
+// the reason paddedArms gives; the rest of this comment is the carrying join's
+// half of it.
 //
 // The re-spelled filter reads the right columns. What it cannot survive is
 // the stage's EMPTY partitions: a task whose build (or, for RIGHT and FULL,
@@ -288,7 +308,9 @@ func joinCarrierBuildQualifier(s *Stage) func(table, col string) string {
 // recorded on #1678; until it is repaired, this class runs where the join is
 // one operator over whole inputs. A RENAME is not in the class: the
 // declaration names a renamed column by its source, as the stream does, and
-// the stage DAG answers those filters itself.
+// the stage DAG answers those filters itself. Nor is a derived table on the
+// join's PRESERVED side (round 3, paddedArms): only a padded side is ever
+// shaped from its declaration.
 var ErrOuterJoinDerivedFilterDistributed = errors.New(
 	"an outer join's filter over a derived table's computed column is not evaluable on the distributed path")
 
@@ -330,9 +352,70 @@ func substitutesComputedDefinition(n *logical.Node, names []string) bool {
 	return walk(n)
 }
 
-// isOuterJoinType reports whether a join stage's type pads one side with NULLs.
-func isOuterJoinType(t string) bool {
-	return t == "left" || t == "right" || t == "full"
+// paddedArms answers, for the subtree under a filter, the PADDED arms of
+// every outer join logical.ResolveFilterThroughProjects' walk can cross: the
+// side each join pads with NULLs — the build (Children[1]) of a LEFT join, the
+// probe (Children[0]) of a RIGHT join, both arms of a FULL join. A computed
+// definition substituted from a padded arm cannot be evaluated by the stage
+// DAG wherever the filter rides:
+//   - over a padded row the definition is computed from the padding's NULL
+//     inputs, where PostgreSQL's derived column is NULL — `b.one IS NULL`
+//     over `1 AS one` reads `(1) is null`, false on every padded row — and
+//     that holds for a filter carried by an upper INNER join as much as by
+//     the outer join itself (R0's join2_outer_coalesce; #1678 line j's
+//     ns/lowerLeft*: wrong on the DAG at the base);
+//   - a task whose padded partition is empty shapes that side from the
+//     declared side schema, and the gather refuses its file (ADR-0010).
+//
+// A derived table on the PRESERVED side is not in the class: it is never
+// padded, and a task whose preserved partition is empty emits no rows (owd/left,
+// owd/leftOrNull, ow/right, ns/lowerLeftConstPreservedSelf: right on every DAG
+// arm). The walk follows the resolver's: through Project, Distinct, Sort,
+// LIMIT and Window, into both arms of a join, stopping anywhere else.
+func (p *StagePlanner) paddedArms(child *logical.Node) []*logical.Node {
+	var out []*logical.Node
+	var walk func(*logical.Node)
+	walk = func(n *logical.Node) {
+		for n != nil {
+			switch n.Type {
+			case logical.NodeJoin:
+				if len(n.Children) != 2 {
+					return
+				}
+				switch p.PlanContext.MapJoinType(n.JoinType) {
+				case "left":
+					out = append(out, n.Children[1])
+				case "right":
+					out = append(out, n.Children[0])
+				case "full":
+					out = append(out, n.Children[0], n.Children[1])
+				}
+				walk(n.Children[0])
+				walk(n.Children[1])
+				return
+			case logical.NodeProject, logical.NodeDistinct, logical.NodeSort, logical.NodeLimit, logical.NodeWindow:
+				if len(n.Children) != 1 {
+					return
+				}
+				n = n.Children[0]
+			default:
+				return
+			}
+		}
+	}
+	walk(child)
+	return out
+}
+
+// substitutesComputedDefinitionInAny is substitutesComputedDefinition over
+// several subtrees.
+func substitutesComputedDefinitionInAny(arms []*logical.Node, names []string) bool {
+	for _, a := range arms {
+		if substitutesComputedDefinition(a, names) {
+			return true
+		}
+	}
+	return false
 }
 
 // filterInputStage returns the stage whose output columns the filter on the

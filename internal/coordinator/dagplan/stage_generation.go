@@ -134,6 +134,7 @@ func (p *StagePlanner) generateStages(node *logical.Node) []Stage {
 	p.windowAliasSeq = 0
 	p.windowRouteErr = nil
 	p.outerJoinFilterRouteErr = nil
+	p.joinBuildQualifiers = map[*logical.Node]func(table, col string) string{}
 	p.shadowRouteErr = nil
 	p.joinCondErr = nil
 	p.correlatedErr = nil

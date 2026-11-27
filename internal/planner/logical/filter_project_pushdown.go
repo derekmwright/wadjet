@@ -723,34 +723,81 @@ func rewriteASTThroughProject(ast plansql.Node, p projRefs) (plansql.Node, bool)
 // lowercased, for dagplan.resolveFilterAliasSpelling's alias/source choice (#656).
 // See docs/internals/dag-filter-project-respelling.md for the design.
 //
-// qualifyBuild, when non-nil, is for a predicate the outermost join's OWN
-// stage evaluates: each column reference a definition substituted from that
-// join's BUILD arm brings in is re-qualified by qualifyBuild(table, column),
-// table being the qualifier the definition wrote ("" when bare); an answer
-// of "" or of table itself leaves the reference as it stands. The
-// definition's names were bound in the arm's scope: on the join's stream a
-// bare name binds the PROBE first, and a qualifier from inside the arm (the
-// table's own name, `upper(t.s)`) is one the stream may not carry, so left
-// as written they read the other arm's column of that name (#1678 line j).
-func ResolveFilterThroughProjects(pred Predicate, child *Node, qualifyBuild func(table, column string) string) (ast plansql.Node, aliases []string, ok bool) {
+// qualifyBuild, when non-nil, names how EVERY join the walk crosses qualifies
+// its build side: qualifyBuild(join) answers that join's qualifier, or nil
+// for a join that qualifies nothing. Each column reference a definition
+// substituted from a join's BUILD arm brings in is re-qualified by
+// q(table, column), q being that join's qualifier and table the qualifier the
+// definition wrote ("" when bare); an answer of "" or of table itself leaves
+// the reference as it stands. The definition's names were bound in the arm's
+// scope: on the join's stream a bare name binds the PROBE first, and a
+// qualifier from inside the arm (the table's own name, `upper(t.s)`) is one
+// the stream may not carry, so left as written they read the other arm's
+// column of that name (#1678 line j). The rule is the same at every depth: a
+// derived table that is a LOWER join's build, read by a filter an upper join
+// carries, is qualified by the name the lower join's stream gave it, which
+// every stream above it carries on (#1678 line j, round 3).
+func ResolveFilterThroughProjects(pred Predicate, child *Node, qualifyBuild func(join *Node) func(table, column string) string) (ast plansql.Node, aliases []string, ok bool) {
 	if pred.ASTExpr == nil {
 		return nil, nil, false
 	}
 	var subst []string
-	ast, changed := resolveFilterInSubtree(pred.ASTExpr, child, false, &subst, qualifyBuild)
+	var bq *buildQualifying
+	if qualifyBuild != nil {
+		bq = &buildQualifying{qualifyFor: qualifyBuild, settled: map[*plansql.ColRef]bool{}}
+	}
+	ast, changed := resolveFilterInSubtree(pred.ASTExpr, child, false, &subst, bq)
 	if !changed {
 		return nil, nil, false
 	}
 	return ast, subst, true
 }
 
+// buildQualifying is the state of ResolveFilterThroughProjects' build-arm
+// qualification. held is one set per join whose BUILD arm the walk is inside,
+// outermost first: the references that join found present before its build
+// walk, and so are NOT its build arm's to qualify. A join deeper in that arm
+// re-makes every reference as a fresh node before its own build walk; carry
+// keeps each enclosing set's membership on the copy, so the enclosing join
+// still tells the query's own references (and its probe arm's) from the ones
+// its build arm brought in. Without it, `upper(a.s)` written by the query
+// above `a JOIN (x JOIN (SELECT upper(s) AS k …) y) b` was taken for one of
+// b's and re-qualified into b's stream: `upper(y.s) = (upper(y.s))`.
+//
+// settled holds the references a join has already qualified for its build
+// arm. The join that qualified one is the one whose stream first named the
+// column, and every stream above it carries that name on: a join further up
+// whose build arm holds that join leaves the reference as it stands. Its own
+// qualifier would only know its build's scans by bare name, and answered a
+// column the arm's probe also carries by the probe's scan:
+// `(SELECT x.id, y.k FROM t x JOIN (SELECT upper(s) AS k …) y …) b` arrived
+// as `upper(x.s)`, x's value for y's.
+type buildQualifying struct {
+	qualifyFor func(join *Node) func(table, column string) string
+	held       []map[*plansql.ColRef]bool
+	settled    map[*plansql.ColRef]bool
+}
+
+// carry records copy as a member of every enclosing set orig is a member of,
+// and as settled when orig is.
+func (bq *buildQualifying) carry(orig, copy *plansql.ColRef) {
+	for _, set := range bq.held {
+		if set[orig] {
+			set[copy] = true
+		}
+	}
+	if bq.settled[orig] {
+		bq.settled[copy] = true
+	}
+}
+
 // resolveFilterInSubtree walks the producing subtree applying each rename it
 // meets, and returns the expression as the stage carrying the filter will see
 // it. A subtree it cannot model STOPS the walk with whatever has been settled
 // so far, which is the spelling the predicate had on entry to that subtree.
-// qualifyBuild applies to the FIRST join the walk meets (see
-// ResolveFilterThroughProjects); joins below it resolve as before.
-func resolveFilterInSubtree(ast plansql.Node, n *Node, changed bool, subst *[]string, qualifyBuild func(table, column string) string) (plansql.Node, bool) {
+// bq, when non-nil, qualifies each join's build-arm definitions, at every
+// depth (see ResolveFilterThroughProjects).
+func resolveFilterInSubtree(ast plansql.Node, n *Node, changed bool, subst *[]string, bq *buildQualifying) (plansql.Node, bool) {
 	for ; n != nil; n = n.Children[0] {
 		switch n.Type {
 		case NodeJoin:
@@ -760,9 +807,17 @@ func resolveFilterInSubtree(ast plansql.Node, n *Node, changed bool, subst *[]st
 			if len(n.Children) != 2 {
 				return ast, changed
 			}
-			ast, changed = resolveFilterInSubtree(ast, n.Children[0], changed, subst, nil)
-			if qualifyBuild == nil {
-				return resolveFilterInSubtree(ast, n.Children[1], changed, subst, nil)
+			// The probe arm is walked under the same rule: a join inside it
+			// qualifies what ITS build arm brings in, by the name its own
+			// stream gives those columns, and the streams above carry that
+			// name on.
+			ast, changed = resolveFilterInSubtree(ast, n.Children[0], changed, subst, bq)
+			var q func(table, column string) string
+			if bq != nil {
+				q = bq.qualifyFor(n)
+			}
+			if q == nil {
+				return resolveFilterInSubtree(ast, n.Children[1], changed, subst, bq)
 			}
 			// Every reference present now is the query's own or the probe
 			// arm's. They are re-made as fresh nodes first: a definition the
@@ -772,12 +827,21 @@ func resolveFilterInSubtree(ast plansql.Node, n *Node, changed bool, subst *[]st
 			// nodes the build walk cannot produce tell the arms apart. A
 			// reference the build walk leaves that is not one of these fresh
 			// nodes came from a build-arm definition.
-			ast = rewriteColRefs(ast, func(r *plansql.ColRef) *plansql.ColRef { c := *r; return &c })
+			ast = rewriteColRefs(ast, func(r *plansql.ColRef) *plansql.ColRef {
+				c := *r
+				bq.carry(r, &c)
+				return &c
+			})
 			before := map[*plansql.ColRef]bool{}
 			plansql.WalkColRefs(ast, func(r *plansql.ColRef) { before[r] = true })
-			built, bchanged := resolveFilterInSubtree(ast, n.Children[1], changed, subst, nil)
+			// A join inside the build arm qualifies first; this join's
+			// qualifier then has the last word on every reference the arm
+			// brought in, because this join's stream is where it is read.
+			bq.held = append(bq.held, before)
+			built, bchanged := resolveFilterInSubtree(ast, n.Children[1], changed, subst, bq)
+			bq.held = bq.held[:len(bq.held)-1]
 			if built != ast {
-				built = qualifyIntroducedRefs(built, before, qualifyBuild)
+				built = qualifyIntroducedRefs(built, before, bq.settled, q)
 			}
 			return built, bchanged
 		case NodeDistinct, NodeSort, NodeLimit, NodeWindow:
@@ -831,17 +895,23 @@ func resolveFilterInSubtree(ast plansql.Node, n *Node, changed bool, subst *[]st
 // a substitution spliced in are the logical plan's own nodes, shared with the
 // single-process path, and are never written to. A reference qualify answers
 // "" or its own qualifier for is left as it stands.
-func qualifyIntroducedRefs(ast plansql.Node, keep map[*plansql.ColRef]bool, qualify func(table, column string) string) plansql.Node {
+//
+// A reference in settled was already qualified by a join DEEPER in the arm
+// (buildQualifying.settled) and is left as it stands; every reference this
+// call decides is added to settled for the joins above it.
+func qualifyIntroducedRefs(ast plansql.Node, keep, settled map[*plansql.ColRef]bool, qualify func(table, column string) string) plansql.Node {
 	return rewriteColRefs(ast, func(r *plansql.ColRef) *plansql.ColRef {
-		if keep[r] {
+		if keep[r] || settled[r] {
 			return r
 		}
 		q := qualify(r.Table, r.Column)
 		if q == "" || strings.EqualFold(q, r.Table) {
+			settled[r] = true
 			return r
 		}
 		c := *r
 		c.Table = q
+		settled[&c] = true
 		return &c
 	})
 }

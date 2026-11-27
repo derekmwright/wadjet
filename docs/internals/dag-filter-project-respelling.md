@@ -37,12 +37,21 @@ carries.
 
 A definition substituted from a join's BUILD arm is spelled in that arm's
 scope, and its bare names do not survive the move to the join's stream: there
-a bare name binds the PROBE first. When the predicate's carrier is the join's
-own stage, the stage DAG therefore passes a qualifier (dagplan's
-`joinCarrierBuildQualifier`: the owning scan from `BuildColOrigins`, else
-`BuildTableAlias`), and every bare reference the build arm's walk brought in
-is qualified by it — copy-on-write, so the logical plan's own definitions are
-untouched. Before that, `upper(a.s) = b.k` over `(SELECT upper(s) AS k FROM
+a bare name binds the PROBE first. The stage DAG therefore hands the resolver
+each join's qualifier (dagplan's `joinCarrierBuildQualifier`, recorded per
+logical join as its stage is emitted: the owning scan from `BuildColOrigins`,
+else `BuildTableAlias`), and every reference a join's build arm brought in is
+qualified by THAT join's answer — copy-on-write, so the logical plan's own
+definitions are untouched. This holds at every join the walk crosses, not
+only the one whose stage carries the predicate: a derived table that is a
+LOWER join's build reaches the upper streams under the name the lower join's
+stream gave its columns, and every stream above carries that name on. Round 2
+of #1678 line j qualified only the first join, and `upper(a.s) <> b.k OR
+lower(w.w) = lower(b.k)` over `a JOIN b … JOIN w` reached the upper join as
+`upper(a.s) != (upper(s)) or …`. A join inside a build arm qualifies first
+and keeps its answer: the enclosing join's qualifier knows its build's scans
+only by bare name and answered a column the arm's probe also carries by that
+probe's scan. Before that, `upper(a.s) = b.k` over `(SELECT upper(s) AS k FROM
 t) b` reached the join as `upper(a.s) = upper(s)`, which compared the probe
 with itself and admitted every pair whose probe value was not NULL (#1678
 line j). The outer-join residual follows the same rule
@@ -59,16 +68,23 @@ stream carries that name (the build alias, or a scan alias in
 `BuildColOrigins`); any other — the table's own name, `upper(t.s)` over `FROM
 t` — is re-qualified the same way.
 
-An OUTER join stage whose filter is re-spelled into a derived table's
-COMPUTED definition refuses the DAG plan (`ErrOuterJoinDerivedFilterDistributed`)
-and runs on the coordinator-local pipeline. The re-spelled filter is right;
-what fails is a task whose padded side's partition is empty, which shapes that
-side from the plan-declared side schema — a computed column first, the source
-columns the stream carries left out — so its file names its columns
-differently from its siblings' and the gather refuses the statement under
-ADR-0010. A rename is declared by its source name, as the stream carries it,
-and stays on the DAG. The declared-schema disagreement predates this rule and
-is reached by plain LEFT JOINs with no filter; it is recorded on #1678.
+A filter re-spelled into a COMPUTED definition of a derived table on a side
+an outer join PADS (the build of a LEFT join, the probe of a RIGHT join,
+either side of a FULL join) — the outer join carrying the filter or any outer
+join below the inner join that does — refuses the DAG plan
+(`ErrOuterJoinDerivedFilterDistributed`) and runs on the coordinator-local
+pipeline. What fails on the DAG is a task whose padded side's partition is
+empty, which shapes that side from the plan-declared side schema — a computed
+column first, the source columns the stream carries left out — so its file
+names its columns differently from its siblings' and the gather refuses the
+statement under ADR-0010; and the substituted definition is evaluated over the
+padding's NULL inputs (`(1) is null` for `s.r IS NULL` over `1 AS r`), where
+PostgreSQL's column is NULL. A rename is declared by its source name, as the
+stream carries it, and stays on the DAG; so does a derived table on the
+PRESERVED side, which is never padded nor shaped from its declaration. The
+declared-schema disagreement predates this rule and is reached by plain LEFT
+JOINs with no filter; it is recorded on #1678. See
+docs/internals/native-dag-execution.md for the route's log line and counter.
 
 It also stops at a Sort or a LIMIT. Those DO emit stages, carrying the
 names above them, so a predicate re-spelled past one would name a column

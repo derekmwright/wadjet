@@ -1082,6 +1082,12 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				stage.BuildColOrigins = buildNaming.BuildColOrigins()
 			}
 		}
+		// How this stage's stream names a build-side column, for a filter
+		// above it — here or at any join over it — re-spelled through a
+		// derived table this join builds (#1678 line j).
+		if q := joinCarrierBuildQualifier(&stage); q != nil && p.joinBuildQualifiers != nil {
+			p.joinBuildQualifiers[node] = q
+		}
 		// The join's own materialized columns travel with the stage: the
 		// worker drops them from the probe's output exactly as the
 		// single-process planner does, so the two paths publish one column
@@ -1191,14 +1197,15 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				// shares.
 				if len(node.Children) == 1 {
 					ast, names, resolved := logical.ResolveFilterThroughProjects(pred, node.Children[0],
-						joinCarrierBuildQualifier(&(*stages)[filterIdx]))
+						p.joinBuildQualifierFor)
 					if resolved {
 						exprStr, aliasNames, exprTree = ast.String(), names, ast
 					}
-					// An outer join's empty partitions cannot carry a filter
-					// over a computed derived column (ErrOuterJoinDerivedFilterDistributed).
-					if resolved && isOuterJoinType((*stages)[filterIdx].JoinType) &&
-						p.outerJoinFilterRouteErr == nil && substitutesComputedDefinition(node.Children[0], names) {
+					// A computed definition of a derived table an outer join
+					// pads cannot be evaluated here, by that join or by any
+					// join above it (ErrOuterJoinDerivedFilterDistributed).
+					if resolved && p.outerJoinFilterRouteErr == nil &&
+						substitutesComputedDefinitionInAny(p.paddedArms(node.Children[0]), names) {
 						p.outerJoinFilterRouteErr = fmt.Errorf("%w: stage %s, filter %q",
 							ErrOuterJoinDerivedFilterDistributed, (*stages)[filterIdx].ID, exprStr)
 					}

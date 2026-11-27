@@ -64,10 +64,17 @@ type StagePlanner struct {
 	// producer could compute (materializeWindowDeclaredInput).
 	windowRouteErr error
 
-	// outerJoinFilterRouteErr refuses a plan in which an OUTER join stage
-	// carries a filter whose build-arm definitions had to be re-qualified
+	// outerJoinFilterRouteErr refuses a plan in which a filter was re-spelled
+	// into a computed definition of a derived table an outer join pads
 	// (ErrOuterJoinDerivedFilterDistributed).
 	outerJoinFilterRouteErr error
+
+	// joinBuildQualifiers holds, per logical join this pass emitted a join
+	// stage for, how that stage's stream names a BUILD-side column
+	// (joinCarrierBuildQualifier). A filter re-spelled through a derived
+	// table qualifies each definition a join's build arm brings in by that
+	// join's own answer, at every depth (#1678 line j).
+	joinBuildQualifiers map[*logical.Node]func(table, col string) string
 
 	// shadowRouteErr refuses a plan whose SELECT list reads a derived table
 	// that computes a column under the name of a column of its own input,
