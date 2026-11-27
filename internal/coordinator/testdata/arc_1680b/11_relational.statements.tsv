@@ -1,0 +1,163 @@
+# #1680b interval corpus statements (arc_1680b_interval_corpus_cells_test.go). name<TAB>settings<TAB>kind<TAB>sql
+ddl/create/iv80_r	-	ddl	CREATE TABLE iv80_r (id BIGINT, g BIGINT, s TEXT, ts TIMESTAMP)
+ddl/insert/iv80_r	-	ddl	INSERT INTO iv80_r VALUES (1, 1, '1 mon', TIMESTAMP '2024-01-31 00:00:00'), (2, 1, '30 days', TIMESTAMP '2024-01-31 12:00:00'), (3, 1, '720:00:00', TIMESTAMP '2024-02-01 00:00:00'), (4, 2, '1 mon -30 days', TIMESTAMP '2024-02-29 00:00:00'), (5, 2, '0', TIMESTAMP '2024-03-01 00:00:00'), (6, 2, NULL, NULL), (7, 3, 'infinity', TIMESTAMP '2024-03-31 00:00:00'), (8, 3, '-infinity', TIMESTAMP '2024-04-01 00:00:00'), (9, 4, '-1 day', TIMESTAMP '2024-04-30 00:00:00'), (10, 4, '-24:00:00', TIMESTAMP '2024-05-31 00:00:00'), (11, 5, '1 day 02:00:00', TIMESTAMP '2024-06-01 00:00:00'), (12, 5, '1 year -1 second', TIMESTAMP '2024-06-02 00:00:00')
+rt/mul	-	sql	SELECT id, CAST(CAST(s AS INTERVAL) * 1.5 AS TEXT) AS x FROM iv80_r ORDER BY id
+rt/div	-	sql	SELECT id, CAST(CAST(s AS INTERVAL) / 3 AS TEXT) AS x FROM iv80_r ORDER BY id
+rt/neg	-	sql	SELECT id, CAST(-CAST(s AS INTERVAL) AS TEXT) AS x FROM iv80_r ORDER BY id
+rt/plus	-	sql	SELECT id, CAST(CAST(s AS INTERVAL) + INTERVAL '1 day 01:00:00' AS TEXT) AS x FROM iv80_r ORDER BY id
+rt/justify	-	sql	SELECT id, CAST(justify_interval(CAST(s AS INTERVAL)) AS TEXT) AS x FROM iv80_r ORDER BY id
+rt/cmp	-	sql	SELECT id, CAST(s AS INTERVAL) = INTERVAL '30 days' AS x FROM iv80_r ORDER BY id
+rt/lt	-	sql	SELECT id, CAST(s AS INTERVAL) < INTERVAL '0' AS x FROM iv80_r ORDER BY id
+rt/tsPlus	-	sql	SELECT id, CAST(ts + CAST(s AS INTERVAL) AS TEXT) AS x FROM iv80_r ORDER BY id
+rt/tsMinus	-	sql	SELECT id, CAST(ts - CAST(s AS INTERVAL) AS TEXT) AS x FROM iv80_r ORDER BY id
+rt/isfinite	-	sql	SELECT id, isfinite(CAST(s AS INTERVAL)) AS x FROM iv80_r ORDER BY id
+rt/extractDay	-	sql	SELECT id, extract(day FROM CAST(s AS INTERVAL)) AS x FROM iv80_r ORDER BY id
+rt/extractEpoch	-	sql	SELECT id, extract(epoch FROM CAST(s AS INTERVAL)) AS x FROM iv80_r ORDER BY id
+rt/datePart	-	sql	SELECT id, date_part('hour', CAST(s AS INTERVAL)) AS x FROM iv80_r ORDER BY id
+rt/text	-	sql	SELECT id, CAST(CAST(s AS INTERVAL) AS TEXT) AS x FROM iv80_r ORDER BY id
+rt/bare	-	sql	SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r ORDER BY id
+opaque/apply	-	sql	SELECT id, CAST(ts + CAST(s AS INTERVAL) AS TEXT) AS x FROM iv80_r WHERE id IN (11, 12) ORDER BY id
+opaque/compare	-	sql	SELECT id FROM iv80_r WHERE CAST(s AS INTERVAL) > INTERVAL '1 day' ORDER BY id
+opaque/text	-	sql	SELECT id, CAST(CAST(s AS INTERVAL) AS TEXT) AS x FROM iv80_r WHERE id IN (11, 12) ORDER BY id
+opaque/arith	-	sql	SELECT id, CAST(CAST(s AS INTERVAL) * 2 AS TEXT) AS x FROM iv80_r WHERE id IN (11, 12) ORDER BY id
+ord/text	-	sql	SELECT id, CAST(CAST(s AS INTERVAL) AS TEXT) AS t FROM iv80_r ORDER BY CAST(s AS INTERVAL), id
+ord/textDescNullsLast	-	sql	SELECT id, CAST(CAST(s AS INTERVAL) AS TEXT) AS t FROM iv80_r ORDER BY CAST(s AS INTERVAL) DESC NULLS LAST, id
+ord/topN	-	sql	SELECT id FROM iv80_r ORDER BY CAST(s AS INTERVAL) DESC NULLS LAST, id LIMIT 3
+filt/text	-	sql	SELECT id, CAST(CAST(s AS INTERVAL) AS TEXT) AS t FROM iv80_r WHERE CAST(s AS INTERVAL) >= INTERVAL '30 days' ORDER BY id
+grp/text/default	-	sql	SELECT CAST(CAST(s AS INTERVAL) AS TEXT) AS k, count(*) AS n FROM iv80_r GROUP BY CAST(s AS INTERVAL) ORDER BY min(id)
+grp/derived/default	-	sql	SELECT CAST(k AS TEXT) AS k, n FROM (SELECT CAST(s AS INTERVAL) AS k, count(*) AS n, min(id) AS lo FROM iv80_r GROUP BY CAST(s AS INTERVAL)) q ORDER BY lo
+distinct/text/default	-	sql	SELECT CAST(k AS TEXT) AS k FROM (SELECT DISTINCT CAST(s AS INTERVAL) AS k FROM iv80_r) q ORDER BY k NULLS FIRST
+grp/text/sortagg	enable_hashagg=off	sql	SELECT CAST(CAST(s AS INTERVAL) AS TEXT) AS k, count(*) AS n FROM iv80_r GROUP BY CAST(s AS INTERVAL) ORDER BY min(id)
+grp/derived/sortagg	enable_hashagg=off	sql	SELECT CAST(k AS TEXT) AS k, n FROM (SELECT CAST(s AS INTERVAL) AS k, count(*) AS n, min(id) AS lo FROM iv80_r GROUP BY CAST(s AS INTERVAL)) q ORDER BY lo
+distinct/text/sortagg	enable_hashagg=off	sql	SELECT CAST(k AS TEXT) AS k FROM (SELECT DISTINCT CAST(s AS INTERVAL) AS k FROM iv80_r) q ORDER BY k NULLS FIRST
+tuple/distinct/default	-	sql	SELECT CAST(a AS TEXT) AS a, CAST(b AS TEXT) AS b FROM (SELECT DISTINCT a, b FROM (VALUES (INTERVAL '1 mon', INTERVAL '24 hours'), (INTERVAL '30 days', INTERVAL '1 day')) v(a, b)) q
+tuple/distinctRev/default	-	sql	SELECT CAST(a AS TEXT) AS a, CAST(b AS TEXT) AS b FROM (SELECT DISTINCT a, b FROM (VALUES (INTERVAL '30 days', INTERVAL '1 day'), (INTERVAL '1 mon', INTERVAL '24 hours')) v(a, b)) q
+tuple/group/default	-	sql	SELECT CAST(a AS TEXT) AS a, CAST(b AS TEXT) AS b, count(*) AS n FROM (VALUES (INTERVAL '1 mon', INTERVAL '24 hours'), (INTERVAL '30 days', INTERVAL '1 day')) v(a, b) GROUP BY a, b
+tuple/distinct/sortagg	enable_hashagg=off	sql	SELECT CAST(a AS TEXT) AS a, CAST(b AS TEXT) AS b FROM (SELECT DISTINCT a, b FROM (VALUES (INTERVAL '1 mon', INTERVAL '24 hours'), (INTERVAL '30 days', INTERVAL '1 day')) v(a, b)) q
+tuple/distinctRev/sortagg	enable_hashagg=off	sql	SELECT CAST(a AS TEXT) AS a, CAST(b AS TEXT) AS b FROM (SELECT DISTINCT a, b FROM (VALUES (INTERVAL '30 days', INTERVAL '1 day'), (INTERVAL '1 mon', INTERVAL '24 hours')) v(a, b)) q
+tuple/group/sortagg	enable_hashagg=off	sql	SELECT CAST(a AS TEXT) AS a, CAST(b AS TEXT) AS b, count(*) AS n FROM (VALUES (INTERVAL '1 mon', INTERVAL '24 hours'), (INTERVAL '30 days', INTERVAL '1 day')) v(a, b) GROUP BY a, b
+ddl/create/iv80_tp	-	ddl	CREATE TABLE iv80_tp (id BIGINT, a TEXT, b TEXT)
+ddl/insert/iv80_tp	-	ddl	INSERT INTO iv80_tp VALUES (1, '1 mon', '24 hours'), (2, '30 days', '1 day'), (3, '720:00:00', '24:00:00'), (4, '30 days', '1 mon')
+tuple/table/default	-	sql	SELECT CAST(CAST(a AS INTERVAL) AS TEXT) AS a, CAST(CAST(b AS INTERVAL) AS TEXT) AS b, count(*) AS n, min(id) AS lo FROM iv80_tp GROUP BY CAST(a AS INTERVAL), CAST(b AS INTERVAL) ORDER BY lo
+tuple/table/sortagg	enable_hashagg=off	sql	SELECT CAST(CAST(a AS INTERVAL) AS TEXT) AS a, CAST(CAST(b AS INTERVAL) AS TEXT) AS b, count(*) AS n, min(id) AS lo FROM iv80_tp GROUP BY CAST(a AS INTERVAL), CAST(b AS INTERVAL) ORDER BY lo
+mixkey/group/default	-	sql	SELECT CAST(i AS TEXT) AS i, CAST(d AS TEXT) AS d, CAST(f AS TEXT) AS f, count(*) AS n FROM (VALUES (INTERVAL '1 mon', 1.0, CAST(0.0 AS DOUBLE PRECISION)), (INTERVAL '30 days', 1.00, CAST('-0' AS DOUBLE PRECISION)), (INTERVAL '720:00:00', 1.000, CAST(0.0 AS DOUBLE PRECISION))) v(i, d, f) GROUP BY i, d, f
+mixkey/distinct/default	-	sql	SELECT CAST(i AS TEXT) AS i, CAST(d AS TEXT) AS d, CAST(f AS TEXT) AS f FROM (SELECT DISTINCT i, d, f FROM (VALUES (INTERVAL '1 mon', 1.0, CAST(0.0 AS DOUBLE PRECISION)), (INTERVAL '30 days', 1.00, CAST('-0' AS DOUBLE PRECISION)), (INTERVAL '720:00:00', 1.000, CAST(0.0 AS DOUBLE PRECISION))) v(i, d, f)) q
+mixkey/group/sortagg	enable_hashagg=off	sql	SELECT CAST(i AS TEXT) AS i, CAST(d AS TEXT) AS d, CAST(f AS TEXT) AS f, count(*) AS n FROM (VALUES (INTERVAL '1 mon', 1.0, CAST(0.0 AS DOUBLE PRECISION)), (INTERVAL '30 days', 1.00, CAST('-0' AS DOUBLE PRECISION)), (INTERVAL '720:00:00', 1.000, CAST(0.0 AS DOUBLE PRECISION))) v(i, d, f) GROUP BY i, d, f
+mixkey/distinct/sortagg	enable_hashagg=off	sql	SELECT CAST(i AS TEXT) AS i, CAST(d AS TEXT) AS d, CAST(f AS TEXT) AS f FROM (SELECT DISTINCT i, d, f FROM (VALUES (INTERVAL '1 mon', 1.0, CAST(0.0 AS DOUBLE PRECISION)), (INTERVAL '30 days', 1.00, CAST('-0' AS DOUBLE PRECISION)), (INTERVAL '720:00:00', 1.000, CAST(0.0 AS DOUBLE PRECISION))) v(i, d, f)) q
+ordagg/minMax	-	sql	SELECT CAST(min(v ORDER BY id) AS TEXT) AS lo, CAST(max(v ORDER BY id DESC) AS TEXT) AS hi FROM (VALUES (1, INTERVAL '1 mon'), (2, INTERVAL '30 days')) q(id, v)
+ordagg/minMaxRev	-	sql	SELECT CAST(min(v ORDER BY id DESC) AS TEXT) AS lo, CAST(max(v ORDER BY id) AS TEXT) AS hi FROM (VALUES (1, INTERVAL '1 mon'), (2, INTERVAL '30 days')) q(id, v)
+ordagg/unordered	-	sql	SELECT CAST(min(v) AS TEXT) AS lo, CAST(max(v) AS TEXT) AS hi FROM (VALUES (1, INTERVAL '1 mon'), (2, INTERVAL '30 days')) q(id, v)
+ordagg/sumOrdered	-	sql	SELECT CAST(sum(v ORDER BY id) AS TEXT) AS s FROM (VALUES (1, INTERVAL '1 mon'), (2, INTERVAL '30 days')) q(id, v)
+ordagg/percentile	-	sql	SELECT CAST(percentile_disc(0.5) WITHIN GROUP (ORDER BY v) AS TEXT) AS p FROM (VALUES (1, INTERVAL '1 mon'), (2, INTERVAL '30 days')) q(id, v)
+distagg/sumAvg/default	-	sql	SELECT CAST(sum(DISTINCT v) AS TEXT) AS s, CAST(avg(DISTINCT v) AS TEXT) AS a, count(DISTINCT v) AS n FROM (VALUES (INTERVAL '1 mon'), (INTERVAL '30 days'), (INTERVAL '1 day')) q(v)
+distagg/sumAvgRev/default	-	sql	SELECT CAST(sum(DISTINCT v) AS TEXT) AS s, CAST(avg(DISTINCT v) AS TEXT) AS a, count(DISTINCT v) AS n FROM (VALUES (INTERVAL '1 day'), (INTERVAL '30 days'), (INTERVAL '1 mon')) q(v)
+distagg/sumAvg/sortagg	enable_hashagg=off	sql	SELECT CAST(sum(DISTINCT v) AS TEXT) AS s, CAST(avg(DISTINCT v) AS TEXT) AS a, count(DISTINCT v) AS n FROM (VALUES (INTERVAL '1 mon'), (INTERVAL '30 days'), (INTERVAL '1 day')) q(v)
+distagg/sumAvgRev/sortagg	enable_hashagg=off	sql	SELECT CAST(sum(DISTINCT v) AS TEXT) AS s, CAST(avg(DISTINCT v) AS TEXT) AS a, count(DISTINCT v) AS n FROM (VALUES (INTERVAL '1 day'), (INTERVAL '30 days'), (INTERVAL '1 mon')) q(v)
+distagg/countRows	-	sql	SELECT count(DISTINCT CAST(s AS INTERVAL)) AS n FROM iv80_r
+reparith/default	-	sql	SELECT TIMESTAMP '2024-01-31' + v AS t FROM (SELECT DISTINCT v FROM (VALUES (INTERVAL '1 mon'), (INTERVAL '30 days')) q(v)) d
+reparithRev/default	-	sql	SELECT TIMESTAMP '2024-01-31' + v AS t FROM (SELECT DISTINCT v FROM (VALUES (INTERVAL '30 days'), (INTERVAL '1 mon')) q(v)) d
+reparith/sortagg	enable_hashagg=off	sql	SELECT TIMESTAMP '2024-01-31' + v AS t FROM (SELECT DISTINCT v FROM (VALUES (INTERVAL '1 mon'), (INTERVAL '30 days')) q(v)) d
+reparithRev/sortagg	enable_hashagg=off	sql	SELECT TIMESTAMP '2024-01-31' + v AS t FROM (SELECT DISTINCT v FROM (VALUES (INTERVAL '30 days'), (INTERVAL '1 mon')) q(v)) d
+ddl/create/iv80_rt	-	ddl	CREATE TABLE iv80_rt (id BIGINT, ts TIMESTAMP, d DATE)
+ddl/insert/iv80_rt	-	ddl	INSERT INTO iv80_rt VALUES (1, TIMESTAMP '2024-01-31 10:00:00', DATE '2024-01-01'), (2, TIMESTAMP '2024-02-29 23:00:00', DATE '2024-03-01'), (3, NULL, DATE '2024-01-01'), (4, TIMESTAMP '2024-03-01 00:00:00', NULL)
+lag/tsDiff	-	sql	SELECT id, CAST(lag(NULL, 1, ts) OVER (ORDER BY id) - ts AS TEXT) AS t FROM iv80_rt ORDER BY id
+lag/tsDiffBare	-	sql	SELECT id, lag(NULL, 1, ts) OVER (ORDER BY id) - ts AS t FROM iv80_rt ORDER BY id
+lag/tsDiffCompare	-	sql	SELECT id FROM (SELECT id, lag(NULL, 1, ts) OVER (ORDER BY id) - ts AS t FROM iv80_rt) q WHERE t = INTERVAL '0' ORDER BY id
+tsdate/text	-	sql	SELECT id, CAST(ts - d AS TEXT) AS a, CAST(d - ts AS TEXT) AS b FROM iv80_rt ORDER BY id
+tsdate/bare	-	sql	SELECT id, ts - d AS a FROM iv80_rt ORDER BY id
+tsdate/compare	-	sql	SELECT id FROM iv80_rt WHERE ts - d > INTERVAL '30 days' ORDER BY id
+set/intersect/smallBig/default	-	sql	SELECT CAST(x AS TEXT) AS x FROM (SELECT x FROM (VALUES (INTERVAL '1 mon')) l(x) INTERSECT SELECT x FROM (VALUES (INTERVAL '30 days'), (INTERVAL '720:00:00'), (INTERVAL '1 day'), (INTERVAL '2 days'), (INTERVAL '3 days')) r(x)) u
+explain/set/intersect/smallBig/default	-	pg-only	EXPLAIN (COSTS OFF) SELECT x FROM (VALUES (INTERVAL '1 mon')) l(x) INTERSECT SELECT x FROM (VALUES (INTERVAL '30 days'), (INTERVAL '720:00:00'), (INTERVAL '1 day'), (INTERVAL '2 days'), (INTERVAL '3 days')) r(x)
+set/intersect/bigSmall/default	-	sql	SELECT CAST(x AS TEXT) AS x FROM (SELECT x FROM (VALUES (INTERVAL '30 days'), (INTERVAL '720:00:00'), (INTERVAL '1 day'), (INTERVAL '2 days'), (INTERVAL '3 days')) r(x) INTERSECT SELECT x FROM (VALUES (INTERVAL '1 mon')) l(x)) u
+explain/set/intersect/bigSmall/default	-	pg-only	EXPLAIN (COSTS OFF) SELECT x FROM (VALUES (INTERVAL '30 days'), (INTERVAL '720:00:00'), (INTERVAL '1 day'), (INTERVAL '2 days'), (INTERVAL '3 days')) r(x) INTERSECT SELECT x FROM (VALUES (INTERVAL '1 mon')) l(x)
+set/intersectAll/smallBig/default	-	sql	SELECT CAST(x AS TEXT) AS x FROM (SELECT x FROM (VALUES (INTERVAL '1 mon')) l(x) INTERSECT ALL SELECT x FROM (VALUES (INTERVAL '30 days'), (INTERVAL '720:00:00'), (INTERVAL '1 day'), (INTERVAL '2 days'), (INTERVAL '3 days')) r(x)) u
+explain/set/intersectAll/smallBig/default	-	pg-only	EXPLAIN (COSTS OFF) SELECT x FROM (VALUES (INTERVAL '1 mon')) l(x) INTERSECT ALL SELECT x FROM (VALUES (INTERVAL '30 days'), (INTERVAL '720:00:00'), (INTERVAL '1 day'), (INTERVAL '2 days'), (INTERVAL '3 days')) r(x)
+set/intersectAll/bigSmall/default	-	sql	SELECT CAST(x AS TEXT) AS x FROM (SELECT x FROM (VALUES (INTERVAL '30 days'), (INTERVAL '720:00:00'), (INTERVAL '1 day'), (INTERVAL '2 days'), (INTERVAL '3 days')) r(x) INTERSECT ALL SELECT x FROM (VALUES (INTERVAL '1 mon')) l(x)) u
+explain/set/intersectAll/bigSmall/default	-	pg-only	EXPLAIN (COSTS OFF) SELECT x FROM (VALUES (INTERVAL '30 days'), (INTERVAL '720:00:00'), (INTERVAL '1 day'), (INTERVAL '2 days'), (INTERVAL '3 days')) r(x) INTERSECT ALL SELECT x FROM (VALUES (INTERVAL '1 mon')) l(x)
+set/intersectAll/dupRight/default	-	sql	SELECT CAST(x AS TEXT) AS x FROM (SELECT x FROM (VALUES (INTERVAL '1 mon'), (INTERVAL '1 mon'), (INTERVAL '30 days')) l(x) INTERSECT ALL SELECT x FROM (VALUES (INTERVAL '720:00:00'), (INTERVAL '720:00:00')) r(x)) u
+explain/set/intersectAll/dupRight/default	-	pg-only	EXPLAIN (COSTS OFF) SELECT x FROM (VALUES (INTERVAL '1 mon'), (INTERVAL '1 mon'), (INTERVAL '30 days')) l(x) INTERSECT ALL SELECT x FROM (VALUES (INTERVAL '720:00:00'), (INTERVAL '720:00:00')) r(x)
+set/exceptAll/dupRight1/default	-	sql	SELECT CAST(x AS TEXT) AS x FROM (SELECT x FROM (VALUES (INTERVAL '1 mon'), (INTERVAL '1 mon'), (INTERVAL '30 days')) l(x) EXCEPT ALL SELECT x FROM (VALUES (INTERVAL '720:00:00')) r(x)) u
+explain/set/exceptAll/dupRight1/default	-	pg-only	EXPLAIN (COSTS OFF) SELECT x FROM (VALUES (INTERVAL '1 mon'), (INTERVAL '1 mon'), (INTERVAL '30 days')) l(x) EXCEPT ALL SELECT x FROM (VALUES (INTERVAL '720:00:00')) r(x)
+set/except/bigSmall/default	-	sql	SELECT CAST(x AS TEXT) AS x FROM (SELECT x FROM (VALUES (INTERVAL '30 days'), (INTERVAL '720:00:00'), (INTERVAL '1 day'), (INTERVAL '2 days'), (INTERVAL '3 days')) r(x) EXCEPT SELECT x FROM (VALUES (INTERVAL '1 mon')) l(x)) u
+explain/set/except/bigSmall/default	-	pg-only	EXPLAIN (COSTS OFF) SELECT x FROM (VALUES (INTERVAL '30 days'), (INTERVAL '720:00:00'), (INTERVAL '1 day'), (INTERVAL '2 days'), (INTERVAL '3 days')) r(x) EXCEPT SELECT x FROM (VALUES (INTERVAL '1 mon')) l(x)
+set/intersect/smallBig/sortagg	enable_hashagg=off	sql	SELECT CAST(x AS TEXT) AS x FROM (SELECT x FROM (VALUES (INTERVAL '1 mon')) l(x) INTERSECT SELECT x FROM (VALUES (INTERVAL '30 days'), (INTERVAL '720:00:00'), (INTERVAL '1 day'), (INTERVAL '2 days'), (INTERVAL '3 days')) r(x)) u
+explain/set/intersect/smallBig/sortagg	enable_hashagg=off	pg-only	EXPLAIN (COSTS OFF) SELECT x FROM (VALUES (INTERVAL '1 mon')) l(x) INTERSECT SELECT x FROM (VALUES (INTERVAL '30 days'), (INTERVAL '720:00:00'), (INTERVAL '1 day'), (INTERVAL '2 days'), (INTERVAL '3 days')) r(x)
+set/intersect/bigSmall/sortagg	enable_hashagg=off	sql	SELECT CAST(x AS TEXT) AS x FROM (SELECT x FROM (VALUES (INTERVAL '30 days'), (INTERVAL '720:00:00'), (INTERVAL '1 day'), (INTERVAL '2 days'), (INTERVAL '3 days')) r(x) INTERSECT SELECT x FROM (VALUES (INTERVAL '1 mon')) l(x)) u
+explain/set/intersect/bigSmall/sortagg	enable_hashagg=off	pg-only	EXPLAIN (COSTS OFF) SELECT x FROM (VALUES (INTERVAL '30 days'), (INTERVAL '720:00:00'), (INTERVAL '1 day'), (INTERVAL '2 days'), (INTERVAL '3 days')) r(x) INTERSECT SELECT x FROM (VALUES (INTERVAL '1 mon')) l(x)
+set/intersectAll/smallBig/sortagg	enable_hashagg=off	sql	SELECT CAST(x AS TEXT) AS x FROM (SELECT x FROM (VALUES (INTERVAL '1 mon')) l(x) INTERSECT ALL SELECT x FROM (VALUES (INTERVAL '30 days'), (INTERVAL '720:00:00'), (INTERVAL '1 day'), (INTERVAL '2 days'), (INTERVAL '3 days')) r(x)) u
+explain/set/intersectAll/smallBig/sortagg	enable_hashagg=off	pg-only	EXPLAIN (COSTS OFF) SELECT x FROM (VALUES (INTERVAL '1 mon')) l(x) INTERSECT ALL SELECT x FROM (VALUES (INTERVAL '30 days'), (INTERVAL '720:00:00'), (INTERVAL '1 day'), (INTERVAL '2 days'), (INTERVAL '3 days')) r(x)
+set/intersectAll/bigSmall/sortagg	enable_hashagg=off	sql	SELECT CAST(x AS TEXT) AS x FROM (SELECT x FROM (VALUES (INTERVAL '30 days'), (INTERVAL '720:00:00'), (INTERVAL '1 day'), (INTERVAL '2 days'), (INTERVAL '3 days')) r(x) INTERSECT ALL SELECT x FROM (VALUES (INTERVAL '1 mon')) l(x)) u
+explain/set/intersectAll/bigSmall/sortagg	enable_hashagg=off	pg-only	EXPLAIN (COSTS OFF) SELECT x FROM (VALUES (INTERVAL '30 days'), (INTERVAL '720:00:00'), (INTERVAL '1 day'), (INTERVAL '2 days'), (INTERVAL '3 days')) r(x) INTERSECT ALL SELECT x FROM (VALUES (INTERVAL '1 mon')) l(x)
+set/intersectAll/dupRight/sortagg	enable_hashagg=off	sql	SELECT CAST(x AS TEXT) AS x FROM (SELECT x FROM (VALUES (INTERVAL '1 mon'), (INTERVAL '1 mon'), (INTERVAL '30 days')) l(x) INTERSECT ALL SELECT x FROM (VALUES (INTERVAL '720:00:00'), (INTERVAL '720:00:00')) r(x)) u
+explain/set/intersectAll/dupRight/sortagg	enable_hashagg=off	pg-only	EXPLAIN (COSTS OFF) SELECT x FROM (VALUES (INTERVAL '1 mon'), (INTERVAL '1 mon'), (INTERVAL '30 days')) l(x) INTERSECT ALL SELECT x FROM (VALUES (INTERVAL '720:00:00'), (INTERVAL '720:00:00')) r(x)
+set/exceptAll/dupRight1/sortagg	enable_hashagg=off	sql	SELECT CAST(x AS TEXT) AS x FROM (SELECT x FROM (VALUES (INTERVAL '1 mon'), (INTERVAL '1 mon'), (INTERVAL '30 days')) l(x) EXCEPT ALL SELECT x FROM (VALUES (INTERVAL '720:00:00')) r(x)) u
+explain/set/exceptAll/dupRight1/sortagg	enable_hashagg=off	pg-only	EXPLAIN (COSTS OFF) SELECT x FROM (VALUES (INTERVAL '1 mon'), (INTERVAL '1 mon'), (INTERVAL '30 days')) l(x) EXCEPT ALL SELECT x FROM (VALUES (INTERVAL '720:00:00')) r(x)
+set/except/bigSmall/sortagg	enable_hashagg=off	sql	SELECT CAST(x AS TEXT) AS x FROM (SELECT x FROM (VALUES (INTERVAL '30 days'), (INTERVAL '720:00:00'), (INTERVAL '1 day'), (INTERVAL '2 days'), (INTERVAL '3 days')) r(x) EXCEPT SELECT x FROM (VALUES (INTERVAL '1 mon')) l(x)) u
+explain/set/except/bigSmall/sortagg	enable_hashagg=off	pg-only	EXPLAIN (COSTS OFF) SELECT x FROM (VALUES (INTERVAL '30 days'), (INTERVAL '720:00:00'), (INTERVAL '1 day'), (INTERVAL '2 days'), (INTERVAL '3 days')) r(x) EXCEPT SELECT x FROM (VALUES (INTERVAL '1 mon')) l(x)
+gsets/sets	-	sql	SELECT CAST(k AS TEXT) AS k, count(*) AS n FROM (SELECT CAST(s AS INTERVAL) AS k FROM iv80_r) q GROUP BY GROUPING SETS ((k), ()) ORDER BY n, CAST(k AS TEXT) NULLS FIRST
+gsets/rollup	-	sql	SELECT g, CAST(CAST(s AS INTERVAL) AS TEXT) AS k, count(*) AS n FROM iv80_r GROUP BY ROLLUP (g, CAST(s AS INTERVAL)) ORDER BY g NULLS LAST, min(id), n
+sub/scalarEq	-	sql	SELECT id FROM iv80_r WHERE CAST(s AS INTERVAL) = (SELECT CAST(s AS INTERVAL) FROM iv80_r WHERE id = 2) ORDER BY id
+sub/scalarMax	-	sql	SELECT id FROM iv80_r WHERE CAST(s AS INTERVAL) = (SELECT max(CAST(s AS INTERVAL)) FROM iv80_r WHERE id <= 3) ORDER BY id
+sub/in	-	sql	SELECT id FROM iv80_r WHERE CAST(s AS INTERVAL) IN (SELECT CAST(s AS INTERVAL) FROM iv80_r WHERE id = 3) ORDER BY id
+sub/notIn	-	sql	SELECT id FROM iv80_r WHERE CAST(s AS INTERVAL) NOT IN (SELECT CAST(s AS INTERVAL) FROM iv80_r WHERE id IN (3, 9)) ORDER BY id
+sub/any	-	sql	SELECT id FROM iv80_r WHERE CAST(s AS INTERVAL) > ANY (SELECT CAST(s AS INTERVAL) FROM iv80_r WHERE id IN (5, 9)) ORDER BY id
+sub/all	-	sql	SELECT id FROM iv80_r WHERE CAST(s AS INTERVAL) < ALL (SELECT CAST(s AS INTERVAL) FROM iv80_r WHERE id IN (1, 12)) ORDER BY id
+sub/correlatedCount	-	sql	SELECT id, (SELECT count(*) FROM iv80_r b WHERE CAST(b.s AS INTERVAL) = CAST(a.s AS INTERVAL)) AS n FROM iv80_r a ORDER BY id
+sub/correlatedMin	-	sql	SELECT id, (SELECT CAST(min(CAST(b.s AS INTERVAL)) AS TEXT) FROM iv80_r b WHERE b.g = a.g) AS m FROM iv80_r a ORDER BY id
+sub/exists	-	sql	SELECT id FROM iv80_r a WHERE EXISTS (SELECT 1 FROM iv80_r b WHERE CAST(b.s AS INTERVAL) = CAST(a.s AS INTERVAL) AND b.id <> a.id) ORDER BY id
+sub/scalarPublish	-	sql	SELECT (SELECT CAST(s AS INTERVAL) FROM iv80_r WHERE id = 1) AS a
+sub/scalarText	-	sql	SELECT CAST((SELECT CAST(s AS INTERVAL) FROM iv80_r WHERE id = 1) AS TEXT) AS a
+cte/materializedJoin	-	sql	WITH m AS MATERIALIZED (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r) SELECT a.id AS l, b.id AS r FROM m a JOIN m b ON a.v = b.v AND a.id < b.id ORDER BY l, r
+cte/text	-	sql	WITH m AS (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r) SELECT id, CAST(v AS TEXT) AS t FROM m ORDER BY id
+cte/twice	-	sql	WITH m AS MATERIALIZED (SELECT CAST(s AS INTERVAL) AS v FROM iv80_r) SELECT count(*) AS n FROM (SELECT v FROM m UNION SELECT v FROM m) u
+oj/leftText	-	sql	SELECT a.id, CAST(CAST(b.s AS INTERVAL) AS TEXT) AS t, CAST(b.s AS INTERVAL) IS NULL AS n FROM iv80_r a LEFT JOIN iv80_r b ON a.id = b.id + 6 ORDER BY a.id
+oj/leftDerived	-	sql	SELECT a.id, CAST(b.v AS TEXT) AS t FROM iv80_r a LEFT JOIN (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r) b ON a.id = b.id + 6 ORDER BY a.id
+oj/fullKey	-	sql	SELECT a.id AS l, b.id AS r FROM iv80_r a FULL JOIN iv80_r b ON CAST(a.s AS INTERVAL) = CAST(b.s AS INTERVAL) AND a.id < b.id ORDER BY l NULLS FIRST, r NULLS FIRST
+ddl/create/iv80_n	-	ddl	CREATE TABLE iv80_n (id BIGINT, s TEXT)
+ddl/insert/iv80_n	-	ddl	INSERT INTO iv80_n VALUES (1, NULL), (2, NULL)
+empty/text	-	sql	SELECT CAST(CAST(s AS INTERVAL) AS TEXT) AS t FROM iv80_r WHERE false
+empty/bare	-	sql	SELECT CAST(s AS INTERVAL) AS v FROM iv80_r WHERE false
+empty/agg	-	sql	SELECT CAST(sum(CAST(s AS INTERVAL)) AS TEXT) AS s, CAST(min(CAST(s AS INTERVAL)) AS TEXT) AS lo, count(CAST(s AS INTERVAL)) AS n FROM iv80_r WHERE false
+empty/group	-	sql	SELECT CAST(CAST(s AS INTERVAL) AS TEXT) AS k, count(*) AS n FROM iv80_r WHERE false GROUP BY CAST(s AS INTERVAL)
+null/agg	-	sql	SELECT CAST(sum(CAST(s AS INTERVAL)) AS TEXT) AS s, CAST(avg(CAST(s AS INTERVAL)) AS TEXT) AS a, CAST(min(CAST(s AS INTERVAL)) AS TEXT) AS lo, CAST(max(CAST(s AS INTERVAL)) AS TEXT) AS hi, count(CAST(s AS INTERVAL)) AS n FROM iv80_n
+null/group	-	sql	SELECT CAST(CAST(s AS INTERVAL) AS TEXT) AS k, count(*) AS n FROM iv80_n GROUP BY CAST(s AS INTERVAL)
+null/order	-	sql	SELECT id, CAST(CAST(s AS INTERVAL) AS TEXT) AS t FROM iv80_n ORDER BY CAST(s AS INTERVAL), id
+ddl/create/iv80_ov	-	ddl	CREATE TABLE iv80_ov (id BIGINT, s TEXT)
+ddl/insert/iv80_ov	-	ddl	INSERT INTO iv80_ov VALUES (1, '2147483647 days'), (2, '1 day'), (3, '-1 day'), (4, '9223372036854775807 microseconds'), (5, '-1 microsecond')
+ov/winForward	-	sql	SELECT id, CAST(sum(CAST(s AS INTERVAL)) OVER (ORDER BY id ROWS UNBOUNDED PRECEDING) AS TEXT) AS s FROM iv80_ov WHERE id <= 3 ORDER BY id
+ov/winBackward	-	sql	SELECT id, CAST(sum(CAST(s AS INTERVAL)) OVER (ORDER BY id DESC ROWS UNBOUNDED PRECEDING) AS TEXT) AS s FROM iv80_ov WHERE id <= 3 ORDER BY id
+ov/aggAsc	-	sql	SELECT CAST(sum(CAST(s AS INTERVAL) ORDER BY id) AS TEXT) AS s FROM iv80_ov WHERE id <= 3
+ov/aggDesc	-	sql	SELECT CAST(sum(CAST(s AS INTERVAL) ORDER BY id DESC) AS TEXT) AS s FROM iv80_ov WHERE id <= 3
+ov/aggUnordered	-	sql	SELECT CAST(sum(CAST(s AS INTERVAL)) AS TEXT) AS s FROM iv80_ov WHERE id <= 3
+ov/timeForward	-	sql	SELECT id, CAST(sum(CAST(s AS INTERVAL)) OVER (ORDER BY id ROWS UNBOUNDED PRECEDING) AS TEXT) AS s FROM iv80_ov WHERE id >= 4 ORDER BY id
+ov/timeBackward	-	sql	SELECT id, CAST(sum(CAST(s AS INTERVAL)) OVER (ORDER BY id DESC ROWS UNBOUNDED PRECEDING) AS TEXT) AS s FROM iv80_ov WHERE id >= 4 ORDER BY id
+ddl/create/iv80_pm	-	ddl	CREATE TABLE iv80_pm (id BIGINT, g BIGINT, s TEXT)
+ddl/insert/iv80_pm	-	ddl	INSERT INTO iv80_pm VALUES (1, 1, NULL), (2, 1, '1 day'), (3, 2, 'infinity'), (4, 2, '1 day'), (5, 2, NULL), (6, 3, '-infinity'), (7, 3, '2 days'), (8, 4, 'infinity'), (9, 4, '-infinity'), (10, 5, NULL), (11, 6, 'infinity'), (12, 6, 'infinity')
+pm/null	-	sql	SELECT CAST(sum(CAST(s AS INTERVAL)) AS TEXT) AS s, CAST(avg(CAST(s AS INTERVAL)) AS TEXT) AS a, count(CAST(s AS INTERVAL)) AS n, CAST(min(CAST(s AS INTERVAL)) AS TEXT) AS lo, CAST(max(CAST(s AS INTERVAL)) AS TEXT) AS hi FROM iv80_pm WHERE g = 1
+pm/posInf	-	sql	SELECT CAST(sum(CAST(s AS INTERVAL)) AS TEXT) AS s, CAST(avg(CAST(s AS INTERVAL)) AS TEXT) AS a, count(CAST(s AS INTERVAL)) AS n, CAST(min(CAST(s AS INTERVAL)) AS TEXT) AS lo, CAST(max(CAST(s AS INTERVAL)) AS TEXT) AS hi FROM iv80_pm WHERE g = 2
+pm/negInf	-	sql	SELECT CAST(sum(CAST(s AS INTERVAL)) AS TEXT) AS s, CAST(avg(CAST(s AS INTERVAL)) AS TEXT) AS a, count(CAST(s AS INTERVAL)) AS n, CAST(min(CAST(s AS INTERVAL)) AS TEXT) AS lo, CAST(max(CAST(s AS INTERVAL)) AS TEXT) AS hi FROM iv80_pm WHERE g = 3
+pm/bothInf	-	sql	SELECT CAST(sum(CAST(s AS INTERVAL)) AS TEXT) AS s, CAST(avg(CAST(s AS INTERVAL)) AS TEXT) AS a, count(CAST(s AS INTERVAL)) AS n, CAST(min(CAST(s AS INTERVAL)) AS TEXT) AS lo, CAST(max(CAST(s AS INTERVAL)) AS TEXT) AS hi FROM iv80_pm WHERE g = 4
+pm/nullOnly	-	sql	SELECT CAST(sum(CAST(s AS INTERVAL)) AS TEXT) AS s, CAST(avg(CAST(s AS INTERVAL)) AS TEXT) AS a, count(CAST(s AS INTERVAL)) AS n, CAST(min(CAST(s AS INTERVAL)) AS TEXT) AS lo, CAST(max(CAST(s AS INTERVAL)) AS TEXT) AS hi FROM iv80_pm WHERE g = 5
+pm/posInfTwice	-	sql	SELECT CAST(sum(CAST(s AS INTERVAL)) AS TEXT) AS s, CAST(avg(CAST(s AS INTERVAL)) AS TEXT) AS a, count(CAST(s AS INTERVAL)) AS n, CAST(min(CAST(s AS INTERVAL)) AS TEXT) AS lo, CAST(max(CAST(s AS INTERVAL)) AS TEXT) AS hi FROM iv80_pm WHERE g = 6
+pm/groups	-	sql	SELECT g, CAST(sum(CAST(s AS INTERVAL)) AS TEXT) AS s, CAST(avg(CAST(s AS INTERVAL)) AS TEXT) AS a, count(CAST(s AS INTERVAL)) AS n, CAST(min(CAST(s AS INTERVAL)) AS TEXT) AS lo, CAST(max(CAST(s AS INTERVAL)) AS TEXT) AS hi FROM iv80_pm WHERE g <> 4 GROUP BY g ORDER BY g
+ddl/create/iv80_sw	-	ddl	CREATE TABLE iv80_sw (id BIGINT, s TEXT)
+ddl/insert/iv80_sw	-	ddl	INSERT INTO iv80_sw VALUES (1, '1 day'), (2, 'infinity'), (3, '2 days'), (4, '3 days'), (5, '-infinity'), (6, '4 days'), (7, '5 days')
+sw/rows2	-	sql	SELECT id, CAST(sum(CAST(s AS INTERVAL)) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS TEXT) AS s, CAST(avg(CAST(s AS INTERVAL)) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS TEXT) AS a FROM iv80_sw ORDER BY id
+sw/rows3	-	sql	SELECT id, CAST(sum(CAST(s AS INTERVAL)) OVER (ORDER BY id ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS TEXT) AS s, CAST(avg(CAST(s AS INTERVAL)) OVER (ORDER BY id ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS TEXT) AS a FROM iv80_sw ORDER BY id
+sw/following	-	sql	SELECT id, CAST(sum(CAST(s AS INTERVAL)) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) AS TEXT) AS s, CAST(avg(CAST(s AS INTERVAL)) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) AS TEXT) AS a FROM iv80_sw ORDER BY id
+sw/all	-	sql	SELECT id, CAST(sum(CAST(s AS INTERVAL)) OVER (ORDER BY id ROWS BETWEEN 4 PRECEDING AND CURRENT ROW) AS TEXT) AS s FROM iv80_sw ORDER BY id
+ddl/create/iv80_fr	-	ddl	CREATE TABLE iv80_fr (id BIGINT, ts TIMESTAMP)
+ddl/insert/iv80_fr	-	ddl	INSERT INTO iv80_fr VALUES (1, TIMESTAMP '2024-01-31 00:00:00'), (2, TIMESTAMP '2024-02-29 00:00:00'), (3, TIMESTAMP '2024-03-01 00:00:00'), (4, TIMESTAMP '2024-03-31 00:00:00'), (5, TIMESTAMP '2024-04-30 00:00:00'), (6, NULL), (7, TIMESTAMP 'infinity'), (8, TIMESTAMP '-infinity')
+frame/monthPreceding	-	sql	SELECT id, count(*) OVER (ORDER BY ts RANGE BETWEEN INTERVAL '1 mon' PRECEDING AND CURRENT ROW) AS n FROM iv80_fr ORDER BY id
+frame/monthFollowing	-	sql	SELECT id, count(*) OVER (ORDER BY ts RANGE BETWEEN CURRENT ROW AND INTERVAL '1 mon' FOLLOWING) AS n FROM iv80_fr ORDER BY id
+frame/desc	-	sql	SELECT id, count(*) OVER (ORDER BY ts DESC RANGE BETWEEN INTERVAL '1 mon' PRECEDING AND CURRENT ROW) AS n FROM iv80_fr ORDER BY id
+frame/descNullsLast	-	sql	SELECT id, count(*) OVER (ORDER BY ts DESC NULLS LAST RANGE BETWEEN CURRENT ROW AND INTERVAL '30 days' FOLLOWING) AS n FROM iv80_fr ORDER BY id
+frame/nullOffset	-	sql	SELECT id, count(*) OVER (ORDER BY ts RANGE BETWEEN CAST(NULL AS INTERVAL) PRECEDING AND CURRENT ROW) AS n FROM iv80_fr ORDER BY id
+frame/zeroNormalized	-	sql	SELECT id, count(*) OVER (ORDER BY ts RANGE BETWEEN INTERVAL '1 mon -30 days' PRECEDING AND CURRENT ROW) AS n FROM iv80_fr ORDER BY id
+frame/mixedFields	-	sql	SELECT id, count(*) OVER (ORDER BY ts RANGE BETWEEN INTERVAL '-1 mon 31 days' PRECEDING AND CURRENT ROW) AS n FROM iv80_fr ORDER BY id
+frame/infOffset	-	sql	SELECT id, count(*) OVER (ORDER BY ts RANGE BETWEEN INTERVAL 'infinity' PRECEDING AND CURRENT ROW) AS n FROM iv80_fr ORDER BY id
+frame/infFollowing	-	sql	SELECT id, count(*) OVER (ORDER BY ts RANGE BETWEEN CURRENT ROW AND INTERVAL 'infinity' FOLLOWING) AS n FROM iv80_fr ORDER BY id
+frame/negInfOffset	-	sql	SELECT id, count(*) OVER (ORDER BY ts RANGE BETWEEN INTERVAL '-infinity' PRECEDING AND CURRENT ROW) AS n FROM iv80_fr ORDER BY id
+frame/negOffset	-	sql	SELECT id, count(*) OVER (ORDER BY ts RANGE BETWEEN INTERVAL '-1 day' PRECEDING AND CURRENT ROW) AS n FROM iv80_fr ORDER BY id
+frame/intervalOrderDesc	-	sql	SELECT id, count(*) OVER (ORDER BY CAST(s AS INTERVAL) DESC RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW) AS n FROM iv80_r ORDER BY id
+frame/intervalOrderAsc	-	sql	SELECT id, count(*) OVER (ORDER BY CAST(s AS INTERVAL) RANGE BETWEEN CURRENT ROW AND INTERVAL '1 day' FOLLOWING) AS n FROM iv80_r ORDER BY id

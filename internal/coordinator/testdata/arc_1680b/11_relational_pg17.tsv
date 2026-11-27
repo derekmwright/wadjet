@@ -1,0 +1,165 @@
+# PostgreSQL 17.11 answers for the #1680b interval corpus, section 11_relational (TestArc1680bMeasure; postgres:17-alpine, initdb --locale=C --encoding=UTF8, --memory=4g).
+# PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit; datcollate=C datctype=C server_encoding=UTF8; defaults IntervalStyle=postgres DateStyle=ISO, MDY TimeZone=UTC; a cell's settings column overrides them for that cell only.
+# name<TAB>answer: ok | ERR <SQLSTATE>: message | col:type(oid),... | row; row (or | (0 rows)), then any " !! <severity> <SQLSTATE>: message" PostgreSQL raised
+ddl/create/iv80_r	ok
+ddl/insert/iv80_r	ok
+rt/mul	id:bigint(20),x:text(25) | 1,1 mon 15 days; 2,45 days; 3,1080:00:00; 4,1 mon -30 days; 5,00:00:00; 6,NULL; 7,infinity; 8,-infinity; 9,-1 days -12:00:00; 10,-36:00:00; 11,1 day 15:00:00; 12,1 year 6 mons -00:00:01.5
+rt/div	id:bigint(20),x:text(25) | 1,10 days; 2,10 days; 3,240:00:00; 4,00:00:00; 5,00:00:00; 6,NULL; 7,infinity; 8,-infinity; 9,-08:00:00; 10,-08:00:00; 11,08:40:00; 12,4 mons -00:00:00.333333
+rt/neg	id:bigint(20),x:text(25) | 1,-1 mons; 2,-30 days; 3,-720:00:00; 4,-1 mons +30 days; 5,00:00:00; 6,NULL; 7,-infinity; 8,infinity; 9,1 day; 10,24:00:00; 11,-1 days -02:00:00; 12,-1 years +00:00:01
+rt/plus	id:bigint(20),x:text(25) | 1,1 mon 1 day 01:00:00; 2,31 days 01:00:00; 3,1 day 721:00:00; 4,1 mon -29 days +01:00:00; 5,1 day 01:00:00; 6,NULL; 7,infinity; 8,-infinity; 9,01:00:00; 10,1 day -23:00:00; 11,2 days 03:00:00; 12,1 year 1 day 00:59:59
+rt/justify	id:bigint(20),x:text(25) | 1,1 mon; 2,1 mon; 3,1 mon; 4,00:00:00; 5,00:00:00; 6,NULL; 7,infinity; 8,-infinity; 9,-1 days; 10,-1 days; 11,1 day 02:00:00; 12,11 mons 29 days 23:59:59
+rt/cmp	id:bigint(20),x:boolean(16) | 1,t; 2,t; 3,t; 4,f; 5,f; 6,NULL; 7,f; 8,f; 9,f; 10,f; 11,f; 12,f
+rt/lt	id:bigint(20),x:boolean(16) | 1,f; 2,f; 3,f; 4,f; 5,f; 6,NULL; 7,f; 8,t; 9,t; 10,t; 11,f; 12,f
+rt/tsPlus	id:bigint(20),x:text(25) | 1,2024-02-29 00:00:00; 2,2024-03-01 12:00:00; 3,2024-03-02 00:00:00; 4,2024-02-28 00:00:00; 5,2024-03-01 00:00:00; 6,NULL; 7,infinity; 8,-infinity; 9,2024-04-29 00:00:00; 10,2024-05-30 00:00:00; 11,2024-06-02 02:00:00; 12,2025-06-01 23:59:59
+rt/tsMinus	id:bigint(20),x:text(25) | 1,2023-12-31 00:00:00; 2,2024-01-01 12:00:00; 3,2024-01-02 00:00:00; 4,2024-02-28 00:00:00; 5,2024-03-01 00:00:00; 6,NULL; 7,-infinity; 8,infinity; 9,2024-05-01 00:00:00; 10,2024-06-01 00:00:00; 11,2024-05-30 22:00:00; 12,2023-06-02 00:00:01
+rt/isfinite	id:bigint(20),x:boolean(16) | 1,t; 2,t; 3,t; 4,t; 5,t; 6,NULL; 7,f; 8,f; 9,t; 10,t; 11,t; 12,t
+rt/extractDay	id:bigint(20),x:numeric(1700) | 1,0; 2,30; 3,0; 4,-30; 5,0; 6,NULL; 7,Infinity; 8,-Infinity; 9,-1; 10,0; 11,1; 12,0
+rt/extractEpoch	id:bigint(20),x:numeric(1700) | 1,2592000.000000; 2,2592000.000000; 3,2592000.000000; 4,0.000000; 5,0.000000; 6,NULL; 7,Infinity; 8,-Infinity; 9,-86400.000000; 10,-86400.000000; 11,93600.000000; 12,31557599.000000
+rt/datePart	id:bigint(20),x:double precision(701) | 1,0; 2,0; 3,720; 4,0; 5,0; 6,NULL; 7,Infinity; 8,-Infinity; 9,0; 10,-24; 11,2; 12,0
+rt/text	id:bigint(20),x:text(25) | 1,1 mon; 2,30 days; 3,720:00:00; 4,1 mon -30 days; 5,00:00:00; 6,NULL; 7,infinity; 8,-infinity; 9,-1 days; 10,-24:00:00; 11,1 day 02:00:00; 12,1 year -00:00:01
+rt/bare	id:bigint(20),v:interval(1186) | 1,1 mon; 2,30 days; 3,720:00:00; 4,1 mon -30 days; 5,00:00:00; 6,NULL; 7,infinity; 8,-infinity; 9,-1 days; 10,-24:00:00; 11,1 day 02:00:00; 12,1 year -00:00:01
+opaque/apply	id:bigint(20),x:text(25) | 11,2024-06-02 02:00:00; 12,2025-06-01 23:59:59
+opaque/compare	id:bigint(20) | 1; 2; 3; 7; 11; 12
+opaque/text	id:bigint(20),x:text(25) | 11,1 day 02:00:00; 12,1 year -00:00:01
+opaque/arith	id:bigint(20),x:text(25) | 11,2 days 04:00:00; 12,2 years -00:00:02
+ord/text	id:bigint(20),t:text(25) | 8,-infinity; 9,-1 days; 10,-24:00:00; 4,1 mon -30 days; 5,00:00:00; 11,1 day 02:00:00; 1,1 mon; 2,30 days; 3,720:00:00; 12,1 year -00:00:01; 7,infinity; 6,NULL
+ord/textDescNullsLast	id:bigint(20),t:text(25) | 7,infinity; 12,1 year -00:00:01; 1,1 mon; 2,30 days; 3,720:00:00; 11,1 day 02:00:00; 4,1 mon -30 days; 5,00:00:00; 9,-1 days; 10,-24:00:00; 8,-infinity; 6,NULL
+ord/topN	id:bigint(20) | 7; 12; 1
+filt/text	id:bigint(20),t:text(25) | 1,1 mon; 2,30 days; 3,720:00:00; 7,infinity; 12,1 year -00:00:01
+grp/text/default	k:text(25),n:bigint(20) | 1 mon,3; 1 mon -30 days,2; NULL,1; infinity,1; -infinity,1; -1 days,2; 1 day 02:00:00,1; 1 year -00:00:01,1
+grp/derived/default	k:text(25),n:bigint(20) | 1 mon,3; 1 mon -30 days,2; NULL,1; infinity,1; -infinity,1; -1 days,2; 1 day 02:00:00,1; 1 year -00:00:01,1
+distinct/text/default	k:text(25) | NULL; -1 days; -infinity; 1 day 02:00:00; 1 mon; 1 mon -30 days; 1 year -00:00:01; infinity
+grp/text/sortagg	k:text(25),n:bigint(20) | 1 mon,3; 1 mon -30 days,2; NULL,1; infinity,1; -infinity,1; -24:00:00,2; 1 day 02:00:00,1; 1 year -00:00:01,1
+grp/derived/sortagg	k:text(25),n:bigint(20) | 1 mon,3; 1 mon -30 days,2; NULL,1; infinity,1; -infinity,1; -24:00:00,2; 1 day 02:00:00,1; 1 year -00:00:01,1
+distinct/text/sortagg	k:text(25) | NULL; -24:00:00; -infinity; 1 day 02:00:00; 1 mon; 1 mon -30 days; 1 year -00:00:01; infinity
+tuple/distinct/default	a:text(25),b:text(25) | 1 mon,24:00:00
+tuple/distinctRev/default	a:text(25),b:text(25) | 30 days,1 day
+tuple/group/default	a:text(25),b:text(25),n:bigint(20) | 1 mon,24:00:00,2
+tuple/distinct/sortagg	a:text(25),b:text(25) | 1 mon,24:00:00
+tuple/distinctRev/sortagg	a:text(25),b:text(25) | 30 days,1 day
+tuple/group/sortagg	a:text(25),b:text(25),n:bigint(20) | 1 mon,24:00:00,2
+ddl/create/iv80_tp	ok
+ddl/insert/iv80_tp	ok
+tuple/table/default	a:text(25),b:text(25),n:bigint(20),lo:bigint(20) | 1 mon,24:00:00,3,1; 30 days,1 mon,1,4
+tuple/table/sortagg	a:text(25),b:text(25),n:bigint(20),lo:bigint(20) | 1 mon,24:00:00,3,1; 30 days,1 mon,1,4
+mixkey/group/default	i:text(25),d:text(25),f:text(25),n:bigint(20) | 1 mon,1.0,0,3
+mixkey/distinct/default	i:text(25),d:text(25),f:text(25) | 1 mon,1.0,0
+mixkey/group/sortagg	i:text(25),d:text(25),f:text(25),n:bigint(20) | 1 mon,1.0,0,3
+mixkey/distinct/sortagg	i:text(25),d:text(25),f:text(25) | 1 mon,1.0,0
+ordagg/minMax	lo:text(25),hi:text(25) | 30 days,1 mon
+ordagg/minMaxRev	lo:text(25),hi:text(25) | 1 mon,30 days
+ordagg/unordered	lo:text(25),hi:text(25) | 30 days,30 days
+ordagg/sumOrdered	s:text(25) | 1 mon 30 days
+ordagg/percentile	p:text(25) | 1 mon
+distagg/sumAvg/default	s:text(25),a:text(25),n:bigint(20) | 1 mon 1 day,15 days 12:00:00,2
+distagg/sumAvgRev/default	s:text(25),a:text(25),n:bigint(20) | 31 days,15 days 12:00:00,2
+distagg/sumAvg/sortagg	s:text(25),a:text(25),n:bigint(20) | 1 mon 1 day,15 days 12:00:00,2
+distagg/sumAvgRev/sortagg	s:text(25),a:text(25),n:bigint(20) | 31 days,15 days 12:00:00,2
+distagg/countRows	n:bigint(20) | 7
+reparith/default	t:timestamp(1114) | 2024-02-29 00:00:00
+reparithRev/default	t:timestamp(1114) | 2024-03-01 00:00:00
+reparith/sortagg	t:timestamp(1114) | 2024-02-29 00:00:00
+reparithRev/sortagg	t:timestamp(1114) | 2024-03-01 00:00:00
+ddl/create/iv80_rt	ok
+ddl/insert/iv80_rt	ok
+lag/tsDiff	id:bigint(20),t:text(25) | 1,00:00:00; 2,NULL; 3,NULL; 4,NULL
+lag/tsDiffBare	id:bigint(20),t:interval(1186) | 1,00:00:00; 2,NULL; 3,NULL; 4,NULL
+lag/tsDiffCompare	id:bigint(20) | 1
+tsdate/text	id:bigint(20),a:text(25),b:text(25) | 1,30 days 10:00:00,-30 days -10:00:00; 2,-01:00:00,01:00:00; 3,NULL,NULL; 4,NULL,NULL
+tsdate/bare	id:bigint(20),a:interval(1186) | 1,30 days 10:00:00; 2,-01:00:00; 3,NULL; 4,NULL
+tsdate/compare	id:bigint(20) | 1
+set/intersect/smallBig/default	x:text(25) | 1 mon
+explain/set/intersect/smallBig/default	QUERY PLAN:text(25) | HashSetOp Intersect;   ->  Append;         ->  Subquery Scan on "*SELECT* 1";               ->  Result;         ->  Subquery Scan on "*SELECT* 2";               ->  Values Scan on "*VALUES*"
+set/intersect/bigSmall/default	x:text(25) | 1 mon
+explain/set/intersect/bigSmall/default	QUERY PLAN:text(25) | HashSetOp Intersect;   ->  Append;         ->  Subquery Scan on "*SELECT* 2";               ->  Result;         ->  Subquery Scan on "*SELECT* 1";               ->  Values Scan on "*VALUES*"
+set/intersectAll/smallBig/default	x:text(25) | 1 mon
+explain/set/intersectAll/smallBig/default	QUERY PLAN:text(25) | HashSetOp Intersect All;   ->  Append;         ->  Subquery Scan on "*SELECT* 1";               ->  Result;         ->  Subquery Scan on "*SELECT* 2";               ->  Values Scan on "*VALUES*"
+set/intersectAll/bigSmall/default	x:text(25) | 1 mon
+explain/set/intersectAll/bigSmall/default	QUERY PLAN:text(25) | HashSetOp Intersect All;   ->  Append;         ->  Subquery Scan on "*SELECT* 2";               ->  Result;         ->  Subquery Scan on "*SELECT* 1";               ->  Values Scan on "*VALUES*"
+set/intersectAll/dupRight/default	x:text(25) | 720:00:00; 720:00:00
+explain/set/intersectAll/dupRight/default	QUERY PLAN:text(25) | HashSetOp Intersect All;   ->  Append;         ->  Subquery Scan on "*SELECT* 2";               ->  Values Scan on "*VALUES*";         ->  Subquery Scan on "*SELECT* 1";               ->  Values Scan on "*VALUES*_1"
+set/exceptAll/dupRight1/default	x:text(25) | 1 mon; 1 mon
+explain/set/exceptAll/dupRight1/default	QUERY PLAN:text(25) | HashSetOp Except All;   ->  Append;         ->  Subquery Scan on "*SELECT* 1";               ->  Values Scan on "*VALUES*";         ->  Subquery Scan on "*SELECT* 2";               ->  Result
+set/except/bigSmall/default	x:text(25) | 3 days; 1 day; 2 days
+explain/set/except/bigSmall/default	QUERY PLAN:text(25) | HashSetOp Except;   ->  Append;         ->  Subquery Scan on "*SELECT* 1";               ->  Values Scan on "*VALUES*";         ->  Subquery Scan on "*SELECT* 2";               ->  Result
+set/intersect/smallBig/sortagg	x:text(25) | 1 mon
+explain/set/intersect/smallBig/sortagg	QUERY PLAN:text(25) | SetOp Intersect;   ->  Sort;         Sort Key: ('1 mon'::interval);         ->  Append;               ->  Subquery Scan on "*SELECT* 1";                     ->  Result;               ->  Subquery Scan on "*SELECT* 2";                     ->  Values Scan on "*VALUES*"
+set/intersect/bigSmall/sortagg	x:text(25) | 1 mon
+explain/set/intersect/bigSmall/sortagg	QUERY PLAN:text(25) | SetOp Intersect;   ->  Sort;         Sort Key: ('1 mon'::interval);         ->  Append;               ->  Subquery Scan on "*SELECT* 2";                     ->  Result;               ->  Subquery Scan on "*SELECT* 1";                     ->  Values Scan on "*VALUES*"
+set/intersectAll/smallBig/sortagg	x:text(25) | 1 mon
+explain/set/intersectAll/smallBig/sortagg	QUERY PLAN:text(25) | SetOp Intersect All;   ->  Sort;         Sort Key: ('1 mon'::interval);         ->  Append;               ->  Subquery Scan on "*SELECT* 1";                     ->  Result;               ->  Subquery Scan on "*SELECT* 2";                     ->  Values Scan on "*VALUES*"
+set/intersectAll/bigSmall/sortagg	x:text(25) | 1 mon
+explain/set/intersectAll/bigSmall/sortagg	QUERY PLAN:text(25) | SetOp Intersect All;   ->  Sort;         Sort Key: ('1 mon'::interval);         ->  Append;               ->  Subquery Scan on "*SELECT* 2";                     ->  Result;               ->  Subquery Scan on "*SELECT* 1";                     ->  Values Scan on "*VALUES*"
+set/intersectAll/dupRight/sortagg	x:text(25) | 720:00:00; 720:00:00
+explain/set/intersectAll/dupRight/sortagg	QUERY PLAN:text(25) | SetOp Intersect All;   ->  Sort;         Sort Key: "*SELECT* 2".x;         ->  Append;               ->  Subquery Scan on "*SELECT* 2";                     ->  Values Scan on "*VALUES*";               ->  Subquery Scan on "*SELECT* 1";                     ->  Values Scan on "*VALUES*_1"
+set/exceptAll/dupRight1/sortagg	x:text(25) | 1 mon; 1 mon
+explain/set/exceptAll/dupRight1/sortagg	QUERY PLAN:text(25) | SetOp Except All;   ->  Sort;         Sort Key: "*SELECT* 1".x;         ->  Append;               ->  Subquery Scan on "*SELECT* 1";                     ->  Values Scan on "*VALUES*";               ->  Subquery Scan on "*SELECT* 2";                     ->  Result
+set/except/bigSmall/sortagg	x:text(25) | 1 day; 2 days; 3 days
+explain/set/except/bigSmall/sortagg	QUERY PLAN:text(25) | SetOp Except;   ->  Sort;         Sort Key: "*SELECT* 1".x;         ->  Append;               ->  Subquery Scan on "*SELECT* 1";                     ->  Values Scan on "*VALUES*";               ->  Subquery Scan on "*SELECT* 2";                     ->  Result
+gsets/sets	k:text(25),n:bigint(20) | NULL,1; -infinity,1; 1 day 02:00:00,1; 1 year -00:00:01,1; infinity,1; -1 days,2; 1 mon -30 days,2; 1 mon,3; NULL,12
+gsets/rollup	g:bigint(20),k:text(25),n:bigint(20) | 1,1 mon,3; 1,NULL,3; 2,1 mon -30 days,2; 2,NULL,3; 2,NULL,1; 3,infinity,1; 3,NULL,2; 3,-infinity,1; 4,-1 days,2; 4,NULL,2; 5,1 day 02:00:00,1; 5,NULL,2; 5,1 year -00:00:01,1; NULL,NULL,12
+sub/scalarEq	id:bigint(20) | 1; 2; 3
+sub/scalarMax	id:bigint(20) | 1; 2; 3
+sub/in	id:bigint(20) | 1; 2; 3
+sub/notIn	id:bigint(20) | 4; 5; 7; 8; 11; 12
+sub/any	id:bigint(20) | 1; 2; 3; 4; 5; 7; 11; 12
+sub/all	id:bigint(20) | 4; 5; 8; 9; 10; 11
+sub/correlatedCount	id:bigint(20),n:bigint(20) | 1,3; 2,3; 3,3; 4,2; 5,2; 6,0; 7,1; 8,1; 9,2; 10,2; 11,1; 12,1
+sub/correlatedMin	id:bigint(20),m:text(25) | 1,720:00:00; 2,720:00:00; 3,720:00:00; 4,00:00:00; 5,00:00:00; 6,00:00:00; 7,-infinity; 8,-infinity; 9,-24:00:00; 10,-24:00:00; 11,1 day 02:00:00; 12,1 day 02:00:00
+sub/exists	id:bigint(20) | 1; 2; 3; 4; 5; 9; 10
+sub/scalarPublish	a:interval(1186) | 1 mon
+sub/scalarText	a:text(25) | 1 mon
+cte/materializedJoin	l:bigint(20),r:bigint(20) | 1,2; 1,3; 2,3; 4,5; 9,10
+cte/text	id:bigint(20),t:text(25) | 1,1 mon; 2,30 days; 3,720:00:00; 4,1 mon -30 days; 5,00:00:00; 6,NULL; 7,infinity; 8,-infinity; 9,-1 days; 10,-24:00:00; 11,1 day 02:00:00; 12,1 year -00:00:01
+cte/twice	n:bigint(20) | 8
+oj/leftText	id:bigint(20),t:text(25),n:boolean(16) | 1,NULL,t; 2,NULL,t; 3,NULL,t; 4,NULL,t; 5,NULL,t; 6,NULL,t; 7,1 mon,f; 8,30 days,f; 9,720:00:00,f; 10,1 mon -30 days,f; 11,00:00:00,f; 12,NULL,t
+oj/leftDerived	id:bigint(20),t:text(25) | 1,NULL; 2,NULL; 3,NULL; 4,NULL; 5,NULL; 6,NULL; 7,1 mon; 8,30 days; 9,720:00:00; 10,1 mon -30 days; 11,00:00:00; 12,NULL
+oj/fullKey	l:bigint(20),r:bigint(20) | NULL,1; NULL,4; NULL,6; NULL,7; NULL,8; NULL,9; NULL,11; NULL,12; 1,2; 1,3; 2,3; 3,NULL; 4,5; 5,NULL; 6,NULL; 7,NULL; 8,NULL; 9,10; 10,NULL; 11,NULL; 12,NULL
+ddl/create/iv80_n	ok
+ddl/insert/iv80_n	ok
+empty/text	t:text(25) | (0 rows)
+empty/bare	v:interval(1186) | (0 rows)
+empty/agg	s:text(25),lo:text(25),n:bigint(20) | NULL,NULL,0
+empty/group	k:text(25),n:bigint(20) | (0 rows)
+null/agg	s:text(25),a:text(25),lo:text(25),hi:text(25),n:bigint(20) | NULL,NULL,NULL,NULL,0
+null/group	k:text(25),n:bigint(20) | NULL,2
+null/order	id:bigint(20),t:text(25) | 1,NULL; 2,NULL
+ddl/create/iv80_ov	ok
+ddl/insert/iv80_ov	ok
+ov/winForward	ERR 22008: interval out of range
+ov/winBackward	id:bigint(20),s:text(25) | 1,2147483647 days; 2,00:00:00; 3,-1 days
+ov/aggAsc	ERR 22008: interval out of range
+ov/aggDesc	s:text(25) | 2147483647 days
+ov/aggUnordered	ERR 22008: interval out of range
+ov/timeForward	id:bigint(20),s:text(25) | 4,2562047788:00:54.775807; 5,2562047788:00:54.775806
+ov/timeBackward	id:bigint(20),s:text(25) | 4,2562047788:00:54.775806; 5,-00:00:00.000001
+ddl/create/iv80_pm	ok
+ddl/insert/iv80_pm	ok
+pm/null	s:text(25),a:text(25),n:bigint(20),lo:text(25),hi:text(25) | 1 day,1 day,1,1 day,1 day
+pm/posInf	s:text(25),a:text(25),n:bigint(20),lo:text(25),hi:text(25) | infinity,infinity,2,1 day,infinity
+pm/negInf	s:text(25),a:text(25),n:bigint(20),lo:text(25),hi:text(25) | -infinity,-infinity,2,-infinity,2 days
+pm/bothInf	ERR 22008: interval out of range
+pm/nullOnly	s:text(25),a:text(25),n:bigint(20),lo:text(25),hi:text(25) | NULL,NULL,0,NULL,NULL
+pm/posInfTwice	s:text(25),a:text(25),n:bigint(20),lo:text(25),hi:text(25) | infinity,infinity,2,infinity,infinity
+pm/groups	g:bigint(20),s:text(25),a:text(25),n:bigint(20),lo:text(25),hi:text(25) | 1,1 day,1 day,1,1 day,1 day; 2,infinity,infinity,2,1 day,infinity; 3,-infinity,-infinity,2,-infinity,2 days; 5,NULL,NULL,0,NULL,NULL; 6,infinity,infinity,2,infinity,infinity
+ddl/create/iv80_sw	ok
+ddl/insert/iv80_sw	ok
+sw/rows2	id:bigint(20),s:text(25),a:text(25) | 1,1 day,1 day; 2,infinity,infinity; 3,infinity,infinity; 4,5 days,2 days 12:00:00; 5,-infinity,-infinity; 6,-infinity,-infinity; 7,9 days,4 days 12:00:00
+sw/rows3	id:bigint(20),s:text(25),a:text(25) | 1,1 day,1 day; 2,infinity,infinity; 3,infinity,infinity; 4,infinity,infinity; 5,-infinity,-infinity; 6,-infinity,-infinity; 7,-infinity,-infinity
+sw/following	id:bigint(20),s:text(25),a:text(25) | 1,infinity,infinity; 2,infinity,infinity; 3,5 days,2 days 12:00:00; 4,-infinity,-infinity; 5,-infinity,-infinity; 6,9 days,4 days 12:00:00; 7,5 days,5 days
+sw/all	ERR 22008: interval out of range
+ddl/create/iv80_fr	ok
+ddl/insert/iv80_fr	ok
+frame/monthPreceding	id:bigint(20),n:bigint(20) | 1,1; 2,2; 3,2; 4,3; 5,2; 6,1; 7,1; 8,1
+frame/monthFollowing	id:bigint(20),n:bigint(20) | 1,2; 2,2; 3,2; 4,2; 5,1; 6,1; 7,1; 8,1
+frame/desc	id:bigint(20),n:bigint(20) | 1,2; 2,2; 3,2; 4,2; 5,1; 6,1; 7,1; 8,1
+frame/descNullsLast	id:bigint(20),n:bigint(20) | 1,1; 2,2; 3,3; 4,2; 5,2; 6,1; 7,1; 8,1
+frame/nullOffset	ERR 22004: frame starting offset must not be null
+frame/zeroNormalized	id:bigint(20),n:bigint(20) | 1,1; 2,1; 3,0; 4,1; 5,1; 6,1; 7,1; 8,1
+frame/mixedFields	id:bigint(20),n:bigint(20) | 1,1; 2,1; 3,1; 4,1; 5,1; 6,1; 7,1; 8,1
+frame/infOffset	id:bigint(20),n:bigint(20) | 1,2; 2,3; 3,4; 4,5; 5,6; 6,1; 7,7; 8,1
+frame/infFollowing	id:bigint(20),n:bigint(20) | 1,6; 2,5; 3,4; 4,3; 5,2; 6,1; 7,1; 8,7
+frame/negInfOffset	ERR 22013: invalid preceding or following size in window function
+frame/negOffset	ERR 22013: invalid preceding or following size in window function
+frame/intervalOrderDesc	id:bigint(20),n:bigint(20) | 1,3; 2,3; 3,3; 4,2; 5,2; 6,1; 7,1; 8,1; 9,4; 10,4; 11,1; 12,1
+frame/intervalOrderAsc	id:bigint(20),n:bigint(20) | 1,3; 2,3; 3,3; 4,2; 5,2; 6,1; 7,1; 8,1; 9,4; 10,4; 11,1; 12,1

@@ -1,0 +1,6 @@
+# The stage manifest of section 11_relational_cast (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet / door).
+rt/bare~text	C	supported	unmet
+lag/tsDiffBare~text	E	supported	unmet
+tsdate/bare~text	C	supported	unmet
+sub/scalarPublish~text	D	supported	unmet
+empty/bare~text	D	supported	met

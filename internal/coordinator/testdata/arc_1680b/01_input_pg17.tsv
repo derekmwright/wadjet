@@ -1,6 +1,6 @@
 # PostgreSQL 17.11 answers for the #1680b interval corpus, section 01_input (TestArc1680bMeasure; postgres:17-alpine, initdb --locale=C --encoding=UTF8, --memory=4g).
 # PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit; datcollate=C datctype=C server_encoding=UTF8; defaults IntervalStyle=postgres DateStyle=ISO, MDY TimeZone=UTC; a cell's settings column overrides them for that cell only.
-# name<TAB>answer: ok | (0 rows) | ERR <SQLSTATE>: message | col:type(oid),... | row; row
+# name<TAB>answer: ok | ERR <SQLSTATE>: message | col:type(oid),... | row; row (or | (0 rows)), then any " !! <severity> <SQLSTATE>: message" PostgreSQL raised
 lit/0/1 day	a:interval(1186) | 1 day
 lit/1/1 day 2 hours	a:interval(1186) | 1 day 02:00:00
 lit/2/1 year 2 months 3 days 4 hours 5 minutes 6 seconds	a:interval(1186) | 1 year 2 mons 3 days 04:05:06
@@ -126,7 +126,7 @@ prec/literal3	a:interval(1186) | 00:00:01.123
 prec/second3	a:interval(1186) | 00:00:01.123
 prec/ds2	a:interval(1186) | 1 day 02:03:04.57
 prec/iv6	a:interval(1186) | 00:00:01.123457
-prec/iv7	a:interval(1186) | 00:00:01
+prec/iv7	a:interval(1186) | 00:00:01 !! WARNING 22023: INTERVAL(7) precision reduced to maximum allowed, 6
 prec/castDay	a:interval(1186) | 1 day
 prec/castYear	a:interval(1186) | 1 year
 prec/castMonthTyp	a:interval(1186) | 1 year 2 mons

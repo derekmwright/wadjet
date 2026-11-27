@@ -1,0 +1,7 @@
+# #1680b interval corpus statements (arc_1680b_interval_corpus_cells_test.go). name<TAB>settings<TAB>kind<TAB>sql
+group/iv80_k/default~text	-	sql	SELECT CAST(CAST(s AS INTERVAL) AS TEXT) AS k, count(*) AS n, min(id) AS lo FROM iv80_k GROUP BY CAST(s AS INTERVAL) ORDER BY lo NULLS FIRST
+group/iv80_k/sortagg~text	enable_hashagg=off	sql	SELECT CAST(CAST(s AS INTERVAL) AS TEXT) AS k, count(*) AS n, min(id) AS lo FROM iv80_k GROUP BY CAST(s AS INTERVAL) ORDER BY lo NULLS FIRST
+group/iv80_k/hashagg~text	enable_sort=off	sql	SELECT CAST(CAST(s AS INTERVAL) AS TEXT) AS k, count(*) AS n, min(id) AS lo FROM iv80_k GROUP BY CAST(s AS INTERVAL) ORDER BY lo NULLS FIRST
+group/iv80_kr/default~text	-	sql	SELECT CAST(CAST(s AS INTERVAL) AS TEXT) AS k, count(*) AS n, min(id) AS lo FROM iv80_kr GROUP BY CAST(s AS INTERVAL) ORDER BY lo NULLS FIRST
+group/iv80_kr/sortagg~text	enable_hashagg=off	sql	SELECT CAST(CAST(s AS INTERVAL) AS TEXT) AS k, count(*) AS n, min(id) AS lo FROM iv80_kr GROUP BY CAST(s AS INTERVAL) ORDER BY lo NULLS FIRST
+group/iv80_kr/hashagg~text	enable_sort=off	sql	SELECT CAST(CAST(s AS INTERVAL) AS TEXT) AS k, count(*) AS n, min(id) AS lo FROM iv80_kr GROUP BY CAST(s AS INTERVAL) ORDER BY lo NULLS FIRST

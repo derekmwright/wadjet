@@ -1,0 +1,9 @@
+# PostgreSQL 17.11 answers for the #1680b interval corpus, section 03_order_cast (TestArc1680bMeasure; postgres:17-alpine, initdb --locale=C --encoding=UTF8, --memory=4g).
+# PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit; datcollate=C datctype=C server_encoding=UTF8; defaults IntervalStyle=postgres DateStyle=ISO, MDY TimeZone=UTC; a cell's settings column overrides them for that cell only.
+# name<TAB>answer: ok | ERR <SQLSTATE>: message | col:type(oid),... | row; row (or | (0 rows)), then any " !! <severity> <SQLSTATE>: message" PostgreSQL raised
+order/minMax~text	lo:text(25),hi:text(25) | -infinity,infinity
+order/minMaxFinite~text	lo:text(25),hi:text(25) | -178956970 years -8 mons,178956970 years 7 mons
+order/minTieFwd~text	lo:text(25),hi:text(25) | 720:00:00,720:00:00
+order/minTieRev~text	lo:text(25),hi:text(25) | 1 mon,1 mon
+order/minTieTable~text	lo:text(25),hi:text(25) | 720:00:00,720:00:00
+order/greatestTie~text	g:text(25),l:text(25),g2:text(25),l2:text(25) | 1 mon,1 mon,30 days,30 days

@@ -1,0 +1,62 @@
+# The stage manifest of section 06_calendar (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet / door).
+ts/monthClampLeap	C	supported	unmet
+ts/monthClamp	C	supported	unmet
+ts/monthBack	C	supported	unmet
+ts/yearLeap	C	supported	met
+ts/negMonths	C	supported	unmet
+ts/orderMD	C	supported	unmet
+ts/orderMDNeg	C	supported	unmet
+ts/orderDT	C	supported	unmet
+ts/mixedSign	C	supported	unmet
+ts/mixedSign2	C	supported	unmet
+ts/hours36	C	supported	met
+ts/us	A	refusal timestamp-millisecond-carrier	unmet
+ts/usNeg	A	refusal timestamp-millisecond-carrier	unmet
+ts/zero	C	supported	met
+ts/1monVs30d	C	supported	met
+ts/overflow	C	pg-error 22008	met
+ts/inf	C	supported	unmet
+ts/negInf	C	supported	unmet
+ts/infTs	C	supported	unmet
+ts/infMinusInf	C	pg-error 22008	unmet
+ts/null	C	supported	met
+ts/commuted	C	supported	unmet
+date/plus	C	supported	unmet
+date/plusInt	C	supported	unmet
+date/minusDate	C	supported	unmet
+tz/UTC/day	A	refusal timestamptz	unmet
+tz/UTC/month	A	refusal timestamptz	met
+tz/UTC/fallBack	A	refusal timestamptz	unmet
+tz/UTC/minus	A	refusal timestamptz	met
+tz/UTC/roundTrip	A	refusal timestamptz	unmet
+tz/UTC/age	A	refusal timestamptz	unmet
+tz/UTC/addFn	A	refusal timestamptz	unmet
+tz/America/New_York/day	A	refusal timestamptz	unmet
+tz/America/New_York/month	A	refusal timestamptz	met
+tz/America/New_York/fallBack	A	refusal timestamptz	unmet
+tz/America/New_York/minus	A	refusal timestamptz	met
+tz/America/New_York/roundTrip	A	refusal timestamptz	unmet
+tz/America/New_York/age	A	refusal timestamptz	unmet
+tz/America/New_York/addFn	A	refusal timestamptz	unmet
+time/plus	A	refusal time-type	unmet
+time/minusTime	A	refusal time-type	unmet
+time/timetz	A	refusal time-type	unmet
+tsdiff/days	F	refusal bare-interval-result	met
+tsdiff/time	F	refusal bare-interval-result	met
+tsdiff/over24	F	refusal bare-interval-result	met
+tsdiff/neg	F	refusal bare-interval-result	met
+tsdiff/year	F	refusal bare-interval-result	met
+tsdiff/us	A	refusal timestamp-millisecond-carrier	met
+tsdiff/mixedNeg	F	refusal bare-interval-result	met
+tsdiff/huge	C	pg-error 22008	unmet
+tsdiff/inf	F	refusal bare-interval-result	unmet
+tsdiff/infInf	C	pg-error 22008	met
+age/basic	F	refusal bare-interval-result	unmet
+age/time	A	refusal timestamp-millisecond-carrier	unmet
+trip/monthEnd	C	supported	unmet
+trip/diff	C	supported	unmet
+trip/age	C	supported	unmet
+trip/compareVsApply	C	supported	unmet
+trip/assoc	C	supported	unmet
+rows/plus	A	refusal timestamp-millisecond-carrier	met
+rows/diff	F	refusal bare-interval-result	met

@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +17,12 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/derekmwright/wadjet/internal/engine/exec"
+	"github.com/derekmwright/wadjet/internal/sqlerr"
+	"github.com/derekmwright/wadjet/internal/storage/parquet"
+	"github.com/derekmwright/wadjet/internal/worker"
+	"github.com/derekmwright/wadjet/wadjet"
 )
 
 // The corpus files (#1680b), one set per section under testdata/arc_1680b/:
@@ -23,15 +30,34 @@ import (
 //	<stem>.statements.tsv  name<TAB>settings<TAB>kind<TAB>sql
 //	<stem>_pg17.tsv        name<TAB>PostgreSQL's answer
 //	<stem>_engine.tsv      name<TAB>arms<TAB>class<TAB>this engine's answer
+//	<stem>_manifest.tsv    name<TAB>stage<TAB>outcome<TAB>now (arc_1680b_interval_manifest_test.go)
 //
-// An answer is "ok" (DDL), "(0 rows)", "ERR <SQLSTATE>[: message]" or
-// "col:type(oid),… | row; row" with each field PostgreSQL's text (NULL for
-// a NULL; tab and newline escaped). kind is "sql", "ddl" or "pg-only".
-// The engine file's arms is "*" when the six arms answer alike, otherwise
-// one line per arm; its class is agree (value and declared types equal
-// PostgreSQL's), agree-value (value equal, a declared type differs),
-// refused (an error), differs (an answer that is not PostgreSQL's), ok
-// (DDL accepted) or pg-only.
+// An answer is "ok" (DDL or a write), "ERR <SQLSTATE>: message", or
+// "col:type(oid),… | row; row" with each field PostgreSQL's text (NULL for a
+// NULL; tab and newline escaped); a result with no rows keeps its typed
+// header: "col:type(oid),… | (0 rows)". A NOTICE or WARNING PostgreSQL raised
+// while running the statement follows the answer as " !! <severity>
+// <SQLSTATE>: message". kind is "sql", "ddl" (a fixture), "write" (a DML or
+// CTAS statement PostgreSQL accepts) or "pg-only" (a plan observation).
+//
+// The engine file's arms is "*" when the six arms answer alike, otherwise one
+// line per arm. Its answer is the same form with this engine's type names, an
+// error as "ERR <SQLSTATE>: <sentence>" ("ERR : …" for an error that carries
+// no SQLSTATE) and a panic as "PANIC …". Its class (iv80Classify) keeps apart
+// what a gate must keep apart:
+//
+//	agree             value and declared types equal PostgreSQL's
+//	agree-value       value equal, a declared type differs
+//	differs           both answered, the values differ
+//	answers-pg-error  this engine answered where PostgreSQL raised an error
+//	pg-error          both raised an error with the same SQLSTATE
+//	refusal           0A000 (an intentional capability refusal: its sentence names it)
+//	wrong-sqlstate    both raised an error, another SQLSTATE than PostgreSQL's (not 0A000)
+//	error             a coded error, not 0A000, where PostgreSQL answered
+//	store-guard       the batch store's silent-write guard fired (#361): a hole in a rule, never an answer
+//	internal          an error carrying no SQLSTATE
+//	panic             a recovered panic
+//	ok / pg-only      a fixture accepted / a plan observation not run here
 
 const iv80Dir = "testdata/arc_1680b"
 
@@ -43,6 +69,8 @@ func iv80Escape(s string) string {
 
 func iv80Kind(c iv80Cell) string {
 	switch {
+	case c.write:
+		return "write"
 	case c.ddl:
 		return "ddl"
 	case c.pgOnly:
@@ -129,6 +157,32 @@ func iv80PGTypeName(oid uint32) string {
 	return "unknown"
 }
 
+// iv80Render is an answer: the typed header and the rows, or the typed
+// header and "(0 rows)" for a result with none (a zero-row result's types
+// are part of the answer: Describe and an empty result must not lose them).
+// A result with no columns at all is "(0 rows)".
+func iv80Render(header, rows []string) string {
+	if len(rows) == 0 {
+		if len(header) == 0 {
+			return "(0 rows)"
+		}
+		return strings.Join(header, ",") + " | (0 rows)"
+	}
+	return strings.Join(header, ",") + " | " + strings.Join(rows, "; ")
+}
+
+// iv80Notice splits an answer from the notices PostgreSQL raised with it.
+func iv80Notice(ans string) (body, notice string) {
+	body, notice, _ = strings.Cut(ans, " !! ")
+	return body, notice
+}
+
+// iv80SectionTables are the tables every section creates, dropped first on
+// the reference so a re-measure starts clean.
+func iv80SectionTables() []string {
+	return append(append(append([]string{}, iv80Tables...), iv80RelTables...), iv80WriteTables...)
+}
+
 // TestArc1680bMeasure runs every cell of every section against PostgreSQL
 // (IV80_PG_DSN, e.g. postgres://postgres:pg@127.0.0.1:55480/postgres) and
 // rewrites each section's statements and answers files; skipped otherwise.
@@ -138,13 +192,21 @@ func TestArc1680bMeasure(t *testing.T) {
 		t.Skip("IV80_PG_DSN unset")
 	}
 	ctx := context.Background()
-	conn, err := pgconn.Connect(ctx, dsn)
+	cfg, err := pgconn.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var notices []string
+	cfg.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) {
+		notices = append(notices, n.Severity+" "+n.Code+": "+n.Message)
+	}
+	conn, err := pgconn.ConnectConfig(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close(ctx)
 	run := func(sql string) *pgconn.Result {
-		return conn.ExecParams(ctx, sql, nil, nil, nil, nil).Read()
+		return iv80Read(conn.ExecParams(ctx, sql, nil, nil, nil, nil))
 	}
 	one := func(sql string) string {
 		r := run(sql)
@@ -161,9 +223,10 @@ func TestArc1680bMeasure(t *testing.T) {
 		}
 	}
 	reset()
-	for _, tbl := range iv80Tables {
+	for _, tbl := range iv80SectionTables() {
 		run("DROP TABLE IF EXISTS " + tbl)
 	}
+	notices = nil
 	env := fmt.Sprintf("# %s; datcollate=%s datctype=%s server_encoding=%s; defaults IntervalStyle=%s DateStyle=%s TimeZone=%s; a cell's settings column overrides them for that cell only.\n",
 		one("SELECT version()"), one("SELECT datcollate FROM pg_database WHERE datname = current_database()"),
 		one("SELECT datctype FROM pg_database WHERE datname = current_database()"), one("SHOW server_encoding"),
@@ -176,7 +239,7 @@ func TestArc1680bMeasure(t *testing.T) {
 		var b strings.Builder
 		b.WriteString("# PostgreSQL 17.11 answers for the #1680b interval corpus, section " + sec.stem + " (TestArc1680bMeasure; postgres:17-alpine, initdb --locale=C --encoding=UTF8, --memory=4g).\n")
 		b.WriteString(env)
-		b.WriteString("# name<TAB>answer: ok | (0 rows) | ERR <SQLSTATE>: message | col:type(oid),... | row; row\n")
+		b.WriteString("# name<TAB>answer: ok | ERR <SQLSTATE>: message | col:type(oid),... | row; row (or | (0 rows)), then any \" !! <severity> <SQLSTATE>: message\" PostgreSQL raised\n")
 		for _, c := range cells {
 			reset()
 			if c.settings != "" {
@@ -187,6 +250,7 @@ func TestArc1680bMeasure(t *testing.T) {
 					}
 				}
 			}
+			notices = nil
 			r := run(c.sql)
 			var ans string
 			switch {
@@ -215,7 +279,10 @@ func TestArc1680bMeasure(t *testing.T) {
 					}
 					rows[i] = strings.Join(f, ",")
 				}
-				ans = ftRender(header, rows)
+				ans = iv80Render(header, rows)
+			}
+			if len(notices) > 0 {
+				ans += " !! " + strings.Join(notices, " !! ")
 			}
 			b.WriteString(c.name + "\t" + iv80Escape(ans) + "\n")
 		}
@@ -229,10 +296,31 @@ func TestArc1680bMeasure(t *testing.T) {
 	}
 }
 
+// iv80Read is pgconn's ResultReader.Read keeping the field descriptions of
+// a result with no rows: Read copies them inside its row loop only, so a
+// zero-row result came back untyped (the round-1 recorder's "(0 rows)").
+func iv80Read(rr *pgconn.ResultReader) *pgconn.Result {
+	res := &pgconn.Result{}
+	for rr.NextRow() {
+		values := rr.Values()
+		row := make([][]byte, len(values))
+		for i, v := range values {
+			if v != nil {
+				row[i] = append([]byte{}, v...)
+			}
+		}
+		res.Rows = append(res.Rows, row)
+	}
+	res.FieldDescriptions = append([]pgconn.FieldDescription(nil), rr.FieldDescriptions()...)
+	res.CommandTag, res.Err = rr.Close()
+	return res
+}
+
 // iv80PGValue is a PostgreSQL answer reduced to what an engine answer is
 // compared against: column names without types, the error without its
-// message.
+// message, no notices.
 func iv80PGValue(ans string) string {
+	ans, _ = iv80Notice(ans)
 	if strings.HasPrefix(ans, "ERR ") {
 		code, _, _ := strings.Cut(ans, ":")
 		return code
@@ -243,6 +331,7 @@ func iv80PGValue(ans string) string {
 // iv80PGTypes is a PostgreSQL header with the OIDs dropped, as ivTypeNames
 // spells this engine's.
 func iv80PGTypes(ans string) string {
+	ans, _ = iv80Notice(ans)
 	head := ivHeaderTypes(ans)
 	cols := strings.Split(head, ",")
 	for i, c := range cols {
@@ -253,11 +342,42 @@ func iv80PGTypes(ans string) string {
 	return strings.Join(cols, ",")
 }
 
-// iv80Classify is the class of one engine answer against PostgreSQL's.
+// iv80ErrCode is the SQLSTATE of an "ERR <code>: message" answer ("" when
+// it carries none) and its message.
+func iv80ErrCode(ans string) (code, msg string) {
+	rest := strings.TrimPrefix(ans, "ERR ")
+	code, msg, _ = strings.Cut(rest, ":")
+	return strings.TrimSpace(code), strings.TrimSpace(msg)
+}
+
+// iv80Classify is the class of one engine answer against PostgreSQL's (the
+// list in the file comment).
 func iv80Classify(engine, pg string) string {
+	pg, _ = iv80Notice(pg)
+	pgErr := strings.HasPrefix(pg, "ERR ")
+	pgCode, _ := iv80ErrCode(pg)
 	switch {
-	case strings.HasPrefix(engine, "ERR ") || strings.HasPrefix(engine, "PANIC"):
-		return "refused"
+	case strings.HasPrefix(engine, "PANIC"):
+		return "panic"
+	case strings.HasPrefix(engine, "ERR "):
+		code, msg := iv80ErrCode(engine)
+		switch {
+		case strings.Contains(msg, "silent-write guard") || strings.Contains(msg, "declared without its element or fields"):
+			return "store-guard"
+		case code == "" || code == "XX000":
+			return "internal"
+		case pgErr && code == pgCode:
+			return "pg-error"
+		case code == "0A000":
+			return "refusal"
+		case pgErr:
+			return "wrong-sqlstate"
+		}
+		return "error"
+	case pgErr:
+		return "answers-pg-error"
+	case engine == "ok" && pg == "ok":
+		return "ok"
 	case ivNormalize(engine) != iv80PGValue(pg):
 		return "differs"
 	case strings.Contains(engine, " | ") && ivTypeNames(ivHeaderTypes(engine)) != iv80PGTypes(pg):
@@ -272,7 +392,7 @@ func iv80Classify(engine, pg string) string {
 // its header's columns is left as it is.
 func iv80EngineText(ans string) string {
 	head, body, ok := strings.Cut(ans, " | ")
-	if !ok {
+	if !ok || body == "(0 rows)" {
 		return ans
 	}
 	cols := strings.Split(head, ",")
@@ -303,13 +423,168 @@ func iv80EngineText(ans string) string {
 	return head + " | " + strings.Join(rows, "; ")
 }
 
+// iv80Ids are the run-specific identifiers an error sentence can carry
+// (query, task and stage ids), replaced so the baseline holds the sentence.
+var iv80Ids = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,}`)
+
+// iv80Err is an engine error as the baseline records it: its SQLSTATE and
+// the sentence a client is owed (sqlerr.SentenceOf), or the whole text of an
+// error that carries no SQLSTATE, so an intentional refusal, a store guard
+// and an internal error stay apart.
+func iv80Err(err error) string {
+	msg := sqlerr.SentenceOf(err)
+	if msg == "" {
+		msg = err.Error()
+	}
+	msg = iv80Ids.ReplaceAllString(strings.Join(strings.Fields(msg), " "), "<id>")
+	if r := []rune(msg); len(r) > 240 {
+		msg = string(r[:240]) + "…"
+	}
+	return "ERR " + sqlerr.StateOf(err) + ": " + msg
+}
+
+// iv80EngineRender is ftEngineRender keeping a zero-row result's types.
+func iv80EngineRender(cols []parquet.Column, cells [][]any) string {
+	if len(cells) > 0 {
+		return ftEngineRender(cols, cells)
+	}
+	header := make([]string, len(cols))
+	for i, c := range cols {
+		header[i] = c.Name + ":" + ftTypeName(c)
+	}
+	return iv80Render(header, nil)
+}
+
+// iv80RunSingle runs sql on the embedded engine.
+func iv80RunSingle(ctx context.Context, db *wadjet.DB, sql string) (out string) {
+	defer func() {
+		if r := recover(); r != nil {
+			out = fmt.Sprintf("PANIC %v", r)
+		}
+	}()
+	res, err := db.Query(ctx, sql)
+	if err != nil {
+		return iv80Err(err)
+	}
+	cols := make([]parquet.Column, len(res.ColumnMetas))
+	for i, m := range res.ColumnMetas {
+		cols[i] = parquet.Column{Name: m.Name, Type: m.TypeID, Precision: m.Precision, Scale: m.Scale}
+	}
+	cells := make([][]any, len(res.Rows))
+	for i := range res.Rows {
+		cells[i] = res.Cells(i)
+	}
+	return iv80EngineRender(cols, cells)
+}
+
+// iv80RunDAG runs sql through a coordinator.
+func iv80RunDAG(ctx context.Context, c *Coordinator, sql string) (out string) {
+	defer func() {
+		if r := recover(); r != nil {
+			out = fmt.Sprintf("PANIC %v", r)
+		}
+	}()
+	res, err := c.ExecuteSQL(ctx, sql)
+	if err != nil {
+		return iv80Err(err)
+	}
+	if res.Error != "" {
+		return "ERR : " + iv80Ids.ReplaceAllString(res.Error, "<id>")
+	}
+	cols := append([]parquet.Column(nil), res.OutputSchema()...)
+	var cells [][]any
+	if st := res.Stream(); st != nil {
+		defer st.Close()
+		for {
+			bb, berr := st.Next(ctx)
+			if berr != nil {
+				return iv80Err(berr)
+			}
+			if bb == nil {
+				break
+			}
+			cells = append(cells, bb.ToRowValues()...)
+		}
+	} else {
+		rows, rerr := res.Rows()
+		if rerr != nil {
+			return iv80Err(rerr)
+		}
+		for _, r := range rows {
+			row := make([]any, len(cols))
+			for j, c := range cols {
+				row[j] = r[c.Name]
+			}
+			cells = append(cells, row)
+		}
+	}
+	return iv80EngineRender(cols, cells)
+}
+
+// iv80Arm is one execution arm.
+type iv80Arm struct {
+	name string
+	run  func(string) string
+}
+
+// iv80ArmsFixture is ivArmsFixture's six arms over one shared catalog
+// (single, spilled at a 512 KiB budget with forced aggregate drains and
+// small sort runs, the DAG, the DAG with every build broadcast-refused so it
+// shuffles, the DAG with four morsel workers, the small-query fast path),
+// answering through iv80RunSingle / iv80RunDAG; the writer runs fixtures and
+// writes.
+func iv80ArmsFixture(t *testing.T, ctx context.Context) (func(string) string, []iv80Arm) {
+	t.Helper()
+	infra := tmdInfra(t, ctx)
+	open := func(budget int64) *wadjet.DB {
+		t.Helper()
+		cfg := wadjet.Config{MetaKV: infra.kv, Store: infra.store, Bucket: "test", MemoryBudget: budget}
+		if budget > 0 {
+			cfg.SpillDir = t.TempDir()
+		}
+		db, err := wadjet.Open(ctx, cfg)
+		if err != nil {
+			t.Fatalf("open over the shared catalog: %v", err)
+		}
+		t.Cleanup(func() { db.Close() })
+		return db
+	}
+	writer := open(0)
+	spilled := open(512 * 1024)
+	coord := tmdCoordinator(t, ctx, infra)
+	coordB := tmdCoordinator(t, ctx, infra, func(c *Config) { c.BroadcastBytesOverride = 1 })
+	coordM := tmdCoordinatorWithWorkers(t, ctx, infra, func(w *worker.Config) { w.MorselWorkers = 4 })
+	coordF := tmdCoordinator(t, ctx, infra, func(c *Config) { c.LocalFastPathBytes = 64 << 20 })
+	spill := func(sql string) string {
+		restoreDrain := exec.ForceAggDrainEvery(1)
+		restoreRuns := exec.ForceSmallSpillRuns(2)
+		defer func() { restoreRuns(); exec.ForceAggDrainEvery(restoreDrain) }()
+		return iv80RunSingle(ctx, spilled, sql)
+	}
+	return func(sql string) string {
+			if _, err := writer.Query(ctx, sql); err != nil {
+				return iv80Err(err)
+			}
+			return "ok"
+		}, []iv80Arm{
+			{"single", func(sql string) string { return iv80RunSingle(ctx, writer, sql) }},
+			{"spilled512k", spill},
+			{"dag", func(sql string) string { return iv80RunDAG(ctx, coord, sql) }},
+			{"dag-shuffled", func(sql string) string { return iv80RunDAG(ctx, coordB, sql) }},
+			{"dag-morsel4", func(sql string) string { return iv80RunDAG(ctx, coordM, sql) }},
+			{"dag-fastpath", func(sql string) string { return iv80RunDAG(ctx, coordF, sql) }},
+		}
+}
+
+var iv80ArmNames = []string{"single", "spilled512k", "dag", "dag-shuffled", "dag-morsel4", "dag-fastpath"}
+
 // iv80EngineRun runs every cell of every section on every arm and answers
 // each section's engine file.
 func iv80EngineRun(t *testing.T) map[string]string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 	t.Cleanup(cancel)
-	writer, arms := ivArmsFixture(t, ctx)
+	writer, arms := iv80ArmsFixture(t, ctx)
 	out := map[string]string{}
 	for _, sec := range iv80Sections() {
 		pg, _ := iv80ReadTSV(t, iv80Path(sec.stem, "_pg17.tsv"))
@@ -327,11 +602,7 @@ func iv80EngineRun(t *testing.T) map[string]string {
 				continue
 			case c.ddl:
 				got := writer(c.sql)
-				cls := "ok"
-				if got != "ok" {
-					cls = "refused"
-				}
-				b.WriteString(c.name + "\twriter\t" + cls + "\t" + iv80Escape(got) + "\n")
+				b.WriteString(c.name + "\twriter\t" + iv80Classify(got, want) + "\t" + iv80Escape(got) + "\n")
 				continue
 			}
 			answers := make([]string, len(arms))
@@ -372,6 +643,7 @@ func TestArc1680bRecordEngine(t *testing.T) {
 // every arm is the recorded one. It asserts nothing about agreement with
 // PostgreSQL: it is the baseline the implementation items move, re-recorded
 // (IV80_RECORD_ENGINE=1) with every moved cell named in the item's note.
+// What a stage must reach is the manifest's (TestArc1680bStageManifest).
 func TestArc1680bEngineBaseline(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: six arms over the interval corpus")
@@ -410,11 +682,17 @@ func TestArc1680bEngineBaseline(t *testing.T) {
 	}
 }
 
+var iv80Classes = map[string]bool{
+	"agree": true, "agree-value": true, "differs": true, "answers-pg-error": true, "pg-error": true,
+	"refusal": true, "wrong-sqlstate": true, "error": true, "store-guard": true, "internal": true,
+	"panic": true, "ok": true, "pg-only": true,
+}
+
 // TestArc1680bCorpusWellFormed: every section's statements file is the cells
-// as written, every statement has PostgreSQL's answer (typed, for an answer
-// with rows) and this engine's disposition on every arm.
+// as written, every statement has PostgreSQL's answer (typed, including a
+// zero-row answer) and this engine's disposition on every arm, with a class
+// that is the classification of that answer.
 func TestArc1680bCorpusWellFormed(t *testing.T) {
-	armNames := []string{"single", "spilled512k", "dag", "dag-shuffled", "dag-morsel4", "dag-fastpath"}
 	total := 0
 	for _, sec := range iv80Sections() {
 		cells := sec.cells()
@@ -439,17 +717,22 @@ func TestArc1680bCorpusWellFormed(t *testing.T) {
 				t.Errorf("%s: %s has no single PostgreSQL answer", sec.stem, c.name)
 				continue
 			}
-			ans := a[0]
+			ans, notice := iv80Notice(a[0])
+			if notice != "" && !strings.Contains(notice, ": ") {
+				t.Errorf("%s: %s: malformed notice %q", sec.stem, c.name, notice)
+			}
 			switch {
-			case c.ddl:
+			case c.ddl && !c.write:
 				if ans != "ok" {
-					t.Errorf("%s: DDL %s failed on PostgreSQL: %s", sec.stem, c.name, ans)
+					t.Errorf("%s: fixture %s failed on PostgreSQL: %s", sec.stem, c.name, ans)
 				}
-			case ans == "(0 rows)":
+			case c.ddl:
 			case strings.HasPrefix(ans, "ERR "):
 				if len(ans) < 9 {
 					t.Errorf("%s: %s: malformed error %q", sec.stem, c.name, ans)
 				}
+			case ans == "(0 rows)":
+				t.Errorf("%s: %s: a zero-row answer without its column types", sec.stem, c.name)
 			default:
 				head, _, ok := strings.Cut(ans, " | ")
 				if !ok {
@@ -475,8 +758,8 @@ func TestArc1680bCorpusWellFormed(t *testing.T) {
 					a, _, _ := strings.Cut(l, "\t")
 					arms = append(arms, a)
 				}
-				if strings.Join(arms, ",") != strings.Join(armNames, ",") {
-					t.Errorf("%s: %s: engine disposition arms %v, want * or %v", sec.stem, c.name, arms, armNames)
+				if strings.Join(arms, ",") != strings.Join(iv80ArmNames, ",") {
+					t.Errorf("%s: %s: engine disposition arms %v, want * or %v", sec.stem, c.name, arms, iv80ArmNames)
 				}
 			}
 			for _, l := range lines {
@@ -485,10 +768,11 @@ func TestArc1680bCorpusWellFormed(t *testing.T) {
 					t.Errorf("%s: %s: malformed engine line %q", sec.stem, c.name, l)
 					continue
 				}
-				switch f[1] {
-				case "agree", "agree-value", "refused", "differs", "ok", "pg-only":
-				default:
+				if !iv80Classes[f[1]] {
 					t.Errorf("%s: %s: unknown class %q", sec.stem, c.name, f[1])
+				}
+				if !c.pgOnly && f[1] != iv80Classify(iv80Unescape(f[2]), a[0]) {
+					t.Errorf("%s: %s: class %q is not the classification of %q", sec.stem, c.name, f[1], f[2])
 				}
 			}
 		}
@@ -496,9 +780,30 @@ func TestArc1680bCorpusWellFormed(t *testing.T) {
 			t.Errorf("%s: %d PostgreSQL answers for %d cells", sec.stem, len(pgOrder), len(cells))
 		}
 	}
-	if total < 500 {
+	if total < 900 {
 		t.Fatalf("only %d cells: the corpus must cover the sections", total)
 	}
+}
+
+// iv80Unescape undoes iv80Escape.
+func iv80Unescape(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			i++
+			switch s[i] {
+			case 't':
+				b.WriteByte('\t')
+			case 'n':
+				b.WriteByte('\n')
+			default:
+				b.WriteByte(s[i])
+			}
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 // --- The reference model --------------------------------------------------
@@ -525,6 +830,7 @@ func iv80Int64Wrap(v iv80ModelValue) int64 {
 // equality implies PostgreSQL's hash equality (measured) and the model key's
 // equality (by construction); a hash of the FIELDS would split SQL-equal
 // groups, and a 64-bit normalized value would mis-order the values past 2^63.
+// Every generated id is in every answer exactly once.
 func TestArc1680bReferenceModel(t *testing.T) {
 	vals := iv80ModelValues()
 	pg, _ := iv80ReadTSV(t, iv80Path("09_model", "_pg17.tsv"))
@@ -539,8 +845,27 @@ func TestArc1680bReferenceModel(t *testing.T) {
 		}
 		return strings.Split(rows, "; ")
 	}
+	// coverage: ids are exactly 1..len(vals), each once.
+	coverage := func(name string, ids []int) {
+		t.Helper()
+		seen := make([]bool, len(vals)+1)
+		for _, id := range ids {
+			if id < 1 || id > len(vals) || seen[id] {
+				t.Errorf("%s: id %d out of range or repeated", name, id)
+				continue
+			}
+			seen[id] = true
+		}
+		if len(ids) != len(vals) {
+			t.Errorf("%s: %d ids for %d generated values", name, len(ids), len(vals))
+		}
+	}
 	// The stored fields are the input's, unnormalized.
-	for i, r := range body("model/fields") {
+	fieldRows := body("model/fields")
+	if len(fieldRows) != len(vals) {
+		t.Fatalf("model/fields: %d rows for %d values", len(fieldRows), len(vals))
+	}
+	for i, r := range fieldRows {
 		f := strings.Split(r, ",")
 		v := vals[i]
 		want := fmt.Sprintf("%d,%d,%d,%d", i+1, v.months, v.days, v.micros)
@@ -565,6 +890,15 @@ func TestArc1680bReferenceModel(t *testing.T) {
 	for _, id := range ids {
 		modelOrder = append(modelOrder, strconv.Itoa(id))
 	}
+	var pgOrderIDs []int
+	for _, s := range body("model/order") {
+		n, err := strconv.Atoi(s)
+		if err != nil {
+			t.Fatalf("model/order: %q", s)
+		}
+		pgOrderIDs = append(pgOrderIDs, n)
+	}
+	coverage("model/order", pgOrderIDs)
 	if got := strings.Join(body("model/order"), " "); got != strings.Join(modelOrder, " ") {
 		t.Errorf("ORDER BY: PostgreSQL %s\n  model %s", got, strings.Join(modelOrder, " "))
 	}
@@ -603,18 +937,37 @@ func TestArc1680bReferenceModel(t *testing.T) {
 		return x < y
 	})
 	for _, name := range []string{"model/groups", "model/groupsSort"} {
-		if got := strings.Join(body(name), "; "); got != strings.Join(modelGroups, "; ") {
+		rows := body(name)
+		var members []int
+		for _, r := range rows {
+			f := strings.SplitN(r, ",", 3)
+			if len(f) != 3 {
+				t.Fatalf("%s: row %q", name, r)
+			}
+			for _, s := range strings.Fields(f[2]) {
+				n, _ := strconv.Atoi(s)
+				members = append(members, n)
+			}
+		}
+		coverage(name, members)
+		if got := strings.Join(rows, "; "); got != strings.Join(modelGroups, "; ") {
 			t.Errorf("%s: PostgreSQL %s\n  model %s", name, got, strings.Join(modelGroups, "; "))
 		}
 	}
 	// Hashing: PostgreSQL's interval_hash is equal within every group
-	// (measured); a hash of the fields is not.
+	// (measured); a hash of the fields is not. Every id carries a hash.
 	hash := map[int]string{}
+	var hashIDs []int
 	for _, r := range body("model/hash") {
-		id, h, _ := strings.Cut(r, ",")
-		n, _ := strconv.Atoi(id)
+		id, h, ok := strings.Cut(r, ",")
+		n, err := strconv.Atoi(id)
+		if !ok || err != nil || h == "" || h == "NULL" {
+			t.Fatalf("model/hash: row %q", r)
+		}
 		hash[n] = h
+		hashIDs = append(hashIDs, n)
 	}
+	coverage("model/hash", hashIDs)
 	fieldSplit, multi := 0, 0
 	for _, g := range groups {
 		if len(g) < 2 {

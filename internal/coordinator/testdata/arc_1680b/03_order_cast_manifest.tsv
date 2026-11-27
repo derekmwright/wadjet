@@ -1,0 +1,7 @@
+# The stage manifest of section 03_order_cast (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet / door).
+order/minMax~text	E	rep-divergence	unmet
+order/minMaxFinite~text	E	rep-divergence	unmet
+order/minTieFwd~text	E	rep-divergence	unmet
+order/minTieRev~text	E	rep-divergence	unmet
+order/minTieTable~text	E	rep-divergence	unmet
+order/greatestTie~text	D	supported	unmet

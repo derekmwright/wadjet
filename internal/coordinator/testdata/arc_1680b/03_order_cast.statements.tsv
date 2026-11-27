@@ -1,0 +1,7 @@
+# #1680b interval corpus statements (arc_1680b_interval_corpus_cells_test.go). name<TAB>settings<TAB>kind<TAB>sql
+order/minMax~text	-	sql	SELECT CAST(min(CAST(s AS INTERVAL)) AS TEXT) AS lo, CAST(max(CAST(s AS INTERVAL)) AS TEXT) AS hi FROM iv80_o
+order/minMaxFinite~text	-	sql	SELECT CAST(min(CAST(s AS INTERVAL)) AS TEXT) AS lo, CAST(max(CAST(s AS INTERVAL)) AS TEXT) AS hi FROM iv80_o WHERE id NOT IN (17, 18)
+order/minTieFwd~text	-	sql	SELECT CAST(min(v) AS TEXT) AS lo, CAST(max(v) AS TEXT) AS hi FROM (VALUES (1, INTERVAL '1 mon'), (2, INTERVAL '30 days'), (3, INTERVAL '720:00:00')) t(id, v)
+order/minTieRev~text	-	sql	SELECT CAST(min(v) AS TEXT) AS lo, CAST(max(v) AS TEXT) AS hi FROM (VALUES (3, INTERVAL '720:00:00'), (2, INTERVAL '30 days'), (1, INTERVAL '1 mon')) t(id, v)
+order/minTieTable~text	-	sql	SELECT CAST(min(CAST(s AS INTERVAL)) AS TEXT) AS lo, CAST(max(CAST(s AS INTERVAL)) AS TEXT) AS hi FROM iv80_o WHERE id IN (1, 2, 3)
+order/greatestTie~text	-	sql	SELECT CAST(GREATEST(INTERVAL '1 mon', INTERVAL '30 days') AS TEXT) AS g, CAST(LEAST(INTERVAL '1 mon', INTERVAL '30 days') AS TEXT) AS l, CAST(GREATEST(INTERVAL '30 days', INTERVAL '1 mon') AS TEXT) AS g2, CAST(LEAST(INTERVAL '30 days', INTERVAL '1 mon') AS TEXT) AS l2

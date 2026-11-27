@@ -1,0 +1,7 @@
+# The stage manifest of section 04_keys_cast (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet / door).
+group/iv80_k/default~text	D	rep-divergence	unmet
+group/iv80_k/sortagg~text	D	rep-divergence	unmet
+group/iv80_k/hashagg~text	D	rep-divergence	unmet
+group/iv80_kr/default~text	D	rep-divergence	unmet
+group/iv80_kr/sortagg~text	D	rep-divergence	unmet
+group/iv80_kr/hashagg~text	D	rep-divergence	unmet

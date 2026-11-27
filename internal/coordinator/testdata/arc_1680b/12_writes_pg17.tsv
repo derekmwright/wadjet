@@ -1,0 +1,22 @@
+# PostgreSQL 17.11 answers for the #1680b interval corpus, section 12_writes (TestArc1680bMeasure; postgres:17-alpine, initdb --locale=C --encoding=UTF8, --memory=4g).
+# PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit; datcollate=C datctype=C server_encoding=UTF8; defaults IntervalStyle=postgres DateStyle=ISO, MDY TimeZone=UTC; a cell's settings column overrides them for that cell only.
+# name<TAB>answer: ok | ERR <SQLSTATE>: message | col:type(oid),... | row; row (or | (0 rows)), then any " !! <severity> <SQLSTATE>: message" PostgreSQL raised
+ddl/create/iv80_wt	ok
+ddl/insert/iv80_wt	ok
+w/insertSelect	ok
+w/insertDerived	ok
+w/insertValues	ok
+w/insertZero	ok
+w/insertSubquery	ok
+w/insertTsDiff	ok
+w/update	ok
+w/updateDerived	ok
+w/updateZero	ok
+w/merge	ok
+w/ctas	ok
+w/ctasDerived	ok
+w/ctasNoData	ok
+w/ctasNoDataDerived	ok
+w/ctasZero	ok
+w/ctasText	ok
+w/ctasTsDiffNoData	ok

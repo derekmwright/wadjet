@@ -1,0 +1,174 @@
+# The stage manifest of section 10_definitions (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet / door).
+in/usMinUnit	F	refusal bare-interval-result	met
+in/usMaxUnit	F	refusal bare-interval-result	met
+in/usOverUnit	C	pg-error 22015	met
+in/usUnderUnit	C	pg-error 22015	met
+in/usMinUnitAgo	F	refusal bare-interval-result	unmet
+in/allMin	F	refusal bare-interval-result	unmet
+in/allMinNear	F	refusal bare-interval-result	unmet
+in/allMaxUnits	F	refusal bare-interval-result	unmet
+in/allMaxNear	F	refusal bare-interval-result	unmet
+in/allMinIsNegInf	C	supported	unmet
+in/allMinCastText	F	refusal bare-interval-result	met
+in/allMinMake	F	refusal bare-interval-result	unmet
+frac/1.5us	F	refusal bare-interval-result	unmet
+frac/-1.5us	F	refusal bare-interval-result	unmet
+frac/2.5us	F	refusal bare-interval-result	unmet
+frac/3.5us	F	refusal bare-interval-result	unmet
+frac/0.5us	F	refusal bare-interval-result	unmet
+frac/clockNearSecond	F	refusal bare-interval-result	unmet
+frac/minuteUnit	F	refusal bare-interval-result	unmet
+frac/years1	F	refusal bare-interval-result	unmet
+frac/years2	F	refusal bare-interval-result	unmet
+frac/decade	F	refusal bare-interval-result	unmet
+frac/months	F	refusal bare-interval-result	unmet
+frac/weeks1	F	refusal bare-interval-result	unmet
+frac/weeks2	F	refusal bare-interval-result	unmet
+ago/P1D ago	C	pg-error 22007	met
+ago/P1Y2M ago	C	pg-error 22007	met
+ago/infinity ago	C	pg-error 22007	met
+ago/-infinity ago	C	pg-error 22007	met
+ago/1 day 02:00:00 ago	F	refusal bare-interval-result	unmet
+ago/1-2 ago	F	refusal bare-interval-result	unmet
+ago/3 4:05:06 ago	F	refusal bare-interval-result	unmet
+ago/-1 day +02:00:00 ago	F	refusal bare-interval-result	unmet
+ago/1 day ago ago	C	pg-error 22007	met
+ago/ago	C	pg-error 22007	unmet
+ago/2147483647 days ago	F	refusal bare-interval-result	unmet
+ago/-2147483648 days ago	C	pg-error 22015	unmet
+ago/-2147483648 months ago	C	pg-error 22015	unmet
+ago/@ 1 mon ago	F	refusal bare-interval-result	unmet
+typmod/bareHM	F	refusal bare-interval-result	unmet
+typmod/hm	A	refusal typmod	unmet
+typmod/ms	A	refusal typmod	unmet
+typmod/dm	A	refusal typmod	unmet
+typmod/bareNumber	F	refusal bare-interval-result	met
+typmod/minute	A	refusal typmod	met
+typmod/dayToHour	A	refusal typmod	unmet
+typmod/yearToMonth	A	refusal typmod	unmet
+typmod/hourFrac	A	refusal typmod	unmet
+typmod/secondTyp5	A	refusal typmod	unmet
+typmod/prec7	A	refusal typmod	unmet
+typmod/prec7Literal	A	refusal typmod	unmet
+typmod/prec7Half	A	refusal typmod	unmet
+ar/mulMixed	F	refusal bare-interval-result	unmet
+ar/divMixed2	F	refusal bare-interval-result	unmet
+ar/divMixed3	F	refusal bare-interval-result	unmet
+ar/mulCarry	F	refusal bare-interval-result	unmet
+ar/infFactorZeroSign	C	pg-error 22008	unmet
+ar/infFactorNegSign	F	refusal bare-interval-result	unmet
+ar/infFactorPosSign	F	refusal bare-interval-result	unmet
+ar/negInfFactorNegSign	F	refusal bare-interval-result	unmet
+ar/infDivFiniteSign	F	refusal bare-interval-result	unmet
+ar/divRecipMonths	F	refusal bare-interval-result	met
+ar/divRecipDays	F	refusal bare-interval-result	met
+ar/divRecipJudge	F	refusal bare-interval-result	met
+justify/bigDays24h	F	refusal bare-interval-result	unmet
+justify/bigDays24h/hoursOfDays	F	refusal bare-interval-result	unmet
+justify/bigDays24h/daysOfHours	C	pg-error 22008	unmet
+justify/negBigDays24h	F	refusal bare-interval-result	unmet
+justify/negBigDays24h/hoursOfDays	F	refusal bare-interval-result	unmet
+justify/negBigDays24h/daysOfHours	C	pg-error 22008	unmet
+justify/monMinus25h	F	refusal bare-interval-result	unmet
+justify/monMinus25h/hoursOfDays	F	refusal bare-interval-result	unmet
+justify/monMinus25h/daysOfHours	F	refusal bare-interval-result	unmet
+justify/negMonPlus25h	F	refusal bare-interval-result	unmet
+justify/negMonPlus25h/hoursOfDays	F	refusal bare-interval-result	unmet
+justify/negMonPlus25h/daysOfHours	F	refusal bare-interval-result	unmet
+infop/tsInfPlusNegInf	C	pg-error 22008	unmet
+infop/tsNegInfPlusInf	C	pg-error 22008	unmet
+infop/tsNegInfMinusNegInf	C	pg-error 22008	unmet
+infop/tsNegInfMinusInf	C	supported	unmet
+infop/tsInfPlusFinite	C	supported	unmet
+infop/dateInfPlusNegInf	C	pg-error 22008	unmet
+infop/dateFinitePlusInf	C	supported	unmet
+infop/ivInfMinusNegInf	F	refusal bare-interval-result	unmet
+epoch/yearVs360	C	supported	unmet
+epoch/yearVs360Float	C	supported	met
+epoch/bigFinite	C	supported	unmet
+epoch/bigFiniteNeg	C	supported	unmet
+epoch/negInf	A	refusal numeric-infinity	unmet
+sentinel/minusToNegInf	C	pg-error 22008	unmet
+sentinel/plusToNegInf	C	pg-error 22008	unmet
+sentinel/sumToNegInf	E	pg-error 22008	unmet
+sentinel/negOfNearMax	F	refusal bare-interval-result	unmet
+sentinel/negOfNearMin	C	pg-error 22008	unmet
+sentinel/negOfInfinityTriple	F	refusal bare-interval-result	unmet
+sentinel/mulNegInfinityTriple	F	refusal bare-interval-result	unmet
+age/borrow	F	refusal bare-interval-result	unmet
+age/timeBorrow	A	refusal timestamp-millisecond-carrier	unmet
+age/null	F	refusal bare-interval-result	unmet
+age/infLeft	F	refusal bare-interval-result	unmet
+age/infRight	F	refusal bare-interval-result	unmet
+age/infOpposed	F	refusal bare-interval-result	unmet
+age/infInf	C	pg-error 22008	unmet
+age/negInfNegInf	C	pg-error 22008	unmet
+age/bc	F	refusal bare-interval-result	unmet
+age/date	F	refusal bare-interval-result	unmet
+age/dateNY	F	refusal bare-interval-result	unmet
+age/tz/UTC/fallBack	A	refusal timestamptz	unmet
+age/tz/America/New_York/fallBack	A	refusal timestamptz	unmet
+types/datePlusInt	C	supported	met
+types/dateMinusInt	C	supported	met
+types/intPlusDate	C	supported	met
+types/dateMinusDate	C	supported	unmet
+types/datePlusInterval	C	supported	unmet
+types/dateMinusInterval	C	supported	met
+types/intervalPlusDate	C	supported	met
+types/intervalMinusDate	C	pg-error 42883	met
+types/datePlusTime	A	refusal time-type	unmet
+types/dateMinusTime	A	refusal time-type	unmet
+types/tsMinusTs	F	refusal bare-interval-result	met
+types/tsMinusDate	F	refusal bare-interval-result	unmet
+types/dateMinusTs	F	refusal bare-interval-result	unmet
+types/tsPlusInterval	C	supported	unmet
+types/intervalPlusTs	C	supported	unmet
+types/tsMinusInterval	C	supported	unmet
+types/intervalMinusTs	C	pg-error 42883	met
+types/tsPlusTs	C	pg-error 42883	met
+types/datePlusDate	C	pg-error 42883	met
+types/dateTimesInt	C	pg-error 42883	met
+types/tsPlusInt	C	pg-error 42883	met
+types/timeMinusTime	A	refusal time-type	unmet
+types/timePlusInterval	A	refusal time-type	unmet
+types/intervalPlusTime	A	refusal time-type	unmet
+types/timeMinusInterval	A	refusal time-type	unmet
+types/tstzMinusTstz	A	refusal timestamptz	met
+types/tstzMinusTs	A	refusal timestamptz	met
+types/tstzPlusInterval	A	refusal timestamptz	unmet
+types/intervalTimesInt	F	refusal bare-interval-result	met
+types/intTimesInterval	F	refusal bare-interval-result	met
+types/intervalDivInt	F	refusal bare-interval-result	met
+types/negInterval	F	refusal bare-interval-result	met
+closure/tsMinusDate	F	refusal bare-interval-result	unmet
+closure/dateMinusTs	F	refusal bare-interval-result	unmet
+closure/coalesceText	C	supported	unmet
+closure/coalesce	F	refusal bare-interval-result	met
+closure/caseText	C	supported	unmet
+closure/case	F	refusal bare-interval-result	met
+closure/nullifText	C	supported	unmet
+closure/nullif	F	refusal bare-interval-result	met
+closure/unionNull	C	supported	unmet
+closure/whereFalse	F	refusal bare-interval-result	met
+closure/whereFalseText	C	supported	unmet
+closure/greatestMixed	C	supported	unmet
+dst/gapTarget	A	refusal timestamptz	unmet
+dst/foldTarget	A	refusal timestamptz	unmet
+dst/foldMinus	A	refusal timestamptz	unmet
+dst/gapInput	A	refusal timestamptz	unmet
+dst/monthIntoGap	A	refusal timestamptz	met
+dst/hoursAcrossFold	A	refusal timestamptz	unmet
+dst/dateAddZone	A	refusal timestamptz	unmet
+dst/seriesZone	A	refusal timestamptz	met
+dst/seriesNoZone	A	refusal timestamptz	met
+fn/binInfStride	C	pg-error 22008	unmet
+fn/binInfSource	C	supported	unmet
+fn/binDaysStride	C	supported	unmet
+fn/binBeforeOrigin	C	supported	unmet
+fn/truncMixedSign	A	refusal function-date_trunc	unmet
+fn/tocharNeg	A	refusal function-to_char	unmet
+fn/overlapsNegEnd	A	refusal function-overlaps	unmet
+fn/overlapsInf	A	refusal function-overlaps	unmet
+fn/seriesTsMonthEnd	A	refusal function-generate_series	met
+fn/seriesNegStepWrongWay	A	refusal function-generate_series	met
+fn/widthBucketNumeric	C	supported	unmet

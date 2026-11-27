@@ -1,0 +1,121 @@
+# #1680b interval corpus statements (arc_1680b_interval_corpus_cells_test.go). name<TAB>settings<TAB>kind<TAB>sql
+lit/0/1 day~text	-	sql	SELECT CAST(INTERVAL '1 day' AS TEXT) AS a
+lit/1/1 day 2 hours~text	-	sql	SELECT CAST(INTERVAL '1 day 2 hours' AS TEXT) AS a
+lit/2/1 year 2 months 3 days 4 hours 5 minutes 6 seconds~text	-	sql	SELECT CAST(INTERVAL '1 year 2 months 3 days 4 hours 5 minutes 6 seconds' AS TEXT) AS a
+lit/3/1-2~text	-	sql	SELECT CAST(INTERVAL '1-2' AS TEXT) AS a
+lit/4/-1-2~text	-	sql	SELECT CAST(INTERVAL '-1-2' AS TEXT) AS a
+lit/5/3 4:05:06~text	-	sql	SELECT CAST(INTERVAL '3 4:05:06' AS TEXT) AS a
+lit/6/-3 -4:05:06~text	-	sql	SELECT CAST(INTERVAL '-3 -4:05:06' AS TEXT) AS a
+lit/7/1-2 3 4:05:06~text	-	sql	SELECT CAST(INTERVAL '1-2 3 4:05:06' AS TEXT) AS a
+lit/8/4:05:06~text	-	sql	SELECT CAST(INTERVAL '4:05:06' AS TEXT) AS a
+lit/9/4:05~text	-	sql	SELECT CAST(INTERVAL '4:05' AS TEXT) AS a
+lit/10/-4:05:06~text	-	sql	SELECT CAST(INTERVAL '-4:05:06' AS TEXT) AS a
+lit/11/1 day 25:00:00~text	-	sql	SELECT CAST(INTERVAL '1 day 25:00:00' AS TEXT) AS a
+lit/12/-1 day +25:00:00~text	-	sql	SELECT CAST(INTERVAL '-1 day +25:00:00' AS TEXT) AS a
+lit/13/1 mon -30 days~text	-	sql	SELECT CAST(INTERVAL '1 mon -30 days' AS TEXT) AS a
+lit/14/-1 year -2 mons +3 days~text	-	sql	SELECT CAST(INTERVAL '-1 year -2 mons +3 days' AS TEXT) AS a
+lit/15/1 year -1 second~text	-	sql	SELECT CAST(INTERVAL '1 year -1 second' AS TEXT) AS a
+lit/16/P1Y2M3DT4H5M6S~text	-	sql	SELECT CAST(INTERVAL 'P1Y2M3DT4H5M6S' AS TEXT) AS a
+lit/17/P1Y2M3DT4H5M6.5S~text	-	sql	SELECT CAST(INTERVAL 'P1Y2M3DT4H5M6.5S' AS TEXT) AS a
+lit/18/PT36H~text	-	sql	SELECT CAST(INTERVAL 'PT36H' AS TEXT) AS a
+lit/19/P1.5M~text	-	sql	SELECT CAST(INTERVAL 'P1.5M' AS TEXT) AS a
+lit/20/P0.5Y~text	-	sql	SELECT CAST(INTERVAL 'P0.5Y' AS TEXT) AS a
+lit/21/P1W~text	-	sql	SELECT CAST(INTERVAL 'P1W' AS TEXT) AS a
+lit/23/P-1DT-1H~text	-	sql	SELECT CAST(INTERVAL 'P-1DT-1H' AS TEXT) AS a
+lit/24/P0001-02-03T04:05:06~text	-	sql	SELECT CAST(INTERVAL 'P0001-02-03T04:05:06' AS TEXT) AS a
+lit/25/PT0S~text	-	sql	SELECT CAST(INTERVAL 'PT0S' AS TEXT) AS a
+lit/26/@ 1 year 2 mons~text	-	sql	SELECT CAST(INTERVAL '@ 1 year 2 mons' AS TEXT) AS a
+lit/27/@ 1 year 2 mons ago~text	-	sql	SELECT CAST(INTERVAL '@ 1 year 2 mons ago' AS TEXT) AS a
+lit/28/1 day ago~text	-	sql	SELECT CAST(INTERVAL '1 day ago' AS TEXT) AS a
+lit/29/-1 day ago~text	-	sql	SELECT CAST(INTERVAL '-1 day ago' AS TEXT) AS a
+lit/30/@ 3 days 4 hours 5 mins 6 secs~text	-	sql	SELECT CAST(INTERVAL '@ 3 days 4 hours 5 mins 6 secs' AS TEXT) AS a
+lit/31/1.5 months~text	-	sql	SELECT CAST(INTERVAL '1.5 months' AS TEXT) AS a
+lit/32/1.5 days~text	-	sql	SELECT CAST(INTERVAL '1.5 days' AS TEXT) AS a
+lit/33/1.5 years~text	-	sql	SELECT CAST(INTERVAL '1.5 years' AS TEXT) AS a
+lit/34/0.5 weeks~text	-	sql	SELECT CAST(INTERVAL '0.5 weeks' AS TEXT) AS a
+lit/35/1.5 hours~text	-	sql	SELECT CAST(INTERVAL '1.5 hours' AS TEXT) AS a
+lit/36/1.5 minutes~text	-	sql	SELECT CAST(INTERVAL '1.5 minutes' AS TEXT) AS a
+lit/37/0.1 months~text	-	sql	SELECT CAST(INTERVAL '0.1 months' AS TEXT) AS a
+lit/38/1.0333333 months~text	-	sql	SELECT CAST(INTERVAL '1.0333333 months' AS TEXT) AS a
+lit/39/-1.5 months~text	-	sql	SELECT CAST(INTERVAL '-1.5 months' AS TEXT) AS a
+lit/40/-1.5 days~text	-	sql	SELECT CAST(INTERVAL '-1.5 days' AS TEXT) AS a
+lit/41/1.5 centuries~text	-	sql	SELECT CAST(INTERVAL '1.5 centuries' AS TEXT) AS a
+lit/42/1 decade~text	-	sql	SELECT CAST(INTERVAL '1 decade' AS TEXT) AS a
+lit/43/1 century~text	-	sql	SELECT CAST(INTERVAL '1 century' AS TEXT) AS a
+lit/44/1 millennium~text	-	sql	SELECT CAST(INTERVAL '1 millennium' AS TEXT) AS a
+lit/45/10 weeks~text	-	sql	SELECT CAST(INTERVAL '10 weeks' AS TEXT) AS a
+lit/46/1.000001 seconds~text	-	sql	SELECT CAST(INTERVAL '1.000001 seconds' AS TEXT) AS a
+lit/47/0.0000005 seconds~text	-	sql	SELECT CAST(INTERVAL '0.0000005 seconds' AS TEXT) AS a
+lit/48/0.0000015 seconds~text	-	sql	SELECT CAST(INTERVAL '0.0000015 seconds' AS TEXT) AS a
+lit/49/0.0000025 seconds~text	-	sql	SELECT CAST(INTERVAL '0.0000025 seconds' AS TEXT) AS a
+lit/50/1 microsecond~text	-	sql	SELECT CAST(INTERVAL '1 microsecond' AS TEXT) AS a
+lit/51/1 millisecond~text	-	sql	SELECT CAST(INTERVAL '1 millisecond' AS TEXT) AS a
+lit/52/1.5 microseconds~text	-	sql	SELECT CAST(INTERVAL '1.5 microseconds' AS TEXT) AS a
+lit/53/1:2:3.123456789~text	-	sql	SELECT CAST(INTERVAL '1:2:3.123456789' AS TEXT) AS a
+lit/54/-0.000001 seconds~text	-	sql	SELECT CAST(INTERVAL '-0.000001 seconds' AS TEXT) AS a
+lit/55/00:00:00.000001~text	-	sql	SELECT CAST(INTERVAL '00:00:00.000001' AS TEXT) AS a
+lit/56/0~text	-	sql	SELECT CAST(INTERVAL '0' AS TEXT) AS a
+lit/57/0 seconds~text	-	sql	SELECT CAST(INTERVAL '0 seconds' AS TEXT) AS a
+lit/58/00:00:00~text	-	sql	SELECT CAST(INTERVAL '00:00:00' AS TEXT) AS a
+lit/59/-0 days~text	-	sql	SELECT CAST(INTERVAL '-0 days' AS TEXT) AS a
+lit/60/100~text	-	sql	SELECT CAST(INTERVAL '100' AS TEXT) AS a
+lit/61/1.5~text	-	sql	SELECT CAST(INTERVAL '1.5' AS TEXT) AS a
+lit/62/-100~text	-	sql	SELECT CAST(INTERVAL '-100' AS TEXT) AS a
+lit/63/178956970 years 7 months~text	-	sql	SELECT CAST(INTERVAL '178956970 years 7 months' AS TEXT) AS a
+lit/65/-178956970 years -8 months~text	-	sql	SELECT CAST(INTERVAL '-178956970 years -8 months' AS TEXT) AS a
+lit/67/2147483647 months~text	-	sql	SELECT CAST(INTERVAL '2147483647 months' AS TEXT) AS a
+lit/69/-2147483648 months~text	-	sql	SELECT CAST(INTERVAL '-2147483648 months' AS TEXT) AS a
+lit/71/2147483647 days~text	-	sql	SELECT CAST(INTERVAL '2147483647 days' AS TEXT) AS a
+lit/73/-2147483648 days~text	-	sql	SELECT CAST(INTERVAL '-2147483648 days' AS TEXT) AS a
+lit/75/2562047788:00:54.775807~text	-	sql	SELECT CAST(INTERVAL '2562047788:00:54.775807' AS TEXT) AS a
+lit/79/2147483647 months 2147483647 days 2562047788:00:54.775807~text	-	sql	SELECT CAST(INTERVAL '2147483647 months 2147483647 days 2562047788:00:54.775807' AS TEXT) AS a
+lit/81/infinity~text	-	sql	SELECT CAST(INTERVAL 'infinity' AS TEXT) AS a
+lit/82/-infinity~text	-	sql	SELECT CAST(INTERVAL '-infinity' AS TEXT) AS a
+lit/83/+infinity~text	-	sql	SELECT CAST(INTERVAL '+infinity' AS TEXT) AS a
+lit/84/INFINITY~text	-	sql	SELECT CAST(INTERVAL 'INFINITY' AS TEXT) AS a
+lit/null~text	-	sql	SELECT CAST(CAST(NULL AS INTERVAL) AS TEXT) AS a
+std/ym~text	-	sql	SELECT CAST(INTERVAL '1-2' YEAR TO MONTH AS TEXT) AS a
+std/ymNeg~text	-	sql	SELECT CAST(INTERVAL '-1-2' YEAR TO MONTH AS TEXT) AS a
+std/ds~text	-	sql	SELECT CAST(INTERVAL '3 4:05:06' DAY TO SECOND AS TEXT) AS a
+std/dsFrac~text	-	sql	SELECT CAST(INTERVAL '3 4:05:06.789' DAY TO SECOND AS TEXT) AS a
+std/year~text	-	sql	SELECT CAST(INTERVAL '5' YEAR AS TEXT) AS a
+std/month~text	-	sql	SELECT CAST(INTERVAL '5' MONTH AS TEXT) AS a
+std/day~text	-	sql	SELECT CAST(INTERVAL '5' DAY AS TEXT) AS a
+std/hour~text	-	sql	SELECT CAST(INTERVAL '5' HOUR AS TEXT) AS a
+std/minute~text	-	sql	SELECT CAST(INTERVAL '5' MINUTE AS TEXT) AS a
+std/second~text	-	sql	SELECT CAST(INTERVAL '5' SECOND AS TEXT) AS a
+std/secondFrac~text	-	sql	SELECT CAST(INTERVAL '5.123456' SECOND AS TEXT) AS a
+std/dh~text	-	sql	SELECT CAST(INTERVAL '1 2' DAY TO HOUR AS TEXT) AS a
+std/dm~text	-	sql	SELECT CAST(INTERVAL '1 2:03' DAY TO MINUTE AS TEXT) AS a
+std/hm~text	-	sql	SELECT CAST(INTERVAL '1:30' HOUR TO MINUTE AS TEXT) AS a
+std/ms~text	-	sql	SELECT CAST(INTERVAL '1:30' MINUTE TO SECOND AS TEXT) AS a
+std/hs~text	-	sql	SELECT CAST(INTERVAL '1:30:15' HOUR TO SECOND AS TEXT) AS a
+std/dayDropsTime~text	-	sql	SELECT CAST(INTERVAL '1 day 2 hours 3 minutes' DAY AS TEXT) AS a
+std/yearDropsMonths~text	-	sql	SELECT CAST(INTERVAL '1 year 2 months' YEAR AS TEXT) AS a
+std/monthDropsDays~text	-	sql	SELECT CAST(INTERVAL '1 year 2 months 3 days' MONTH AS TEXT) AS a
+std/hourDropsMinutes~text	-	sql	SELECT CAST(INTERVAL '1 day 02:30:45' HOUR AS TEXT) AS a
+std/yearFrac~text	-	sql	SELECT CAST(INTERVAL '1.5' YEAR AS TEXT) AS a
+std/dayFrac~text	-	sql	SELECT CAST(INTERVAL '1.5' DAY AS TEXT) AS a
+std/hourNeg~text	-	sql	SELECT CAST(INTERVAL '-25' HOUR AS TEXT) AS a
+prec/iv3~text	-	sql	SELECT CAST(CAST(INTERVAL '1.123456 seconds' AS INTERVAL(3)) AS TEXT) AS a
+prec/iv0~text	-	sql	SELECT CAST(CAST(INTERVAL '1.5 seconds' AS INTERVAL(0)) AS TEXT) AS a, CAST(CAST(INTERVAL '2.5 seconds' AS INTERVAL(0)) AS TEXT) AS b, CAST(CAST(INTERVAL '-1.5 seconds' AS INTERVAL(0)) AS TEXT) AS c
+prec/literal3~text	-	sql	SELECT CAST(INTERVAL(3) '1.123456 seconds' AS TEXT) AS a
+prec/second3~text	-	sql	SELECT CAST(INTERVAL '1.123456' SECOND(3) AS TEXT) AS a
+prec/ds2~text	-	sql	SELECT CAST(INTERVAL '1 2:03:04.5678' DAY TO SECOND(2) AS TEXT) AS a
+prec/iv6~text	-	sql	SELECT CAST(CAST(INTERVAL '1.1234567 seconds' AS INTERVAL(6)) AS TEXT) AS a
+prec/iv7~text	-	sql	SELECT CAST(CAST(INTERVAL '1 second' AS INTERVAL(7)) AS TEXT) AS a
+prec/castDay~text	-	sql	SELECT CAST(CAST(INTERVAL '1 day 02:00:00' AS INTERVAL DAY) AS TEXT) AS a
+prec/castYear~text	-	sql	SELECT CAST(CAST(INTERVAL '14 months 3 days' AS INTERVAL YEAR) AS TEXT) AS a
+prec/castMonthTyp~text	-	sql	SELECT CAST(CAST(INTERVAL '14 months 3 days' AS INTERVAL YEAR TO MONTH) AS TEXT) AS a
+cast/fromText~text	-	sql	SELECT CAST(CAST('1 day 02:00:00' AS INTERVAL) AS TEXT) AS a
+cast/colon~text	-	sql	SELECT CAST('1 day'::interval AS TEXT) AS a
+cast/fromTime~text	-	sql	SELECT CAST(CAST(TIME '01:02:03.5' AS INTERVAL) AS TEXT) AS a
+make/all~text	-	sql	SELECT CAST(make_interval(1, 2, 3, 4, 5, 6, 7.5) AS TEXT) AS a
+make/days~text	-	sql	SELECT CAST(make_interval(days => 10) AS TEXT) AS a
+make/secs~text	-	sql	SELECT CAST(make_interval(secs => 1.5) AS TEXT) AS a, CAST(make_interval(secs => 0.0000015) AS TEXT) AS b
+make/negMins~text	-	sql	SELECT CAST(make_interval(mins => -90) AS TEXT) AS a
+make/weeks~text	-	sql	SELECT CAST(make_interval(weeks => 1, days => 1) AS TEXT) AS a
+make/zero~text	-	sql	SELECT CAST(make_interval() AS TEXT) AS a
+make/null~text	-	sql	SELECT CAST(make_interval(days => NULL) AS TEXT) AS a
+make/hoursOver~text	-	sql	SELECT CAST(make_interval(hours => 2147483647) AS TEXT) AS a
+row/cast~text	-	sql	SELECT id, CAST(CAST(s AS INTERVAL) AS TEXT) AS v FROM iv80_in WHERE id <> 8 ORDER BY id

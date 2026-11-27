@@ -1,0 +1,95 @@
+# This engine's disposition of the #1680b interval corpus, section 10_definitions_cast, per arm (TestArc1680bRecordEngine; held by TestArc1680bEngineBaseline).
+# Settings are PostgreSQL's only: the engine runs each statement as written. A TIMESTAMP value is printed as text (iv80EngineText). name<TAB>arms<TAB>class<TAB>answer
+in/usMinUnit~text	*	refusal	ERR 0A000: interval unit "microseconds" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+in/usMaxUnit~text	*	refusal	ERR 0A000: interval unit "microseconds" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+in/usMinUnitAgo~text	*	error	ERR 22007: invalid input syntax for type interval: "<id> microseconds ago"
+in/allMin~text	*	error	ERR 22007: invalid input syntax for type interval: "-2147483648 months -2147483648 days -<id> microseconds"
+in/allMinNear~text	*	error	ERR 22007: invalid input syntax for type interval: "-2147483648 months -2147483648 days -<id> microseconds"
+in/allMaxUnits~text	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 months 2147483647 days <id> microseconds"
+in/allMaxNear~text	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 months 2147483647 days <id> microseconds"
+in/allMinCastText~text	*	refusal	ERR 0A000: interval "-2147483648 months -2147483648 days -<id> microseconds" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+in/allMinMake~text	*	error	ERR 42601: syntax error at or near ">"
+frac/1.5us~text	*	error	ERR 42601: syntax error at or near "AS"
+frac/-1.5us~text	*	error	ERR 42601: syntax error at or near "AS"
+frac/2.5us~text	*	error	ERR 42601: syntax error at or near "AS"
+frac/3.5us~text	*	error	ERR 42601: syntax error at or near "AS"
+frac/0.5us~text	*	error	ERR 42601: syntax error at or near "AS"
+frac/clockNearSecond~text	*	error	ERR 42601: syntax error at or near "AS"
+frac/minuteUnit~text	*	error	ERR 22007: invalid input syntax for type interval: "0.0000000125 minutes"
+frac/years1~text	*	error	ERR 22007: invalid input syntax for type interval: "0.125 years"
+frac/years2~text	*	error	ERR 22007: invalid input syntax for type interval: "-0.125 years"
+frac/decade~text	*	error	ERR 22007: invalid input syntax for type interval: "0.0125 decades"
+frac/months~text	*	error	ERR 22007: invalid input syntax for type interval: "0.5 months"
+frac/weeks1~text	*	error	ERR 22007: invalid input syntax for type interval: "1.5 weeks"
+frac/weeks2~text	*	error	ERR 22007: invalid input syntax for type interval: "-0.5 weeks"
+ago/1 day 02:00:00 ago~text	*	error	ERR 22007: invalid input syntax for type interval: "1 day 02:00:00 ago"
+ago/1-2 ago~text	*	error	ERR 22007: invalid input syntax for type interval: "1-2 ago"
+ago/3 4:05:06 ago~text	*	error	ERR 22007: invalid input syntax for type interval: "3 4:05:06 ago"
+ago/-1 day +02:00:00 ago~text	*	error	ERR 22007: invalid input syntax for type interval: "-1 day +02:00:00 ago"
+ago/2147483647 days ago~text	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 days ago"
+ago/@ 1 mon ago~text	*	error	ERR 22007: invalid input syntax for type interval: "@ 1 mon ago"
+typmod/bareHM~text	*	error	ERR 42601: syntax error at or near "AS"
+typmod/hm~text	*	error	ERR 42601: syntax error at or near "HOUR"
+typmod/ms~text	*	error	ERR 42601: syntax error at or near "MINUTE"
+typmod/dm~text	*	error	ERR 42601: syntax error at or near "DAY"
+typmod/bareNumber~text	*	agree	a:text | 00:01:30
+typmod/minute~text	*	agree	a:text | 01:30:00
+typmod/dayToHour~text	*	error	ERR 42601: syntax error at or near "TO"
+typmod/yearToMonth~text	*	error	ERR 42601: syntax error at or near "TO"
+typmod/hourFrac~text	*	error	ERR 42601: syntax error at or near "HOUR"
+typmod/secondTyp5~text	*	error	ERR 42601: syntax error at or near "TO"
+typmod/prec7~text	*	error	ERR 22007: invalid input syntax for type interval: "1.1234567 seconds"
+typmod/prec7Literal~text	*	error	ERR 42601: syntax error at or near "("
+typmod/prec7Half~text	*	error	ERR 22007: invalid input syntax for type interval: "0.0000015 seconds"
+ar/mulMixed~text	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -1 day"
+ar/divMixed2~text	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -1 day"
+ar/divMixed3~text	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -1 day"
+ar/mulCarry~text	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 1 day"
+ar/infFactorNegSign~text	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -31 days"
+ar/infFactorPosSign~text	*	error	ERR 22007: invalid input syntax for type interval: "-1 mon 31 days"
+ar/negInfFactorNegSign~text	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -31 days"
+ar/infDivFiniteSign~text	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -31 days"
+ar/divRecipMonths~text	*	refusal	ERR 0A000: interval unit "mons" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+ar/divRecipDays~text	*	agree	a:text,b:text | 1 day,1 day
+ar/divRecipJudge~text	*	refusal	ERR 0A000: interval unit "microseconds" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+justify/bigDays24h~text	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 days 24 hours"
+justify/bigDays24h/hoursOfDays~text	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 days 24 hours"
+justify/negBigDays24h~text	*	error	ERR 22007: invalid input syntax for type interval: "-2147483648 days -24 hours"
+justify/negBigDays24h/hoursOfDays~text	*	error	ERR 22007: invalid input syntax for type interval: "-2147483648 days -24 hours"
+justify/monMinus25h~text	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -25 hours"
+justify/monMinus25h/hoursOfDays~text	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -25 hours"
+justify/monMinus25h/daysOfHours~text	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -25 hours"
+justify/negMonPlus25h~text	*	error	ERR 22007: invalid input syntax for type interval: "-1 mon 25 hours"
+justify/negMonPlus25h/hoursOfDays~text	*	error	ERR 22007: invalid input syntax for type interval: "-1 mon 25 hours"
+justify/negMonPlus25h/daysOfHours~text	*	error	ERR 22007: invalid input syntax for type interval: "-1 mon 25 hours"
+infop/ivInfMinusNegInf~text	*	error	ERR 42601: syntax error at or near "-"
+sentinel/negOfNearMax~text	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 months 2147483647 days <id> microseconds"
+sentinel/negOfInfinityTriple~text	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 months 2147483647 days <id> microseconds"
+sentinel/mulNegInfinityTriple~text	*	error	ERR 22007: invalid input syntax for type interval: "-2147483648 months -2147483648 days -<id> microseconds"
+age/borrow~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
+age/timeBorrow~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
+age/null~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
+age/infLeft~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
+age/infRight~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
+age/infOpposed~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
+age/bc~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
+age/date~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
+age/dateNY~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
+age/tz/UTC/fallBack~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
+age/tz/America/New_York/fallBack~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
+types/tsMinusTs~text	*	refusal	ERR 0A000: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as the operand of a cast to text: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts …
+types/tsMinusDate~text	*	error	ERR 42883: operator does not exist: timestamp without time zone - date
+types/dateMinusTs~text	*	error	ERR 42883: operator does not exist: date - timestamp without time zone
+types/timeMinusTime~text	*	differs	a:text | -22
+types/tstzMinusTstz~text	*	refusal	ERR 0A000: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as the operand of a cast to text: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts …
+types/tstzMinusTs~text	*	refusal	ERR 0A000: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as the operand of a cast to text: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts …
+types/intervalTimesInt~text	*	agree	a:text | 2 days
+types/intTimesInterval~text	*	agree	a:text | 2 days
+types/intervalDivInt~text	*	agree	a:text | 12:00:00
+types/negInterval~text	*	agree	a:text | -1 days
+closure/tsMinusDate~text	*	error	ERR 42883: operator does not exist: timestamp without time zone - date
+closure/dateMinusTs~text	*	error	ERR 42883: operator does not exist: date - timestamp without time zone
+closure/coalesce~text	*	refusal	ERR 0A000: interval "1 mon" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+closure/case~text	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+closure/nullif~text	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+fn/truncMixedSign~text	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -1 day 02:00:00"

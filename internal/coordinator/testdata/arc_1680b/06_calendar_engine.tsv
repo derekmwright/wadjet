@@ -1,65 +1,65 @@
 # This engine's disposition of the #1680b interval corpus, section 06_calendar, per arm (TestArc1680bRecordEngine; held by TestArc1680bEngineBaseline).
 # Settings are PostgreSQL's only: the engine runs each statement as written. A TIMESTAMP value is printed as text (iv80EngineText). name<TAB>arms<TAB>class<TAB>answer
-ts/monthClampLeap	*	refused	ERR 0A000
-ts/monthClamp	*	refused	ERR 0A000
-ts/monthBack	*	refused	ERR 0A000
+ts/monthClampLeap	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+ts/monthClamp	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+ts/monthBack	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 ts/yearLeap	*	agree	a:TIMESTAMP | 2025-02-28 00:00:00
-ts/negMonths	*	refused	ERR 0A000
-ts/orderMD	*	refused	ERR 22007
-ts/orderMDNeg	*	refused	ERR 22007
-ts/orderDT	*	refused	ERR 22007
-ts/mixedSign	*	refused	ERR 22007
-ts/mixedSign2	*	refused	ERR 22007
+ts/negMonths	*	refusal	ERR 0A000: interval unit "mons" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+ts/orderMD	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 2 days"
+ts/orderMDNeg	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 1 day"
+ts/orderDT	*	error	ERR 22007: invalid input syntax for type interval: "1 day 02:00:00"
+ts/mixedSign	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -1 day"
+ts/mixedSign2	*	error	ERR 22007: invalid input syntax for type interval: "-1 mon +30 days"
 ts/hours36	*	agree	a:TIMESTAMP | 2024-02-01 12:00:00
-ts/us	*	refused	ERR 42601
-ts/usNeg	*	refused	ERR 42601
+ts/us	*	error	ERR 42601: syntax error at or near "AS"
+ts/usNeg	*	error	ERR 42601: syntax error at or near "AS"
 ts/zero	*	agree	a:TIMESTAMP | 2024-01-01 00:00:00
 ts/1monVs30d	*	agree	a:TIMESTAMP | 2024-03-02 00:00:00
-ts/overflow	*	refused	ERR 22008
-ts/inf	*	refused	ERR 42601
-ts/negInf	*	refused	ERR 42601
-ts/infTs	*	refused	ERR 42601
-ts/infMinusInf	*	refused	ERR 42601
+ts/overflow	*	pg-error	ERR 22008: timestamp out of range
+ts/inf	*	error	ERR 42601: syntax error at or near "AS"
+ts/negInf	*	error	ERR 42601: syntax error at or near "AS"
+ts/infTs	*	error	ERR 42601: syntax error at or near "AS"
+ts/infMinusInf	*	wrong-sqlstate	ERR 42601: syntax error at or near "AS"
 ts/null	*	agree	a:TIMESTAMP,b:TIMESTAMP | NULL,NULL
-ts/commuted	*	refused	ERR 0A000
-date/plus	*	refused	ERR 22007
+ts/commuted	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+date/plus	*	error	ERR 22007: invalid input syntax for type interval: "1 day 01:00:00"
 date/plusInt	*	agree-value	a:DATE,b:bigint,c:DATE | 2024-03-01,29,2024-02-29
 date/minusDate	*	agree-value	a:bigint,b:bigint | 366,-366
 tz/UTC/day	*	differs	a:TIMESTAMP,b:TIMESTAMP | 2024-03-10 12:00:00,2024-03-10 12:00:00
-tz/UTC/month	*	refused	ERR 0A000
+tz/UTC/month	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 tz/UTC/fallBack	*	differs	a:TIMESTAMP,b:TIMESTAMP | 2024-11-03 12:00:00,2024-11-03 12:00:00
-tz/UTC/minus	*	refused	ERR 0A000
-tz/UTC/roundTrip	*	refused	ERR 42883
-tz/UTC/age	*	refused	ERR 42883
-tz/UTC/addFn	*	refused	ERR 42883
+tz/UTC/minus	*	refusal	ERR 0A000: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
+tz/UTC/roundTrip	*	error	ERR 42883: operator does not exist: timestamp without time zone + double precision
+tz/UTC/age	*	error	ERR 42883: unknown function: age (did you mean abs?)
+tz/UTC/addFn	*	error	ERR 42883: function date_add(timestamp, unknown, unknown) does not exist
 tz/America/New_York/day	*	differs	a:TIMESTAMP,b:TIMESTAMP | 2024-03-10 12:00:00,2024-03-10 12:00:00
-tz/America/New_York/month	*	refused	ERR 0A000
+tz/America/New_York/month	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 tz/America/New_York/fallBack	*	differs	a:TIMESTAMP,b:TIMESTAMP | 2024-11-03 12:00:00,2024-11-03 12:00:00
-tz/America/New_York/minus	*	refused	ERR 0A000
-tz/America/New_York/roundTrip	*	refused	ERR 42883
-tz/America/New_York/age	*	refused	ERR 42883
-tz/America/New_York/addFn	*	refused	ERR 42883
-time/plus	*	refused	ERR 22007
+tz/America/New_York/minus	*	refusal	ERR 0A000: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
+tz/America/New_York/roundTrip	*	error	ERR 42883: operator does not exist: timestamp without time zone + double precision
+tz/America/New_York/age	*	error	ERR 42883: unknown function: age (did you mean abs?)
+tz/America/New_York/addFn	*	error	ERR 42883: function date_add(timestamp, unknown, unknown) does not exist
+time/plus	*	error	ERR 22007: invalid input syntax for type interval: "1 day 1 mon 00:00:01"
 time/minusTime	*	differs	a:double precision,b:double precision | -22,22
-time/timetz	*	refused	ERR 42601
-tsdiff/days	*	refused	ERR 0A000
-tsdiff/time	*	refused	ERR 0A000
-tsdiff/over24	*	refused	ERR 0A000
-tsdiff/neg	*	refused	ERR 0A000
-tsdiff/year	*	refused	ERR 0A000
-tsdiff/us	*	refused	ERR 0A000
-tsdiff/mixedNeg	*	refused	ERR 0A000
-tsdiff/huge	*	refused	ERR 22007
-tsdiff/inf	*	refused	ERR 22008
-tsdiff/infInf	*	refused	ERR 22008
-age/basic	*	refused	ERR 42883
-age/time	*	refused	ERR 42883
-trip/monthEnd	*	refused	ERR 0A000
-trip/diff	*	refused	ERR 42883
-trip/age	*	refused	ERR 42883
-trip/compareVsApply	*	refused	ERR 0A000
-trip/assoc	*	refused	ERR 0A000
+time/timetz	*	error	ERR 42601: syntax error at or near "'23:00:00+02'"
+tsdiff/days	*	refusal	ERR 0A000: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
+tsdiff/time	*	refusal	ERR 0A000: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
+tsdiff/over24	*	refusal	ERR 0A000: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
+tsdiff/neg	*	refusal	ERR 0A000: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
+tsdiff/year	*	refusal	ERR 0A000: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
+tsdiff/us	*	refusal	ERR 0A000: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
+tsdiff/mixedNeg	*	refusal	ERR 0A000: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
+tsdiff/huge	*	wrong-sqlstate	ERR 22007: invalid input syntax for type timestamp: "4713-01-01 00:00:00 BC"
+tsdiff/inf	*	error	ERR 22008: `-` between dates or timestamps is not defined for an infinite timestamp
+tsdiff/infInf	*	pg-error	ERR 22008: `-` between dates or timestamps is not defined for an infinite timestamp
+age/basic	*	error	ERR 42883: unknown function: age (did you mean abs?)
+age/time	*	error	ERR 42883: unknown function: age (did you mean abs?)
+trip/monthEnd	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+trip/diff	*	error	ERR 42883: operator does not exist: timestamp without time zone + double precision
+trip/age	*	error	ERR 42883: unknown function: age (did you mean abs?)
+trip/compareVsApply	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+trip/assoc	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 ddl/create/iv80_ts	writer	ok	ok
 ddl/insert/iv80_ts	writer	ok	ok
-rows/plus	*	refused	ERR 0A000
-rows/diff	*	refused	ERR 0A000
+rows/plus	*	refusal	ERR 0A000: interval "1 mon" cannot be applied: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported in arithmetic
+rows/diff	*	refusal	ERR 0A000: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…

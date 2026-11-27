@@ -1,6 +1,6 @@
 # PostgreSQL 17.11 answers for the #1680b interval corpus, section 02_fields (TestArc1680bMeasure; postgres:17-alpine, initdb --locale=C --encoding=UTF8, --memory=4g).
 # PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit; datcollate=C datctype=C server_encoding=UTF8; defaults IntervalStyle=postgres DateStyle=ISO, MDY TimeZone=UTC; a cell's settings column overrides them for that cell only.
-# name<TAB>answer: ok | (0 rows) | ERR <SQLSTATE>: message | col:type(oid),... | row; row
+# name<TAB>answer: ok | ERR <SQLSTATE>: message | col:type(oid),... | row; row (or | (0 rows)), then any " !! <severity> <SQLSTATE>: message" PostgreSQL raised
 fields/0/1 mon	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | 0,1,0,0,0,0.000000,0,2592000.000000
 fields/1/30 days	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | 0,0,30,0,0,0.000000,0,2592000.000000
 fields/2/720:00:00	y:numeric(1700),mo:numeric(1700),d:numeric(1700),h:numeric(1700),mi:numeric(1700),s:numeric(1700),us:numeric(1700),ep:numeric(1700) | 0,0,0,720,0,0.000000,0,2592000.000000

@@ -1,0 +1,121 @@
+# The stage manifest of section 01_input_cast (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet / door).
+lit/0/1 day~text	C	supported	met
+lit/1/1 day 2 hours~text	C	supported	unmet
+lit/2/1 year 2 months 3 days 4 hours 5 minutes 6 seconds~text	C	supported	unmet
+lit/3/1-2~text	C	supported	unmet
+lit/4/-1-2~text	C	supported	unmet
+lit/5/3 4:05:06~text	C	supported	unmet
+lit/6/-3 -4:05:06~text	C	supported	unmet
+lit/7/1-2 3 4:05:06~text	C	supported	unmet
+lit/8/4:05:06~text	C	supported	unmet
+lit/9/4:05~text	C	supported	unmet
+lit/10/-4:05:06~text	C	supported	unmet
+lit/11/1 day 25:00:00~text	C	supported	unmet
+lit/12/-1 day +25:00:00~text	C	supported	unmet
+lit/13/1 mon -30 days~text	C	supported	unmet
+lit/14/-1 year -2 mons +3 days~text	C	supported	unmet
+lit/15/1 year -1 second~text	C	supported	unmet
+lit/16/P1Y2M3DT4H5M6S~text	C	supported	unmet
+lit/17/P1Y2M3DT4H5M6.5S~text	C	supported	unmet
+lit/18/PT36H~text	C	supported	unmet
+lit/19/P1.5M~text	C	supported	unmet
+lit/20/P0.5Y~text	C	supported	unmet
+lit/21/P1W~text	C	supported	unmet
+lit/23/P-1DT-1H~text	C	supported	unmet
+lit/24/P0001-02-03T04:05:06~text	C	supported	unmet
+lit/25/PT0S~text	C	supported	unmet
+lit/26/@ 1 year 2 mons~text	C	supported	unmet
+lit/27/@ 1 year 2 mons ago~text	C	supported	unmet
+lit/28/1 day ago~text	C	supported	unmet
+lit/29/-1 day ago~text	C	supported	unmet
+lit/30/@ 3 days 4 hours 5 mins 6 secs~text	C	supported	unmet
+lit/31/1.5 months~text	C	supported	unmet
+lit/32/1.5 days~text	C	supported	unmet
+lit/33/1.5 years~text	C	supported	unmet
+lit/34/0.5 weeks~text	C	supported	unmet
+lit/35/1.5 hours~text	C	supported	unmet
+lit/36/1.5 minutes~text	C	supported	unmet
+lit/37/0.1 months~text	C	supported	unmet
+lit/38/1.0333333 months~text	C	supported	unmet
+lit/39/-1.5 months~text	C	supported	unmet
+lit/40/-1.5 days~text	C	supported	unmet
+lit/41/1.5 centuries~text	C	supported	unmet
+lit/42/1 decade~text	C	supported	unmet
+lit/43/1 century~text	C	supported	unmet
+lit/44/1 millennium~text	C	supported	unmet
+lit/45/10 weeks~text	C	supported	met
+lit/46/1.000001 seconds~text	C	supported	unmet
+lit/47/0.0000005 seconds~text	C	supported	unmet
+lit/48/0.0000015 seconds~text	C	supported	unmet
+lit/49/0.0000025 seconds~text	C	supported	unmet
+lit/50/1 microsecond~text	C	supported	unmet
+lit/51/1 millisecond~text	C	supported	unmet
+lit/52/1.5 microseconds~text	C	supported	unmet
+lit/53/1:2:3.123456789~text	C	supported	unmet
+lit/54/-0.000001 seconds~text	C	supported	unmet
+lit/55/00:00:00.000001~text	C	supported	unmet
+lit/56/0~text	C	supported	met
+lit/57/0 seconds~text	C	supported	met
+lit/58/00:00:00~text	C	supported	unmet
+lit/59/-0 days~text	C	supported	met
+lit/60/100~text	C	supported	met
+lit/61/1.5~text	C	supported	unmet
+lit/62/-100~text	C	supported	met
+lit/63/178956970 years 7 months~text	C	supported	unmet
+lit/65/-178956970 years -8 months~text	C	supported	unmet
+lit/67/2147483647 months~text	C	supported	met
+lit/69/-2147483648 months~text	C	supported	met
+lit/71/2147483647 days~text	C	supported	met
+lit/73/-2147483648 days~text	C	supported	met
+lit/75/2562047788:00:54.775807~text	C	supported	unmet
+lit/79/2147483647 months 2147483647 days 2562047788:00:54.775807~text	C	supported	unmet
+lit/81/infinity~text	C	supported	unmet
+lit/82/-infinity~text	C	supported	unmet
+lit/83/+infinity~text	C	supported	unmet
+lit/84/INFINITY~text	C	supported	unmet
+lit/null~text	C	supported	met
+std/ym~text	A	refusal typmod	unmet
+std/ymNeg~text	A	refusal typmod	unmet
+std/ds~text	A	refusal typmod	unmet
+std/dsFrac~text	A	refusal typmod	unmet
+std/year~text	A	refusal typmod	unmet
+std/month~text	A	refusal typmod	unmet
+std/day~text	A	refusal typmod	unmet
+std/hour~text	A	refusal typmod	unmet
+std/minute~text	A	refusal typmod	unmet
+std/second~text	A	refusal typmod	unmet
+std/secondFrac~text	A	refusal typmod	unmet
+std/dh~text	A	refusal typmod	unmet
+std/dm~text	A	refusal typmod	unmet
+std/hm~text	A	refusal typmod	unmet
+std/ms~text	A	refusal typmod	unmet
+std/hs~text	A	refusal typmod	unmet
+std/dayDropsTime~text	A	refusal typmod	unmet
+std/yearDropsMonths~text	A	refusal typmod	unmet
+std/monthDropsDays~text	A	refusal typmod	unmet
+std/hourDropsMinutes~text	A	refusal typmod	unmet
+std/yearFrac~text	A	refusal typmod	unmet
+std/dayFrac~text	A	refusal typmod	unmet
+std/hourNeg~text	A	refusal typmod	unmet
+prec/iv3~text	A	refusal typmod	unmet
+prec/iv0~text	A	refusal typmod	unmet
+prec/literal3~text	A	refusal typmod	unmet
+prec/second3~text	A	refusal typmod	unmet
+prec/ds2~text	A	refusal typmod	unmet
+prec/iv6~text	A	refusal typmod	unmet
+prec/iv7~text	A	refusal typmod	unmet
+prec/castDay~text	A	refusal typmod	unmet
+prec/castYear~text	A	refusal typmod	unmet
+prec/castMonthTyp~text	A	refusal typmod	unmet
+cast/fromText~text	C	supported	unmet
+cast/colon~text	C	supported	met
+cast/fromTime~text	A	refusal time-type	met
+make/all~text	C	supported	unmet
+make/days~text	C	supported	unmet
+make/secs~text	C	supported	unmet
+make/negMins~text	C	supported	unmet
+make/weeks~text	C	supported	unmet
+make/zero~text	C	supported	unmet
+make/null~text	C	supported	unmet
+make/hoursOver~text	C	supported	unmet
+row/cast~text	C	supported	unmet

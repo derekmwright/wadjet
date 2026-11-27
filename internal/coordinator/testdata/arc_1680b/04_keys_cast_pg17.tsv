@@ -1,0 +1,9 @@
+# PostgreSQL 17.11 answers for the #1680b interval corpus, section 04_keys_cast (TestArc1680bMeasure; postgres:17-alpine, initdb --locale=C --encoding=UTF8, --memory=4g).
+# PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit; datcollate=C datctype=C server_encoding=UTF8; defaults IntervalStyle=postgres DateStyle=ISO, MDY TimeZone=UTC; a cell's settings column overrides them for that cell only.
+# name<TAB>answer: ok | ERR <SQLSTATE>: message | col:type(oid),... | row; row (or | (0 rows)), then any " !! <severity> <SQLSTATE>: message" PostgreSQL raised
+group/iv80_k/default~text	k:text(25),n:bigint(20),lo:bigint(20) | 1 mon,3,1; 1 mon -30 days,3,4; -1 days,2,7; NULL,2,9; 1 day,2,11; 213503982 days 08:01:49.551616,1,13; 106751991 days 04:00:54.775808,1,14; 1 year,3,15
+group/iv80_k/sortagg~text	k:text(25),n:bigint(20),lo:bigint(20) | 30 days,3,1; 00:00:00,3,4; -24:00:00,2,7; NULL,2,9; 24:00:00,2,11; 213503982 days 08:01:49.551616,1,13; 106751991 days 04:00:54.775808,1,14; 1 year,3,15
+group/iv80_k/hashagg~text	k:text(25),n:bigint(20),lo:bigint(20) | 1 mon,3,1; 1 mon -30 days,3,4; -1 days,2,7; NULL,2,9; 1 day,2,11; 213503982 days 08:01:49.551616,1,13; 106751991 days 04:00:54.775808,1,14; 1 year,3,15
+group/iv80_kr/default~text	k:text(25),n:bigint(20),lo:bigint(20) | 720:00:00,3,1; 00:00:00,3,4; -24:00:00,2,7; NULL,2,9; 24:00:00,2,11; 213503982 days 08:01:49.551616,1,13; 106751991 days 04:00:54.775808,1,14; 1 year,3,15
+group/iv80_kr/sortagg~text	k:text(25),n:bigint(20),lo:bigint(20) | 720:00:00,3,1; 00:00:00,3,4; -1 days,2,7; NULL,2,9; 24:00:00,2,11; 213503982 days 08:01:49.551616,1,13; 106751991 days 04:00:54.775808,1,14; 1 year,3,15
+group/iv80_kr/hashagg~text	k:text(25),n:bigint(20),lo:bigint(20) | 720:00:00,3,1; 00:00:00,3,4; -24:00:00,2,7; NULL,2,9; 24:00:00,2,11; 213503982 days 08:01:49.551616,1,13; 106751991 days 04:00:54.775808,1,14; 1 year,3,15

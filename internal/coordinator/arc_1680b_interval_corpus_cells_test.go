@@ -30,6 +30,10 @@ type iv80Cell struct {
 	// as written (the engine file says so beside each such cell).
 	settings string
 	ddl      bool
+	// write: a DML or CTAS statement PostgreSQL accepts (run like a
+	// fixture, by the writer); in this stage it must be refused (the
+	// manifest's interval-write).
+	write bool
 	// pgOnly: a PostgreSQL-only observation (EXPLAIN of the plan that
 	// produced a plan-dependent answer); the engine does not run it.
 	pgOnly bool
@@ -41,7 +45,7 @@ type iv80Section struct {
 	cells func() []iv80Cell
 }
 
-func iv80Sections() []iv80Section {
+func iv80BaseSections() []iv80Section {
 	return []iv80Section{
 		{"01_input", iv80Input},
 		{"02_fields", iv80Fields},
@@ -51,7 +55,26 @@ func iv80Sections() []iv80Section {
 		{"06_calendar", iv80Calendar},
 		{"07_functions", iv80Functions},
 		{"09_model", iv80Model},
+		{"10_definitions", iv80Definitions},
+		{"11_relational", iv80Relational},
+		{"12_writes", iv80Writes},
 	}
+}
+
+// iv80Sections is every section: the base sections, then for each the
+// cast-wrapped executable variants of its statements that publish a bare
+// interval (iv80CastSection), which are separate cells: the original
+// statement and its PostgreSQL transcript stay as they are.
+func iv80Sections() []iv80Section {
+	var out []iv80Section
+	for _, s := range iv80BaseSections() {
+		out = append(out, s)
+		if s.stem == "09_model" || s.stem == "12_writes" {
+			continue
+		}
+		out = append(out, iv80CastSection(s))
+	}
+	return out
 }
 
 // iv80Tables are every table the corpus creates (dropped first on the
@@ -66,6 +89,9 @@ func (b *iv80Builder) set(name, settings, sql string) {
 }
 func (b *iv80Builder) ddl(name, sql string) {
 	b.out = append(b.out, iv80Cell{name: name, sql: sql, ddl: true})
+}
+func (b *iv80Builder) write(name, sql string) {
+	b.out = append(b.out, iv80Cell{name: name, sql: sql, ddl: true, write: true})
 }
 func (b *iv80Builder) pg(name, settings, sql string) {
 	b.out = append(b.out, iv80Cell{name: name, sql: sql, settings: settings, pgOnly: true})

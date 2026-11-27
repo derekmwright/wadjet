@@ -1,0 +1,19 @@
+# #1680b interval corpus statements (arc_1680b_interval_corpus_cells_test.go). name<TAB>settings<TAB>kind<TAB>sql
+trunc/millennium~text	-	sql	SELECT CAST(date_trunc('millennium', INTERVAL '1 year 14 mons 40 days 26:07:08.5') AS TEXT) AS a, CAST(date_trunc('millennium', INTERVAL '-1 year -14 mons -40 days -26:07:08.5') AS TEXT) AS b
+trunc/century~text	-	sql	SELECT CAST(date_trunc('century', INTERVAL '1 year 14 mons 40 days 26:07:08.5') AS TEXT) AS a, CAST(date_trunc('century', INTERVAL '-1 year -14 mons -40 days -26:07:08.5') AS TEXT) AS b
+trunc/decade~text	-	sql	SELECT CAST(date_trunc('decade', INTERVAL '1 year 14 mons 40 days 26:07:08.5') AS TEXT) AS a, CAST(date_trunc('decade', INTERVAL '-1 year -14 mons -40 days -26:07:08.5') AS TEXT) AS b
+trunc/year~text	-	sql	SELECT CAST(date_trunc('year', INTERVAL '1 year 14 mons 40 days 26:07:08.5') AS TEXT) AS a, CAST(date_trunc('year', INTERVAL '-1 year -14 mons -40 days -26:07:08.5') AS TEXT) AS b
+trunc/quarter~text	-	sql	SELECT CAST(date_trunc('quarter', INTERVAL '1 year 14 mons 40 days 26:07:08.5') AS TEXT) AS a, CAST(date_trunc('quarter', INTERVAL '-1 year -14 mons -40 days -26:07:08.5') AS TEXT) AS b
+trunc/month~text	-	sql	SELECT CAST(date_trunc('month', INTERVAL '1 year 14 mons 40 days 26:07:08.5') AS TEXT) AS a, CAST(date_trunc('month', INTERVAL '-1 year -14 mons -40 days -26:07:08.5') AS TEXT) AS b
+trunc/day~text	-	sql	SELECT CAST(date_trunc('day', INTERVAL '1 year 14 mons 40 days 26:07:08.5') AS TEXT) AS a, CAST(date_trunc('day', INTERVAL '-1 year -14 mons -40 days -26:07:08.5') AS TEXT) AS b
+trunc/hour~text	-	sql	SELECT CAST(date_trunc('hour', INTERVAL '1 year 14 mons 40 days 26:07:08.5') AS TEXT) AS a, CAST(date_trunc('hour', INTERVAL '-1 year -14 mons -40 days -26:07:08.5') AS TEXT) AS b
+trunc/minute~text	-	sql	SELECT CAST(date_trunc('minute', INTERVAL '1 year 14 mons 40 days 26:07:08.5') AS TEXT) AS a, CAST(date_trunc('minute', INTERVAL '-1 year -14 mons -40 days -26:07:08.5') AS TEXT) AS b
+trunc/second~text	-	sql	SELECT CAST(date_trunc('second', INTERVAL '1 year 14 mons 40 days 26:07:08.5') AS TEXT) AS a, CAST(date_trunc('second', INTERVAL '-1 year -14 mons -40 days -26:07:08.5') AS TEXT) AS b
+trunc/milliseconds~text	-	sql	SELECT CAST(date_trunc('milliseconds', INTERVAL '1 year 14 mons 40 days 26:07:08.5') AS TEXT) AS a, CAST(date_trunc('milliseconds', INTERVAL '-1 year -14 mons -40 days -26:07:08.5') AS TEXT) AS b
+trunc/microseconds~text	-	sql	SELECT CAST(date_trunc('microseconds', INTERVAL '1 year 14 mons 40 days 26:07:08.5') AS TEXT) AS a, CAST(date_trunc('microseconds', INTERVAL '-1 year -14 mons -40 days -26:07:08.5') AS TEXT) AS b
+trunc/inf~text	-	sql	SELECT CAST(date_trunc('day', INTERVAL 'infinity') AS TEXT) AS a
+inf/fields~text	-	sql	SELECT extract(month FROM INTERVAL 'infinity') AS m, CAST(justify_days(INTERVAL 'infinity') AS TEXT) AS j, CAST(INTERVAL 'infinity' AS TEXT) AS t
+agg/all~text	-	sql	SELECT count(v) AS c, CAST(min(v) AS TEXT) AS lo, CAST(max(v) AS TEXT) AS hi, CAST(sum(v) AS TEXT) AS s, CAST(avg(v) AS TEXT) AS a FROM (VALUES (INTERVAL '1 mon'), (INTERVAL '-1 day 02:00:00'), (CAST(NULL AS INTERVAL)), (INTERVAL '00:00:00.000001')) t(v)
+agg/arrayAgg~text	-	sql	SELECT CAST(array_agg(v ORDER BY v) AS TEXT) AS a FROM (VALUES (INTERVAL '1 mon'), (INTERVAL '29 days')) t(v)
+agg/modeTie~text	-	sql	SELECT CAST(mode() WITHIN GROUP (ORDER BY v) AS TEXT) AS a FROM (VALUES (INTERVAL '30 days'), (INTERVAL '1 mon')) t(v)
+operand/timesUnknown~text	-	sql	SELECT CAST(INTERVAL '1 day' * '2' AS TEXT) AS a

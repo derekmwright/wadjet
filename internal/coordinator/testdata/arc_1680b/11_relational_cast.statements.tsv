@@ -1,0 +1,6 @@
+# #1680b interval corpus statements (arc_1680b_interval_corpus_cells_test.go). name<TAB>settings<TAB>kind<TAB>sql
+rt/bare~text	-	sql	SELECT id, CAST(CAST(s AS INTERVAL) AS TEXT) AS v FROM iv80_r ORDER BY id
+lag/tsDiffBare~text	-	sql	SELECT id, CAST(lag(NULL, 1, ts) OVER (ORDER BY id) - ts AS TEXT) AS t FROM iv80_rt ORDER BY id
+tsdate/bare~text	-	sql	SELECT id, CAST(ts - d AS TEXT) AS a FROM iv80_rt ORDER BY id
+sub/scalarPublish~text	-	sql	SELECT CAST((SELECT CAST(s AS INTERVAL) FROM iv80_r WHERE id = 1) AS TEXT) AS a
+empty/bare~text	-	sql	SELECT CAST(CAST(s AS INTERVAL) AS TEXT) AS v FROM iv80_r WHERE false

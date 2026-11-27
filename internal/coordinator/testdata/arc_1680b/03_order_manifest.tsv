@@ -1,0 +1,50 @@
+# The stage manifest of section 03_order (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet / door).
+cmp/1 mon~30 days	C	supported	unmet
+cmp/1 mon~720:00:00	C	supported	unmet
+cmp/30 days~720:00:00	C	supported	unmet
+cmp/1 mon -30 days~0	C	supported	unmet
+cmp/1 year~360 days	C	supported	met
+cmp/1 year~12 mons	C	supported	unmet
+cmp/1 day~24:00:00	C	supported	unmet
+cmp/-1 day~-24:00:00	C	supported	unmet
+cmp/1 mon~29 days 24:00:00.000001	C	supported	unmet
+cmp/1 mon~30 days -00:00:00.000001	C	supported	unmet
+cmp/00:00:00.000001~0	C	supported	unmet
+cmp/-00:00:00.000001~0	C	supported	unmet
+cmp/1 day -1 second~23:59:59	C	supported	unmet
+cmp/-1 mon 1 day~-29 days	C	supported	unmet
+cmp/1 year -1 day~359 days	C	supported	unmet
+cmp/178956970 years 7 mons~178956970 years 6 mons 30 days	C	supported	unmet
+cmp/178956970 years 7 mons~2147483647 days	C	supported	unmet
+cmp/178956970 years 7 mons~-178956970 years -8 mons	C	supported	unmet
+cmp/2147483647 days 2562047788:00:54.775807~178956970 years 7 mons	C	supported	unmet
+cmp/106751991 days 04:00:54.775808~0	C	supported	unmet
+cmp/106751991 days 04:00:54.775807~106751991 days 04:00:54.775808	C	supported	unmet
+cmp/213503982 days 08:01:49.551616~0	C	supported	unmet
+cmp/213503982 days 08:01:49.551616~00:00:00.000001	C	supported	unmet
+cmp/-213503982 days -08:01:49.551616~0	C	supported	unmet
+cmp/infinity~178956970 years 7 mons	C	supported	unmet
+cmp/-infinity~-178956970 years -8 mons	C	supported	unmet
+cmp/infinity~infinity	C	supported	unmet
+cmp/infinity~-infinity	C	supported	unmet
+cmp/2147483647 months 2147483647 days 2562047788:00:54.775807~infinity	C	supported	unmet
+cmp/null	C	supported	met
+between	C	supported	unmet
+in	C	supported	unmet
+order/asc	F	refusal bare-interval-result	met
+order/desc	F	refusal bare-interval-result	met
+order/ascNullsFirst	D	supported	unmet
+order/descNullsLast	D	supported	unmet
+order/idDesc	F	refusal bare-interval-result	met
+order/minMax	F	refusal bare-interval-result	met
+order/minMaxFinite	F	refusal bare-interval-result	met
+order/minTieFwd	F	refusal bare-interval-result	unmet
+order/minTieRev	F	refusal bare-interval-result	unmet
+order/minTieTable	F	refusal bare-interval-result	met
+order/greatestTie	F	refusal bare-interval-result	met
+order/topN	D	supported	unmet
+order/wrap	D	supported	unmet
+filter/eq	C	supported	unmet
+filter/eqZero	C	supported	unmet
+filter/lt	C	supported	unmet
+filter/gtWrap	C	supported	unmet

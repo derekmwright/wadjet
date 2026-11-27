@@ -1,0 +1,19 @@
+# PostgreSQL 17.11 answers for the #1680b interval corpus, section 06_calendar_cast (TestArc1680bMeasure; postgres:17-alpine, initdb --locale=C --encoding=UTF8, --memory=4g).
+# PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit; datcollate=C datctype=C server_encoding=UTF8; defaults IntervalStyle=postgres DateStyle=ISO, MDY TimeZone=UTC; a cell's settings column overrides them for that cell only.
+# name<TAB>answer: ok | ERR <SQLSTATE>: message | col:type(oid),... | row; row (or | (0 rows)), then any " !! <severity> <SQLSTATE>: message" PostgreSQL raised
+tz/UTC/minus~text	a:text(25),b:text(25) | 1 day 11:00:00,23:00:00
+tz/UTC/age~text	a:text(25) | 1 mon 9 days 23:00:00
+tz/America/New_York/minus~text	a:text(25),b:text(25) | 1 day 11:00:00,23:00:00
+tz/America/New_York/age~text	a:text(25) | 1 mon 10 days
+time/minusTime~text	a:text(25),b:text(25) | -22:00:00,22:00:00
+tsdiff/days~text	a:text(25),d:numeric(1700),m:numeric(1700) | 60 days,60,0
+tsdiff/time~text	a:text(25),d:numeric(1700),m:numeric(1700) | 23:00:00,0,0
+tsdiff/over24~text	a:text(25),d:numeric(1700),m:numeric(1700) | 1 day 01:00:00,1,0
+tsdiff/neg~text	a:text(25),d:numeric(1700),m:numeric(1700) | -1 days -01:00:00,-1,0
+tsdiff/year~text	a:text(25),d:numeric(1700),m:numeric(1700) | 366 days,366,0
+tsdiff/us~text	a:text(25),d:numeric(1700),m:numeric(1700) | 00:00:00.000001,0,0
+tsdiff/mixedNeg~text	a:text(25),d:numeric(1700),m:numeric(1700) | -1 days -01:00:00,-1,0
+tsdiff/inf~text	a:text(25),b:text(25) | infinity,-infinity
+age/basic~text	a:text(25),b:text(25),c:text(25) | 2 mons,1 mon 1 day,-1 mons -1 days
+age/time~text	a:text(25),b:text(25) | 11 mons 27 days 23:00:00,00:00:00.000001
+rows/diff~text	l:bigint(20),r:bigint(20),d:text(25) | 1,2,-29 days -13:00:00; 1,3,31 days 10:00:00; 1,4,-30 days -02:00:00; 1,5,NULL; 1,6,30 days 10:00:00; 2,3,60 days 23:00:00; 2,4,-13:00:00; 2,5,NULL; 2,6,59 days 23:00:00

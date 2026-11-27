@@ -4,96 +4,96 @@ ddl/create/iv80_k	writer	ok	ok
 ddl/insert/iv80_k	writer	ok	ok
 ddl/create/iv80_kr	writer	ok	ok
 ddl/insert/iv80_kr	writer	ok	ok
-group/iv80_k/default	*	refused	ERR 0A000
+group/iv80_k/default	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 explain/group/iv80_k/default	*	pg-only	-
-distinct/iv80_k/default	*	refused	ERR 0A000
+distinct/iv80_k/default	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 explain/distinct/iv80_k/default	*	pg-only	-
-union/iv80_k/default	*	refused	ERR 0A000
-intersect/iv80_k/default	*	refused	ERR 0A000
-exceptAll/iv80_k/default	*	refused	ERR 0A000
-group/iv80_k/sortagg	*	refused	ERR 0A000
+union/iv80_k/default	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+intersect/iv80_k/default	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+exceptAll/iv80_k/default	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+group/iv80_k/sortagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 explain/group/iv80_k/sortagg	*	pg-only	-
-distinct/iv80_k/sortagg	*	refused	ERR 0A000
+distinct/iv80_k/sortagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 explain/distinct/iv80_k/sortagg	*	pg-only	-
-union/iv80_k/sortagg	*	refused	ERR 0A000
-intersect/iv80_k/sortagg	*	refused	ERR 0A000
-exceptAll/iv80_k/sortagg	*	refused	ERR 0A000
-group/iv80_k/hashagg	*	refused	ERR 0A000
+union/iv80_k/sortagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+intersect/iv80_k/sortagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+exceptAll/iv80_k/sortagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+group/iv80_k/hashagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 explain/group/iv80_k/hashagg	*	pg-only	-
-distinct/iv80_k/hashagg	*	refused	ERR 0A000
+distinct/iv80_k/hashagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 explain/distinct/iv80_k/hashagg	*	pg-only	-
-union/iv80_k/hashagg	*	refused	ERR 0A000
-intersect/iv80_k/hashagg	*	refused	ERR 0A000
-exceptAll/iv80_k/hashagg	*	refused	ERR 0A000
-groupCount/iv80_k	*	refused	ERR 0A000
-distinctCount/iv80_k	*	refused	ERR 0A000
-countDistinct/iv80_k	*	refused	ERR 0A000
-partition/iv80_k	*	refused	ERR 0A000
-peers/iv80_k	*	refused	ERR 0A000
-orderTie/iv80_k	*	refused	ERR 0A000
-withTies/iv80_k	*	refused	ERR 42601
-withTiesCount/iv80_k	*	refused	ERR 42601
-group/iv80_kr/default	*	refused	ERR 0A000
+union/iv80_k/hashagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+intersect/iv80_k/hashagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+exceptAll/iv80_k/hashagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+groupCount/iv80_k	*	refusal	ERR 0A000: interval values cannot yet be used as a GROUP BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+distinctCount/iv80_k	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+countDistinct/iv80_k	*	refusal	ERR 0A000: count over an interval argument is not supported
+partition/iv80_k	*	refusal	ERR 0A000: interval values cannot yet be used as a PARTITION BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+peers/iv80_k	*	refusal	ERR 0A000: interval values cannot yet be used as a window ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+orderTie/iv80_k	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+withTies/iv80_k	*	error	ERR 42601: syntax error at or near "WITH"
+withTiesCount/iv80_k	*	error	ERR 42601: syntax error at or near "WITH"
+group/iv80_kr/default	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 explain/group/iv80_kr/default	*	pg-only	-
-distinct/iv80_kr/default	*	refused	ERR 0A000
+distinct/iv80_kr/default	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 explain/distinct/iv80_kr/default	*	pg-only	-
-union/iv80_kr/default	*	refused	ERR 0A000
-intersect/iv80_kr/default	*	refused	ERR 0A000
-exceptAll/iv80_kr/default	*	refused	ERR 0A000
-group/iv80_kr/sortagg	*	refused	ERR 0A000
+union/iv80_kr/default	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+intersect/iv80_kr/default	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+exceptAll/iv80_kr/default	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+group/iv80_kr/sortagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 explain/group/iv80_kr/sortagg	*	pg-only	-
-distinct/iv80_kr/sortagg	*	refused	ERR 0A000
+distinct/iv80_kr/sortagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 explain/distinct/iv80_kr/sortagg	*	pg-only	-
-union/iv80_kr/sortagg	*	refused	ERR 0A000
-intersect/iv80_kr/sortagg	*	refused	ERR 0A000
-exceptAll/iv80_kr/sortagg	*	refused	ERR 0A000
-group/iv80_kr/hashagg	*	refused	ERR 0A000
+union/iv80_kr/sortagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+intersect/iv80_kr/sortagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+exceptAll/iv80_kr/sortagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+group/iv80_kr/hashagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 explain/group/iv80_kr/hashagg	*	pg-only	-
-distinct/iv80_kr/hashagg	*	refused	ERR 0A000
+distinct/iv80_kr/hashagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 explain/distinct/iv80_kr/hashagg	*	pg-only	-
-union/iv80_kr/hashagg	*	refused	ERR 0A000
-intersect/iv80_kr/hashagg	*	refused	ERR 0A000
-exceptAll/iv80_kr/hashagg	*	refused	ERR 0A000
-groupCount/iv80_kr	*	refused	ERR 0A000
-distinctCount/iv80_kr	*	refused	ERR 0A000
-countDistinct/iv80_kr	*	refused	ERR 0A000
-partition/iv80_kr	*	refused	ERR 0A000
-peers/iv80_kr	*	refused	ERR 0A000
-orderTie/iv80_kr	*	refused	ERR 0A000
-withTies/iv80_kr	*	refused	ERR 42601
-withTiesCount/iv80_kr	*	refused	ERR 42601
-join/default	*	refused	ERR 0A000
+union/iv80_kr/hashagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+intersect/iv80_kr/hashagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+exceptAll/iv80_kr/hashagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+groupCount/iv80_kr	*	refusal	ERR 0A000: interval values cannot yet be used as a GROUP BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+distinctCount/iv80_kr	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+countDistinct/iv80_kr	*	refusal	ERR 0A000: count over an interval argument is not supported
+partition/iv80_kr	*	refusal	ERR 0A000: interval values cannot yet be used as a PARTITION BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+peers/iv80_kr	*	refusal	ERR 0A000: interval values cannot yet be used as a window ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+orderTie/iv80_kr	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+withTies/iv80_kr	*	error	ERR 42601: syntax error at or near "WITH"
+withTiesCount/iv80_kr	*	error	ERR 42601: syntax error at or near "WITH"
+join/default	*	refusal	ERR 0A000: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
 explain/join/default	*	pg-only	-
-join/hash	*	refused	ERR 0A000
+join/hash	*	refusal	ERR 0A000: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
 explain/join/hash	*	pg-only	-
-join/merge	*	refused	ERR 0A000
+join/merge	*	refusal	ERR 0A000: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
 explain/join/merge	*	pg-only	-
-join/nestloop	*	refused	ERR 0A000
+join/nestloop	*	refusal	ERR 0A000: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
 explain/join/nestloop	*	pg-only	-
-join/left	*	refused	ERR 0A000
-join/semi	*	refused	ERR 0A000
-join/anti	*	refused	ERR 0A000
-setLit/union/default	*	refused	ERR 42601
-setLit/unionRev/default	*	refused	ERR 42601
-setLit/intersect/default	*	refused	ERR 0A000
-setLit/except/default	*	refused	ERR 0A000
-setLit/exceptAll/default	*	refused	ERR 42601
-setLit/intersectAll/default	*	refused	ERR 42601
-setLit/valuesDistinct/default	*	refused	ERR 42601
-setLit/union/sortagg	*	refused	ERR 42601
-setLit/unionRev/sortagg	*	refused	ERR 42601
-setLit/intersect/sortagg	*	refused	ERR 0A000
-setLit/except/sortagg	*	refused	ERR 0A000
-setLit/exceptAll/sortagg	*	refused	ERR 42601
-setLit/intersectAll/sortagg	*	refused	ERR 42601
-setLit/valuesDistinct/sortagg	*	refused	ERR 42601
-wrap/group	*	refused	ERR 22007
-wrap/join	*	refused	ERR 22007
-wrap/hashCollide	*	refused	ERR 22007
+join/left	*	refusal	ERR 0A000: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+join/semi	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+join/anti	*	refusal	ERR 0A000: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+setLit/union/default	*	error	ERR 42601: syntax error at end of input
+setLit/unionRev/default	*	error	ERR 42601: syntax error at or near "AS"
+setLit/intersect/default	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+setLit/except/default	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+setLit/exceptAll/default	*	error	ERR 42601: syntax error at or near ")"
+setLit/intersectAll/default	*	error	ERR 42601: syntax error at or near ")"
+setLit/valuesDistinct/default	*	error	ERR 42601: syntax error at or near ")"
+setLit/union/sortagg	*	error	ERR 42601: syntax error at end of input
+setLit/unionRev/sortagg	*	error	ERR 42601: syntax error at or near "AS"
+setLit/intersect/sortagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+setLit/except/sortagg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+setLit/exceptAll/sortagg	*	error	ERR 42601: syntax error at or near ")"
+setLit/intersectAll/sortagg	*	error	ERR 42601: syntax error at or near ")"
+setLit/valuesDistinct/sortagg	*	error	ERR 42601: syntax error at or near ")"
+wrap/group	*	error	ERR 22007: invalid input syntax for type interval: "213503982 days 08:01:49.551616"
+wrap/join	*	error	ERR 22007: invalid input syntax for type interval: "213503982 days 08:01:49.551616"
+wrap/hashCollide	*	error	ERR 22007: invalid input syntax for type interval: "213503982 days 08:01:49.551616"
 adr0024/intersectNumericSort	*	differs	k:numeric | 1.00; 2.00; 3.00; 4.00; 5.00; 6.00
 explain/adr0024/intersectNumericSort	*	pg-only	-
 adr0024/intersectNumericHash	*	agree	k:numeric | 1.00; 2.00; 3.00; 4.00; 5.00; 6.00
 explain/intersect/iv80_kr/sortagg	*	pg-only	-
-array/group	*	refused	ERR 0A000
-array/eq	*	refused	ERR 42601
-row/group	*	refused	ERR 0A000
+array/group	*	refusal	ERR 0A000: interval values cannot yet be used as an array element: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+array/eq	*	error	ERR 42601: syntax error at or near "]"
+row/group	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND

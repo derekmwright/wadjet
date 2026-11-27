@@ -1,0 +1,21 @@
+# PostgreSQL 17.11 answers for the #1680b interval corpus, section 07_functions_cast (TestArc1680bMeasure; postgres:17-alpine, initdb --locale=C --encoding=UTF8, --memory=4g).
+# PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit; datcollate=C datctype=C server_encoding=UTF8; defaults IntervalStyle=postgres DateStyle=ISO, MDY TimeZone=UTC; a cell's settings column overrides them for that cell only.
+# name<TAB>answer: ok | ERR <SQLSTATE>: message | col:type(oid),... | row; row (or | (0 rows)), then any " !! <severity> <SQLSTATE>: message" PostgreSQL raised
+trunc/millennium~text	a:text(25),b:text(25) | 00:00:00,00:00:00
+trunc/century~text	a:text(25),b:text(25) | 00:00:00,00:00:00
+trunc/decade~text	a:text(25),b:text(25) | 00:00:00,00:00:00
+trunc/year~text	a:text(25),b:text(25) | 2 years,-2 years
+trunc/quarter~text	a:text(25),b:text(25) | 2 years,-2 years
+trunc/month~text	a:text(25),b:text(25) | 2 years 2 mons,-2 years -2 mons
+trunc/day~text	a:text(25),b:text(25) | 2 years 2 mons 40 days,-2 years -2 mons -40 days
+trunc/hour~text	a:text(25),b:text(25) | 2 years 2 mons 40 days 26:00:00,-2 years -2 mons -40 days -26:00:00
+trunc/minute~text	a:text(25),b:text(25) | 2 years 2 mons 40 days 26:07:00,-2 years -2 mons -40 days -26:07:00
+trunc/second~text	a:text(25),b:text(25) | 2 years 2 mons 40 days 26:07:08,-2 years -2 mons -40 days -26:07:08
+trunc/milliseconds~text	a:text(25),b:text(25) | 2 years 2 mons 40 days 26:07:08.5,-2 years -2 mons -40 days -26:07:08.5
+trunc/microseconds~text	a:text(25),b:text(25) | 2 years 2 mons 40 days 26:07:08.5,-2 years -2 mons -40 days -26:07:08.5
+trunc/inf~text	a:text(25) | infinity
+inf/fields~text	m:numeric(1700),j:text(25),t:text(25) | NULL,infinity,infinity
+agg/all~text	c:bigint(20),lo:text(25),hi:text(25),s:text(25),a:text(25) | 3,-1 days +02:00:00,1 mon,1 mon -1 days +02:00:00.000001,10 days -07:20:00
+agg/arrayAgg~text	a:text(25) | {"29 days","1 mon"}
+agg/modeTie~text	a:text(25) | 30 days
+operand/timesUnknown~text	a:text(25) | 2 days

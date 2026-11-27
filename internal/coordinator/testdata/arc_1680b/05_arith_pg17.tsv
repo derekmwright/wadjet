@@ -1,6 +1,6 @@
 # PostgreSQL 17.11 answers for the #1680b interval corpus, section 05_arith (TestArc1680bMeasure; postgres:17-alpine, initdb --locale=C --encoding=UTF8, --memory=4g).
 # PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit; datcollate=C datctype=C server_encoding=UTF8; defaults IntervalStyle=postgres DateStyle=ISO, MDY TimeZone=UTC; a cell's settings column overrides them for that cell only.
-# name<TAB>answer: ok | (0 rows) | ERR <SQLSTATE>: message | col:type(oid),... | row; row
+# name<TAB>answer: ok | ERR <SQLSTATE>: message | col:type(oid),... | row; row (or | (0 rows)), then any " !! <severity> <SQLSTATE>: message" PostgreSQL raised
 plus/fields	a:interval(1186),b:interval(1186) | 1 year 1 mon 3 days 26:00:00,1 mon -30 days
 plus/noCarry	a:interval(1186),b:interval(1186) | 40:00:00,35 days
 plus/subsec	a:interval(1186),b:interval(1186) | 00:00:01,-00:00:00.000001

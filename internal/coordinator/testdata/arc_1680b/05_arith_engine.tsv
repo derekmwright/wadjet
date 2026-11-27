@@ -1,110 +1,110 @@
 # This engine's disposition of the #1680b interval corpus, section 05_arith, per arm (TestArc1680bRecordEngine; held by TestArc1680bEngineBaseline).
 # Settings are PostgreSQL's only: the engine runs each statement as written. A TIMESTAMP value is printed as text (iv80EngineText). name<TAB>arms<TAB>class<TAB>answer
-plus/fields	*	refused	ERR 22007
-plus/noCarry	*	refused	ERR 0A000
-plus/subsec	*	refused	ERR 42601
-minus/fields	*	refused	ERR 0A000
-minus/zero	*	refused	ERR 0A000
-plus/null	*	refused	ERR 0A000
-plus/overflowMonths	*	refused	ERR 22007
-plus/overflowDays	*	refused	ERR 22008
-plus/overflowTime	*	refused	ERR 42601
-plus/toInfinityFields	*	refused	ERR 22007
-plus/inf	*	refused	ERR 42601
-plus/infMinusInf	*	refused	ERR 42601
-plus/infPlusNegInf	*	refused	ERR 42601
-neg/basic	*	refused	ERR 22007
-neg/inf	*	refused	ERR 42601
-neg/minMonths	*	refused	ERR 22008
-neg/minDays	*	refused	ERR 22008
-neg/minTime	*	refused	ERR 42601
-neg/minTimeBuilt	*	refused	ERR 42601
-neg/minTimeBuiltAlone	*	refused	ERR 42601
-mul/int	*	refused	ERR 22007
-mul/zero	*	refused	ERR 22007
-mul/neg	*	refused	ERR 22007
-mul/halfMonth	*	refused	ERR 0A000
-mul/thirdMonth	*	refused	ERR 0A000
-mul/monthCascade	*	refused	ERR 0A000
-mul/monthToTime	*	refused	ERR 0A000
-mul/dayFrac	*	refused	ERR 0A000
-mul/dayCascade	*	refused	ERR 0A000
-mul/yearFrac	*	refused	ERR 0A000
-mul/mixedSign	*	refused	ERR 22007
-mul/negFrac	*	refused	ERR 0A000
-mul/timeOver24	*	refused	ERR 42601
-mul/usHalfEven1	*	refused	ERR 42601
-mul/usHalfEven2	*	refused	ERR 42601
-mul/usHalfEven3	*	refused	ERR 42601
-mul/usNeg	*	refused	ERR 42601
-mul/tinyMonth	*	refused	ERR 0A000
-mul/float8	*	refused	ERR 0A000
-mul/real	*	refused	ERR 0A000
-mul/bigint	*	refused	ERR 0A000
-mul/numeric	*	refused	ERR 42883
-mul/unknown	*	refused	ERR 0A000
-mul/null	*	refused	ERR 0A000
-mul/overflowDays	*	refused	ERR 22008
-mul/overflowMonths	*	refused	ERR 22008
-mul/overflowTime	*	refused	ERR 42601
-mul/huge	*	refused	ERR 22008
-mul/nan	*	refused	ERR 22008
-mul/infFactor	*	refused	ERR 0A000
-mul/negInfFactor	*	refused	ERR 0A000
-mul/zeroTimesInf	*	refused	ERR 22008
-mul/infTimesZero	*	refused	ERR 42601
-mul/infTimesNeg	*	refused	ERR 42601
-mul/commuted	*	refused	ERR 22007
-div/int	*	refused	ERR 22007
-div/thirdMonth	*	refused	ERR 0A000
-div/thirdDay	*	refused	ERR 0A000
-div/monthCascade	*	refused	ERR 0A000
-div/yearBy7	*	refused	ERR 0A000
-div/neg	*	refused	ERR 0A000
-div/frac	*	refused	ERR 0A000
-div/half	*	refused	ERR 0A000
-div/us	*	refused	ERR 42601
-div/us3	*	refused	ERR 42601
-div/usNeg	*	refused	ERR 42601
-div/zero	*	refused	ERR 22012
-div/zeroFloat	*	refused	ERR 22012
-div/tiny	*	refused	ERR 22008
-div/nan	*	refused	ERR 22008
-div/infDivisor	*	refused	ERR 0A000
-div/infDividend	*	refused	ERR 42601
-div/infByInf	*	refused	ERR 42601
-div/unknown	*	refused	ERR 0A000
-div/null	*	refused	ERR 0A000
-div/roundTrip	*	refused	ERR 0A000
-justify/pos	*	refused	ERR 22007
-justify/neg	*	refused	ERR 22007
-justify/mixed1	*	refused	ERR 22007
-justify/mixed2	*	refused	ERR 22007
-justify/mixed3	*	refused	ERR 22007
-justify/mixed4	*	refused	ERR 22007
-justify/zero	*	refused	ERR 0A000
-justify/us	*	refused	ERR 42601
-justify/bigHours	*	refused	ERR 42601
-justify/bigDays	*	refused	ERR 22007
-justify/monthOverflow	*	refused	ERR 22007
-justify/inf	*	refused	ERR 42601
-justify/null	*	refused	ERR 0A000
+plus/fields	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 2 days 03:00:00"
+plus/noCarry	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+plus/subsec	*	error	ERR 42601: syntax error at or near "+"
+minus/fields	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+minus/zero	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+plus/null	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+plus/overflowMonths	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "178956970 years 7 mons"
+plus/overflowDays	*	pg-error	ERR 22008: interval out of range
+plus/overflowTime	*	wrong-sqlstate	ERR 42601: syntax error at or near "+"
+plus/toInfinityFields	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "2147483647 months 2147483647 days 2562047788:00:54.775806"
+plus/inf	*	error	ERR 42601: syntax error at or near "+"
+plus/infMinusInf	*	wrong-sqlstate	ERR 42601: syntax error at or near "-"
+plus/infPlusNegInf	*	wrong-sqlstate	ERR 42601: syntax error at or near "+"
+neg/basic	*	error	ERR 22007: invalid input syntax for type interval: "1 year -2 mons 3 days -04:05:06"
+neg/inf	*	error	ERR 42601: syntax error at or near "AS"
+neg/minMonths	*	pg-error	ERR 22008: interval out of range
+neg/minDays	*	pg-error	ERR 22008: interval out of range
+neg/minTime	*	wrong-sqlstate	ERR 42601: syntax error at or near "AS"
+neg/minTimeBuilt	*	wrong-sqlstate	ERR 42601: syntax error at or near "-"
+neg/minTimeBuiltAlone	*	error	ERR 42601: syntax error at or near "-"
+mul/int	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 1 day 01:00:00"
+mul/zero	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 1 day 01:00:00"
+mul/neg	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 1 day 01:00:00"
+mul/halfMonth	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+mul/thirdMonth	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+mul/monthCascade	*	refusal	ERR 0A000: interval unit "mons" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+mul/monthToTime	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+mul/dayFrac	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+mul/dayCascade	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+mul/yearFrac	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+mul/mixedSign	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -1 day"
+mul/negFrac	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+mul/timeOver24	*	error	ERR 42601: syntax error at or near "*"
+mul/usHalfEven1	*	error	ERR 42601: syntax error at or near "*"
+mul/usHalfEven2	*	error	ERR 42601: syntax error at or near "*"
+mul/usHalfEven3	*	error	ERR 42601: syntax error at or near "*"
+mul/usNeg	*	error	ERR 42601: syntax error at or near "*"
+mul/tinyMonth	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+mul/float8	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+mul/real	*	refusal	ERR 0A000: interval multiplication has a fractional-second result; only whole seconds are supported in an interval
+mul/bigint	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+mul/numeric	*	error	ERR 42883: operator does not exist: interval * text
+mul/unknown	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+mul/null	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+mul/overflowDays	*	pg-error	ERR 22008: interval out of range
+mul/overflowMonths	*	pg-error	ERR 22008: interval out of range
+mul/overflowTime	*	wrong-sqlstate	ERR 42601: syntax error at or near "*"
+mul/huge	*	pg-error	ERR 22008: interval out of range
+mul/nan	*	pg-error	ERR 22008: interval out of range
+mul/infFactor	*	refusal	ERR 0A000: interval multiplication has an infinite result; an infinite interval is not supported
+mul/negInfFactor	*	refusal	ERR 0A000: interval multiplication has an infinite result; an infinite interval is not supported
+mul/zeroTimesInf	*	pg-error	ERR 22008: interval out of range
+mul/infTimesZero	*	wrong-sqlstate	ERR 42601: syntax error at or near "*"
+mul/infTimesNeg	*	error	ERR 42601: syntax error at or near "*"
+mul/commuted	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 1 day"
+div/int	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 1 day 01:00:00"
+div/thirdMonth	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+div/thirdDay	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+div/monthCascade	*	refusal	ERR 0A000: interval unit "mons" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+div/yearBy7	*	refusal	ERR 0A000: interval division has a fractional-second result; only whole seconds are supported in an interval
+div/neg	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+div/frac	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+div/half	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+div/us	*	error	ERR 42601: syntax error at or near "/"
+div/us3	*	error	ERR 42601: syntax error at or near "/"
+div/usNeg	*	error	ERR 42601: syntax error at or near "/"
+div/zero	*	pg-error	ERR 22012: division by zero
+div/zeroFloat	*	pg-error	ERR 22012: division by zero
+div/tiny	*	pg-error	ERR 22008: interval out of range
+div/nan	*	pg-error	ERR 22008: interval out of range
+div/infDivisor	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+div/infDividend	*	error	ERR 42601: syntax error at or near "/"
+div/infByInf	*	wrong-sqlstate	ERR 42601: syntax error at or near "/"
+div/unknown	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+div/null	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+div/roundTrip	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+justify/pos	*	error	ERR 22007: invalid input syntax for type interval: "1 mon 35 days 27:00:00"
+justify/neg	*	error	ERR 22007: invalid input syntax for type interval: "-1 mon -35 days -27:00:00"
+justify/mixed1	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -1 day"
+justify/mixed2	*	error	ERR 22007: invalid input syntax for type interval: "-1 mon 35 days"
+justify/mixed3	*	error	ERR 22007: invalid input syntax for type interval: "1 day -25:00:00"
+justify/mixed4	*	error	ERR 22007: invalid input syntax for type interval: "-1 day 25:00:00"
+justify/zero	*	refusal	ERR 0A000: justify_days over an interval argument is not supported
+justify/us	*	error	ERR 42601: syntax error at or near ")"
+justify/bigHours	*	error	ERR 42601: syntax error at or near ")"
+justify/bigDays	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "2147483647 days 24:00:00"
+justify/monthOverflow	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "178956970 years 7 mons 30 days"
+justify/inf	*	error	ERR 42601: syntax error at or near ")"
+justify/null	*	refusal	ERR 0A000: justify_days over an interval argument is not supported
 ddl/create/iv80_m	writer	ok	ok
 ddl/insert/iv80_m	writer	ok	ok
-agg/sumAvg	*	refused	ERR 0A000
-agg/sumAvgSubset	*	refused	ERR 0A000
-agg/avgCascade	*	refused	ERR 0A000
-agg/avgThirds	*	refused	ERR 0A000
-agg/avgUs	*	refused	ERR 42601
-agg/avgUs3	*	refused	ERR 42601
-agg/sumEmpty	*	refused	ERR 0A000
-agg/sumNull	*	refused	ERR 0A000
-agg/sumGroup	*	refused	ERR 0A000
-agg/sumOverflowDays	*	refused	ERR 0A000
-agg/sumOverflowThenBack	*	refused	ERR 0A000
-agg/avgBig	*	refused	ERR 0A000
-agg/sumInf	*	refused	ERR 42601
-agg/sumInfNegInf	*	refused	ERR 42601
-agg/avgInfNegInf	*	refused	ERR 42601
-agg/sumWindow	*	refused	ERR 0A000
-agg/avgWindowSliding	*	refused	ERR 0A000
+agg/sumAvg	*	refusal	ERR 0A000: sum over an interval argument is not supported
+agg/sumAvgSubset	*	refusal	ERR 0A000: sum over an interval argument is not supported
+agg/avgCascade	*	refusal	ERR 0A000: avg over an interval argument is not supported
+agg/avgThirds	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+agg/avgUs	*	error	ERR 42601: syntax error at or near ")"
+agg/avgUs3	*	error	ERR 42601: syntax error at or near ")"
+agg/sumEmpty	*	refusal	ERR 0A000: sum over an interval argument is not supported
+agg/sumNull	*	refusal	ERR 0A000: sum over an interval argument is not supported
+agg/sumGroup	*	refusal	ERR 0A000: sum over an interval argument is not supported
+agg/sumOverflowDays	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+agg/sumOverflowThenBack	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+agg/avgBig	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+agg/sumInf	*	error	ERR 42601: syntax error at or near ")"
+agg/sumInfNegInf	*	wrong-sqlstate	ERR 42601: syntax error at or near ")"
+agg/avgInfNegInf	*	wrong-sqlstate	ERR 42601: syntax error at or near ")"
+agg/sumWindow	*	refusal	ERR 0A000: sum over an interval argument is not supported
+agg/avgWindowSliding	*	refusal	ERR 0A000: avg over an interval argument is not supported

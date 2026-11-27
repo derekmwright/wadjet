@@ -1,0 +1,176 @@
+# PostgreSQL 17.11 answers for the #1680b interval corpus, section 10_definitions (TestArc1680bMeasure; postgres:17-alpine, initdb --locale=C --encoding=UTF8, --memory=4g).
+# PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit; datcollate=C datctype=C server_encoding=UTF8; defaults IntervalStyle=postgres DateStyle=ISO, MDY TimeZone=UTC; a cell's settings column overrides them for that cell only.
+# name<TAB>answer: ok | ERR <SQLSTATE>: message | col:type(oid),... | row; row (or | (0 rows)), then any " !! <severity> <SQLSTATE>: message" PostgreSQL raised
+in/usMinUnit	a:interval(1186) | -2562047788:00:54.775808
+in/usMaxUnit	a:interval(1186) | 2562047788:00:54.775807
+in/usOverUnit	ERR 22015: interval field value out of range: "9223372036854775808 microseconds"
+in/usUnderUnit	ERR 22015: interval field value out of range: "-9223372036854775809 microseconds"
+in/usMinUnitAgo	a:interval(1186) | -2562047788:00:54.775807
+in/allMin	a:interval(1186) | -infinity
+in/allMinNear	a:interval(1186) | -178956970 years -8 mons -2147483648 days -2562047788:00:54.775807
+in/allMaxUnits	a:interval(1186) | infinity
+in/allMaxNear	a:interval(1186) | 178956970 years 7 mons 2147483647 days 2562047788:00:54.775806
+in/allMinIsNegInf	eq:boolean(16),fin:boolean(16),fin_near:boolean(16) | t,f,t
+in/allMinCastText	a:interval(1186) | -infinity
+in/allMinMake	a:interval(1186) | -178956970 years -8 mons -2147483648 days
+frac/1.5us	a:interval(1186),b:interval(1186) | 00:00:00.000002,00:00:00.000001
+frac/-1.5us	a:interval(1186),b:interval(1186) | -00:00:00.000002,-00:00:00.000001
+frac/2.5us	a:interval(1186),b:interval(1186) | 00:00:00.000002,00:00:00.000002
+frac/3.5us	a:interval(1186),b:interval(1186) | 00:00:00.000004,00:00:00.000003
+frac/0.5us	a:interval(1186),b:interval(1186) | 00:00:00,00:00:00
+frac/clockNearSecond	a:interval(1186),b:interval(1186) | 00:00:01.5,00:00:01.499999
+frac/minuteUnit	a:interval(1186),b:interval(1186) | 00:00:00.000001,00:00:00.000001
+frac/years1	a:interval(1186),b:interval(1186) | 2 mons,4 mons
+frac/years2	a:interval(1186),b:interval(1186) | -2 mons,00:00:00
+frac/decade	a:interval(1186),b:interval(1186) | 2 mons,2 mons
+frac/months	a:interval(1186),b:interval(1186) | 15 days,-23:59:59.9136
+frac/weeks1	a:interval(1186),b:interval(1186) | 10 days 12:00:00,16:48:00
+frac/weeks2	a:interval(1186),b:interval(1186) | -3 days -12:00:00,7 days 12:00:00
+ago/P1D ago	ERR 22007: invalid input syntax for type interval: "P1D ago"
+ago/P1Y2M ago	ERR 22007: invalid input syntax for type interval: "P1Y2M ago"
+ago/infinity ago	ERR 22007: invalid input syntax for type interval: "infinity ago"
+ago/-infinity ago	ERR 22007: invalid input syntax for type interval: "-infinity ago"
+ago/1 day 02:00:00 ago	a:interval(1186) | -1 days -02:00:00
+ago/1-2 ago	a:interval(1186) | -1 years -2 mons
+ago/3 4:05:06 ago	a:interval(1186) | -3 days -04:05:06
+ago/-1 day +02:00:00 ago	a:interval(1186) | 1 day -02:00:00
+ago/1 day ago ago	ERR 22007: invalid input syntax for type interval: "1 day ago ago"
+ago/ago	ERR 22007: invalid input syntax for type interval: "ago"
+ago/2147483647 days ago	a:interval(1186) | -2147483647 days
+ago/-2147483648 days ago	ERR 22015: interval field value out of range: "-2147483648 days ago"
+ago/-2147483648 months ago	ERR 22015: interval field value out of range: "-2147483648 months ago"
+ago/@ 1 mon ago	a:interval(1186) | -1 mons
+typmod/bareHM	a:interval(1186) | 01:30:00
+typmod/hm	a:interval(1186) | 01:30:00
+typmod/ms	a:interval(1186) | 00:01:30
+typmod/dm	a:interval(1186) | 01:30:00
+typmod/bareNumber	a:interval(1186) | 00:01:30
+typmod/minute	a:interval(1186) | 01:30:00
+typmod/dayToHour	a:interval(1186) | 02:00:00
+typmod/yearToMonth	a:interval(1186) | 2 mons
+typmod/hourFrac	a:interval(1186) | 00:01:00
+typmod/secondTyp5	a:interval(1186) | 00:00:05
+typmod/prec7	a:interval(1186) | 00:00:01.123457 !! WARNING 22023: INTERVAL(7) precision reduced to maximum allowed, 6
+typmod/prec7Literal	a:interval(1186) | 00:00:01.123457 !! WARNING 22023: INTERVAL(7) precision reduced to maximum allowed, 6
+typmod/prec7Half	a:interval(1186),b:interval(1186) | 00:00:00.000001,00:00:00.000002 !! WARNING 22023: INTERVAL(7) precision reduced to maximum allowed, 6 !! WARNING 22023: INTERVAL(7) precision reduced to maximum allowed, 6
+ar/mulMixed	a:interval(1186) | 1 mon 14 days -12:00:00
+ar/divMixed2	a:interval(1186) | 15 days -12:00:00
+ar/divMixed3	a:interval(1186),b:interval(1186) | 10 days -08:00:00,-20 days +16:00:00
+ar/mulCarry	a:interval(1186),b:interval(1186) | 23 days 06:00:00,23 days 06:00:00
+ar/infFactorZeroSign	ERR 22008: interval out of range
+ar/infFactorNegSign	a:interval(1186) | -infinity
+ar/infFactorPosSign	a:interval(1186) | infinity
+ar/negInfFactorNegSign	a:interval(1186) | infinity
+ar/infDivFiniteSign	a:interval(1186) | 00:00:00
+ar/divRecipMonths	a:interval(1186),b:interval(1186) | 1 mon,30 days
+ar/divRecipDays	a:interval(1186),b:interval(1186) | 1 day,1 day
+ar/divRecipJudge	a:interval(1186),b:interval(1186) | 833999:55:51.58033,833999:55:51.58033
+justify/bigDays24h	i:interval(1186) | 5965232 years 4 mons 8 days
+justify/bigDays24h/hoursOfDays	hd:interval(1186) | 5965232 years 4 mons 8 days
+justify/bigDays24h/daysOfHours	ERR 22008: interval out of range
+justify/negBigDays24h	i:interval(1186) | -5965232 years -4 mons -9 days
+justify/negBigDays24h/hoursOfDays	hd:interval(1186) | -5965232 years -4 mons -9 days
+justify/negBigDays24h/daysOfHours	ERR 22008: interval out of range
+justify/monMinus25h	i:interval(1186) | 28 days 23:00:00
+justify/monMinus25h/hoursOfDays	hd:interval(1186) | 1 mon -1 days -01:00:00
+justify/monMinus25h/daysOfHours	dh:interval(1186) | 29 days -01:00:00
+justify/negMonPlus25h	i:interval(1186) | -28 days -23:00:00
+justify/negMonPlus25h/hoursOfDays	hd:interval(1186) | -1 mons +1 day 01:00:00
+justify/negMonPlus25h/daysOfHours	dh:interval(1186) | -29 days +01:00:00
+infop/tsInfPlusNegInf	ERR 22008: timestamp out of range
+infop/tsNegInfPlusInf	ERR 22008: timestamp out of range
+infop/tsNegInfMinusNegInf	ERR 22008: timestamp out of range
+infop/tsNegInfMinusInf	a:timestamp(1114) | -infinity
+infop/tsInfPlusFinite	a:timestamp(1114) | infinity
+infop/dateInfPlusNegInf	ERR 22008: timestamp out of range
+infop/dateFinitePlusInf	a:timestamp(1114) | infinity
+infop/ivInfMinusNegInf	a:interval(1186) | infinity
+epoch/yearVs360	y:numeric(1700),d:numeric(1700),eq:boolean(16),m12:numeric(1700),m13:numeric(1700),m1:numeric(1700),mneg:numeric(1700) | 31557600.000000,31104000.000000,t,31557600.000000,34149600.000000,2592000.000000,-34149600.000000
+epoch/yearVs360Float	y:double precision(701),d:double precision(701) | 31557600,31104000
+epoch/bigFinite	e:numeric(1700),p:double precision(701) | 5842218453753654.775806,5.842218453753655e+15
+epoch/bigFiniteNeg	e:numeric(1700) | -5842218456432054.775807
+epoch/negInf	e:numeric(1700),p:double precision(701) | -Infinity,-Infinity
+sentinel/minusToNegInf	ERR 22008: interval out of range
+sentinel/plusToNegInf	ERR 22008: interval out of range
+sentinel/sumToNegInf	ERR 22008: interval out of range
+sentinel/negOfNearMax	a:interval(1186) | -178956970 years -7 mons -2147483647 days -2562047788:00:54.775806
+sentinel/negOfNearMin	ERR 22008: interval out of range
+sentinel/negOfInfinityTriple	a:interval(1186) | -infinity
+sentinel/mulNegInfinityTriple	a:interval(1186) | -infinity
+age/borrow	a:interval(1186),b:interval(1186),c:interval(1186),d:interval(1186),e:interval(1186) | 1 mon 1 day,-1 mons -1 days,15 days,-15 days,1 mon 15 days
+age/timeBorrow	a:interval(1186),b:interval(1186),c:interval(1186) | 01:00:00,-01:00:00,00:00:00.000001
+age/null	a:interval(1186),b:interval(1186) | NULL,NULL
+age/infLeft	a:interval(1186),b:interval(1186) | infinity,-infinity
+age/infRight	a:interval(1186),b:interval(1186) | -infinity,infinity
+age/infOpposed	a:interval(1186),b:interval(1186) | infinity,-infinity
+age/infInf	ERR 22008: interval out of range
+age/negInfNegInf	ERR 22008: interval out of range
+age/bc	a:interval(1186),b:interval(1186) | -10 mons -30 days,1 day
+age/date	a:interval(1186) | 1 mon 1 day
+age/dateNY	a:interval(1186) | 2 days
+age/tz/UTC/fallBack	a:interval(1186),b:interval(1186) | 1 day 01:00:00,-1 days -01:00:00
+age/tz/America/New_York/fallBack	a:interval(1186),b:interval(1186) | 1 day,-1 days
+types/datePlusInt	a:date(1082) | 2024-02-01
+types/dateMinusInt	a:date(1082) | 2024-01-30
+types/intPlusDate	a:date(1082) | 2024-02-01
+types/dateMinusDate	a:integer(23) | 30
+types/datePlusInterval	a:timestamp(1114) | 2024-02-29 00:00:00
+types/dateMinusInterval	a:timestamp(1114) | 2024-01-30 00:00:00
+types/intervalPlusDate	a:timestamp(1114) | 2024-02-01 00:00:00
+types/intervalMinusDate	ERR 42883: operator does not exist: interval - date
+types/datePlusTime	a:timestamp(1114) | 2024-01-31 01:02:03
+types/dateMinusTime	a:timestamp(1114) | 2024-01-30 22:57:57
+types/tsMinusTs	a:interval(1186) | 1 day 01:00:00
+types/tsMinusDate	a:interval(1186) | 1 day 01:00:00
+types/dateMinusTs	a:interval(1186) | -1 days -01:00:00
+types/tsPlusInterval	a:timestamp(1114) | 2024-02-29 00:00:00
+types/intervalPlusTs	a:timestamp(1114) | 2024-02-29 00:00:00
+types/tsMinusInterval	a:timestamp(1114) | 2023-12-31 00:00:00
+types/intervalMinusTs	ERR 42883: operator does not exist: interval - timestamp without time zone
+types/tsPlusTs	ERR 42883: operator does not exist: timestamp without time zone + timestamp without time zone
+types/datePlusDate	ERR 42883: operator does not exist: date + date
+types/dateTimesInt	ERR 42883: operator does not exist: date * integer
+types/tsPlusInt	ERR 42883: operator does not exist: timestamp without time zone + integer
+types/timeMinusTime	a:interval(1186) | -22:00:00
+types/timePlusInterval	a:time(1083) | 01:00:00
+types/intervalPlusTime	a:time(1083) | 01:00:00
+types/timeMinusInterval	a:time(1083) | 23:00:00
+types/tstzMinusTstz	a:interval(1186) | 1 day
+types/tstzMinusTs	a:interval(1186) | 1 day
+types/tstzPlusInterval	a:timestamp with time zone(1184) | 2024-01-03 00:00:00+00
+types/intervalTimesInt	a:interval(1186) | 2 days
+types/intTimesInterval	a:interval(1186) | 2 days
+types/intervalDivInt	a:interval(1186) | 12:00:00
+types/negInterval	a:interval(1186) | -1 days
+closure/tsMinusDate	a:interval(1186) | 1 day 01:00:00
+closure/dateMinusTs	a:interval(1186) | -1 days -01:00:00
+closure/coalesceText	a:text(25) | 1 mon
+closure/coalesce	a:interval(1186) | 1 mon
+closure/caseText	a:text(25) | 1 mon
+closure/case	a:interval(1186) | 1 mon
+closure/nullifText	a:text(25) | NULL
+closure/nullif	a:interval(1186),b:interval(1186) | NULL,1 mon
+closure/unionNull	t:text(25) | NULL; 1 day
+closure/whereFalse	x:interval(1186) | (0 rows)
+closure/whereFalseText	t:text(25) | (0 rows)
+closure/greatestMixed	a:text(25),b:text(25) | 1 mon,30 days
+dst/gapTarget	a:timestamp with time zone(1184) | 2024-03-10 03:30:00-04
+dst/foldTarget	a:timestamp with time zone(1184) | 2024-11-03 01:30:00-05
+dst/foldMinus	a:timestamp with time zone(1184) | 2024-11-03 01:30:00-05
+dst/gapInput	a:timestamp with time zone(1184) | 2024-03-10 03:30:00-04
+dst/monthIntoGap	a:timestamp with time zone(1184) | 2024-03-10 03:30:00-04
+dst/hoursAcrossFold	a:timestamp with time zone(1184),b:timestamp with time zone(1184) | 2024-11-03 01:30:00-04,2024-11-03 01:30:00-05
+dst/dateAddZone	a:timestamp with time zone(1184),b:timestamp with time zone(1184) | 2024-03-10 07:30:00+00,2024-11-03 06:30:00+00
+dst/seriesZone	g:timestamp with time zone(1184) | 2024-11-02 05:30:00+00; 2024-11-03 06:30:00+00; 2024-11-04 06:30:00+00
+dst/seriesNoZone	g:timestamp with time zone(1184) | 2024-03-09 02:30:00-05; 2024-03-10 03:30:00-04
+fn/binInfStride	ERR 22008: timestamps cannot be binned into infinite intervals
+fn/binInfSource	a:timestamp(1114) | infinity
+fn/binDaysStride	a:timestamp(1114) | 2024-01-02 01:00:00
+fn/binBeforeOrigin	a:timestamp(1114) | 2023-12-31 22:00:00
+fn/truncMixedSign	a:interval(1186),b:interval(1186) | 1 mon -1 days,-11 mons
+fn/tocharNeg	a:text(25),b:text(25) | -1 -02:-03:-04,01 02
+fn/overlapsNegEnd	a:boolean(16) | t
+fn/overlapsInf	a:boolean(16) | t
+fn/seriesTsMonthEnd	g:timestamp(1114) | 2024-01-31 00:00:00; 2024-02-29 00:00:00; 2024-03-29 00:00:00; 2024-04-29 00:00:00
+fn/seriesNegStepWrongWay	n:bigint(20) | 0
+fn/widthBucketNumeric	a:integer(23) | 2

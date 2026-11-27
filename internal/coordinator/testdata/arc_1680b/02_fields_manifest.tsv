@@ -1,0 +1,58 @@
+# The stage manifest of section 02_fields (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet / door).
+fields/0/1 mon	C	supported	unmet
+fields/1/30 days	C	supported	unmet
+fields/2/720:00:00	C	supported	unmet
+fields/3/36 hours	C	supported	unmet
+fields/4/1 day 12:00:00	C	supported	unmet
+fields/5/1 year 2 mons 3 days 04:05:06.789	C	supported	unmet
+fields/6/-1 year -2 mons +3 days -04:05:06	C	supported	unmet
+fields/7/1 mon -30 days	C	supported	unmet
+fields/8/0	C	supported	unmet
+fields/9/-1 day	C	supported	unmet
+fields/10/00:00:00.000001	C	supported	unmet
+fields/11/-00:00:00.000001	C	supported	unmet
+fields/12/178956970 years 7 mons	C	supported	unmet
+fields/13/-178956970 years -8 mons	C	supported	unmet
+fields/14/2147483647 days	C	supported	unmet
+fields/15/2562047788:00:54.775807	C	supported	unmet
+fields/16/1.5 months	C	supported	unmet
+fields/17/-1 day +02:03:04.5	C	supported	unmet
+fields/18/14 months	C	supported	unmet
+fields/19/1 year -1 second	C	supported	unmet
+fields/20/infinity	A	refusal numeric-infinity	unmet
+fields/21/-infinity	A	refusal numeric-infinity	unmet
+fields/22/NULL	C	supported	unmet
+print/postgres	F	refusal bare-interval-result	unmet
+print/text/postgres	C	supported	unmet
+print/postgres_verbose	A	refusal intervalstyle	door
+print/text/postgres_verbose	A	refusal intervalstyle	door
+print/sql_standard	A	refusal intervalstyle	door
+print/text/sql_standard	A	refusal intervalstyle	door
+print/iso_8601	A	refusal intervalstyle	door
+print/text/iso_8601	A	refusal intervalstyle	door
+text/0/1 mon	C	supported	unmet
+text/1/30 days	C	supported	met
+text/2/720:00:00	C	supported	unmet
+text/3/36 hours	C	supported	met
+text/4/1 day 12:00:00	C	supported	unmet
+text/5/1 year 2 mons 3 days 04:05:06.789	C	supported	unmet
+text/6/-1 year -2 mons +3 days -04:05:06	C	supported	unmet
+text/7/1 mon -30 days	C	supported	unmet
+text/8/0	C	supported	met
+text/9/-1 day	C	supported	met
+text/10/00:00:00.000001	C	supported	unmet
+text/11/-00:00:00.000001	C	supported	unmet
+text/12/178956970 years 7 mons	C	supported	unmet
+text/13/-178956970 years -8 mons	C	supported	unmet
+text/14/2147483647 days	C	supported	met
+text/15/2562047788:00:54.775807	C	supported	unmet
+text/16/1.5 months	C	supported	unmet
+text/17/-1 day +02:03:04.5	C	supported	unmet
+text/18/14 months	C	supported	met
+text/19/1 year -1 second	C	supported	unmet
+text/20/infinity	C	supported	unmet
+text/21/-infinity	C	supported	unmet
+text/22/NULL	C	supported	met
+input/sqlstd/mixed	A	refusal intervalstyle	door
+input/postgres/mixed	C	supported	unmet
+print/dateStyleSQL	C	supported	unmet

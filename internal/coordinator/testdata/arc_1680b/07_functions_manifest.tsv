@@ -1,0 +1,95 @@
+# The stage manifest of section 07_functions (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet / door).
+extract/millennium	C	supported	unmet
+extract/century	C	supported	unmet
+extract/decade	C	supported	unmet
+extract/year	C	supported	unmet
+extract/quarter	C	supported	unmet
+extract/month	C	supported	unmet
+extract/week	C	pg-error 0A000	unmet
+extract/day	C	supported	unmet
+extract/hour	C	supported	unmet
+extract/minute	C	supported	unmet
+extract/second	C	supported	unmet
+extract/millisecond	C	supported	unmet
+extract/microsecond	C	supported	unmet
+extract/epoch	C	supported	unmet
+extract/dow	C	pg-error 0A000	unmet
+extract/doy	C	pg-error 0A000	unmet
+extract/isoyear	C	pg-error 0A000	unmet
+extract/julian	C	pg-error 0A000	unmet
+extract/timezone	C	pg-error 0A000	unmet
+extract/inf	A	refusal numeric-infinity	unmet
+extract/null	C	supported	unmet
+extract/bigEpoch	A	refusal numeric-infinity	unmet
+trunc/millennium	A	refusal function-date_trunc	unmet
+trunc/century	A	refusal function-date_trunc	unmet
+trunc/decade	A	refusal function-date_trunc	unmet
+trunc/year	A	refusal function-date_trunc	unmet
+trunc/quarter	A	refusal function-date_trunc	unmet
+trunc/month	A	refusal function-date_trunc	unmet
+trunc/week	A	refusal function-date_trunc	unmet
+trunc/day	A	refusal function-date_trunc	unmet
+trunc/hour	A	refusal function-date_trunc	unmet
+trunc/minute	A	refusal function-date_trunc	unmet
+trunc/second	A	refusal function-date_trunc	unmet
+trunc/milliseconds	A	refusal function-date_trunc	unmet
+trunc/microseconds	A	refusal function-date_trunc	unmet
+trunc/inf	A	refusal function-date_trunc	unmet
+trunc/bogus	A	refusal function-date_trunc	met
+bin/15min	C	supported	unmet
+bin/days	C	supported	unmet
+bin/month	C	pg-error 0A000	met
+bin/zero	C	pg-error 22008	unmet
+bin/neg	C	pg-error 22008	unmet
+bin/us	A	refusal timestamp-millisecond-carrier	unmet
+series/month	A	refusal function-generate_series	met
+series/mixed	A	refusal function-generate_series	unmet
+series/neg	A	refusal function-generate_series	met
+series/date	A	refusal function-generate_series	met
+series/zero	A	refusal function-generate_series	met
+series/zeroNormalized	A	refusal function-generate_series	unmet
+series/inf	A	refusal function-generate_series	unmet
+series/tzDst	A	refusal timestamptz	met
+tochar/hms	A	refusal function-to_char	unmet
+tochar/days	A	refusal function-to_char	unmet
+tochar/us	A	refusal function-to_char	unmet
+tochar/inf	A	refusal function-to_char	unmet
+inf/isfinite	C	supported	unmet
+inf/order	F	refusal bare-interval-result	unmet
+inf/fields	F	refusal bare-interval-result	unmet
+overlaps/interval	A	refusal function-overlaps	unmet
+overlaps/null	A	refusal function-overlaps	unmet
+frame/tsDay	E	refusal range-offset-frame	unmet
+frame/tsMonth	E	refusal range-offset-frame	unmet
+frame/tsFollowing	E	refusal range-offset-frame	unmet
+frame/interval	E	refusal range-offset-frame	unmet
+frame/negOffset	E	refusal range-offset-frame	unmet
+frame/date	E	refusal range-offset-frame	unmet
+widthBucket	E	pg-error 42883	unmet
+widthBucketArray	A	refusal container	unmet
+agg/all	F	refusal bare-interval-result	unmet
+agg/stringAgg	E	refusal ordered-aggregate	unmet
+agg/arrayAgg	A	refusal container	unmet
+agg/modeTie	E	refusal ordered-aggregate	unmet
+operand/eqInt	C	pg-error 42883	met
+operand/plusInt	C	pg-error 42883	met
+operand/plusNumeric	C	pg-error 42883	met
+operand/timesInterval	C	pg-error 42883	met
+operand/divInterval	C	pg-error 42883	met
+operand/numberDiv	C	pg-error 42883	met
+operand/mod	C	pg-error 42883	met
+operand/plusDate	C	supported	met
+operand/plusTime	A	refusal time-type	unmet
+operand/plusTimestamptz	A	refusal timestamptz	unmet
+operand/eqUnknown	C	supported	met
+operand/eqUnknownBad	C	pg-error 22007	met
+operand/timesUnknown	F	refusal bare-interval-result	met
+operand/concatText	C	supported	unmet
+operand/abs	C	pg-error 42883	unmet
+operand/greatestTs	C	pg-error 42804	met
+operand/coalesceText	C	pg-error 42804	met
+operand/eqText	C	pg-error 42883	met
+operand/eqTime	A	refusal time-type	unmet
+operand/minusFromDate	C	pg-error 42883	met
+operand/unaryPlus	C	pg-error 42883	unmet
+operand/castBool	C	pg-error 42846	met

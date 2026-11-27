@@ -1,0 +1,174 @@
+# #1680b interval corpus statements (arc_1680b_interval_corpus_cells_test.go). name<TAB>settings<TAB>kind<TAB>sql
+in/usMinUnit	-	sql	SELECT INTERVAL '-9223372036854775808 microseconds' AS a
+in/usMaxUnit	-	sql	SELECT INTERVAL '9223372036854775807 microseconds' AS a
+in/usOverUnit	-	sql	SELECT INTERVAL '9223372036854775808 microseconds' AS a
+in/usUnderUnit	-	sql	SELECT INTERVAL '-9223372036854775809 microseconds' AS a
+in/usMinUnitAgo	-	sql	SELECT INTERVAL '9223372036854775807 microseconds ago' AS a
+in/allMin	-	sql	SELECT INTERVAL '-2147483648 months -2147483648 days -9223372036854775808 microseconds' AS a
+in/allMinNear	-	sql	SELECT INTERVAL '-2147483648 months -2147483648 days -9223372036854775807 microseconds' AS a
+in/allMaxUnits	-	sql	SELECT INTERVAL '2147483647 months 2147483647 days 9223372036854775807 microseconds' AS a
+in/allMaxNear	-	sql	SELECT INTERVAL '2147483647 months 2147483647 days 9223372036854775806 microseconds' AS a
+in/allMinIsNegInf	-	sql	SELECT INTERVAL '-2147483648 months -2147483648 days -9223372036854775808 microseconds' = INTERVAL '-infinity' AS eq, isfinite(INTERVAL '-2147483648 months -2147483648 days -9223372036854775808 microseconds') AS fin, isfinite(INTERVAL '-2147483648 months -2147483648 days -9223372036854775807 microseconds') AS fin_near
+in/allMinCastText	-	sql	SELECT CAST('-2147483648 months -2147483648 days -9223372036854775808 microseconds' AS INTERVAL) AS a
+in/allMinMake	-	sql	SELECT make_interval(months => -2147483648, days => -2147483648) AS a
+frac/1.5us	-	sql	SELECT INTERVAL '00:00:00.0000015' AS a, INTERVAL '0.0000015 seconds' AS b
+frac/-1.5us	-	sql	SELECT INTERVAL '-00:00:00.0000015' AS a, INTERVAL '-0.0000015 seconds' AS b
+frac/2.5us	-	sql	SELECT INTERVAL '00:00:00.0000025' AS a, INTERVAL '0.0000025 seconds' AS b
+frac/3.5us	-	sql	SELECT INTERVAL '00:00:00.0000035' AS a, INTERVAL '0.0000035 seconds' AS b
+frac/0.5us	-	sql	SELECT INTERVAL '00:00:00.0000005' AS a, INTERVAL '0.0000005 seconds' AS b
+frac/clockNearSecond	-	sql	SELECT INTERVAL '00:00:01.4999995' AS a, INTERVAL '1.4999995 seconds' AS b
+frac/minuteUnit	-	sql	SELECT INTERVAL '0.0000000125 minutes' AS a, INTERVAL '00:00:00.00000075' AS b
+frac/years1	-	sql	SELECT INTERVAL '0.125 years' AS a, INTERVAL '0.375 years' AS b
+frac/years2	-	sql	SELECT INTERVAL '-0.125 years' AS a, INTERVAL '0.04 years' AS b
+frac/decade	-	sql	SELECT INTERVAL '0.0125 decades' AS a, INTERVAL '0.00125 centuries' AS b
+frac/months	-	sql	SELECT INTERVAL '0.5 months' AS a, INTERVAL '-0.0333333 months' AS b
+frac/weeks1	-	sql	SELECT INTERVAL '1.5 weeks' AS a, INTERVAL '0.1 weeks' AS b
+frac/weeks2	-	sql	SELECT INTERVAL '-0.5 weeks' AS a, INTERVAL '1 week 0.5 days' AS b
+ago/P1D ago	-	sql	SELECT INTERVAL 'P1D ago' AS a
+ago/P1Y2M ago	-	sql	SELECT INTERVAL 'P1Y2M ago' AS a
+ago/infinity ago	-	sql	SELECT INTERVAL 'infinity ago' AS a
+ago/-infinity ago	-	sql	SELECT INTERVAL '-infinity ago' AS a
+ago/1 day 02:00:00 ago	-	sql	SELECT INTERVAL '1 day 02:00:00 ago' AS a
+ago/1-2 ago	-	sql	SELECT INTERVAL '1-2 ago' AS a
+ago/3 4:05:06 ago	-	sql	SELECT INTERVAL '3 4:05:06 ago' AS a
+ago/-1 day +02:00:00 ago	-	sql	SELECT INTERVAL '-1 day +02:00:00 ago' AS a
+ago/1 day ago ago	-	sql	SELECT INTERVAL '1 day ago ago' AS a
+ago/ago	-	sql	SELECT INTERVAL 'ago' AS a
+ago/2147483647 days ago	-	sql	SELECT INTERVAL '2147483647 days ago' AS a
+ago/-2147483648 days ago	-	sql	SELECT INTERVAL '-2147483648 days ago' AS a
+ago/-2147483648 months ago	-	sql	SELECT INTERVAL '-2147483648 months ago' AS a
+ago/@ 1 mon ago	-	sql	SELECT INTERVAL '@ 1 mon ago' AS a
+typmod/bareHM	-	sql	SELECT INTERVAL '1:30' AS a
+typmod/hm	-	sql	SELECT INTERVAL '1:30' HOUR TO MINUTE AS a
+typmod/ms	-	sql	SELECT INTERVAL '1:30' MINUTE TO SECOND AS a
+typmod/dm	-	sql	SELECT INTERVAL '1:30' DAY TO MINUTE AS a
+typmod/bareNumber	-	sql	SELECT INTERVAL '90' AS a
+typmod/minute	-	sql	SELECT INTERVAL '90' MINUTE AS a
+typmod/dayToHour	-	sql	SELECT INTERVAL '2' DAY TO HOUR AS a
+typmod/yearToMonth	-	sql	SELECT INTERVAL '2' YEAR TO MONTH AS a
+typmod/hourFrac	-	sql	SELECT INTERVAL '1.5' HOUR TO MINUTE AS a
+typmod/secondTyp5	-	sql	SELECT INTERVAL '5' MINUTE TO SECOND AS a
+typmod/prec7	-	sql	SELECT CAST(INTERVAL '1.1234567 seconds' AS INTERVAL(7)) AS a
+typmod/prec7Literal	-	sql	SELECT INTERVAL(7) '1.1234567 seconds' AS a
+typmod/prec7Half	-	sql	SELECT CAST(INTERVAL '0.0000015 seconds' AS INTERVAL(7)) AS a, CAST(INTERVAL '00:00:00.0000015' AS INTERVAL(7)) AS b
+ar/mulMixed	-	sql	SELECT INTERVAL '1 mon -1 day' * 1.5 AS a
+ar/divMixed2	-	sql	SELECT INTERVAL '1 mon -1 day' / 2 AS a
+ar/divMixed3	-	sql	SELECT INTERVAL '1 mon -1 day' / 3 AS a, INTERVAL '-1 mon 1 day' / 1.5 AS b
+ar/mulCarry	-	sql	SELECT INTERVAL '1 mon 1 day' * 0.75 AS a, INTERVAL '1 mon 1 day' / (4.0 / 3.0) AS b
+ar/infFactorZeroSign	-	sql	SELECT INTERVAL '1 mon -30 days' * CAST('Infinity' AS DOUBLE PRECISION) AS a
+ar/infFactorNegSign	-	sql	SELECT INTERVAL '1 mon -31 days' * CAST('Infinity' AS DOUBLE PRECISION) AS a
+ar/infFactorPosSign	-	sql	SELECT INTERVAL '-1 mon 31 days' * CAST('Infinity' AS DOUBLE PRECISION) AS a
+ar/negInfFactorNegSign	-	sql	SELECT INTERVAL '1 mon -31 days' * CAST('-Infinity' AS DOUBLE PRECISION) AS a
+ar/infDivFiniteSign	-	sql	SELECT INTERVAL '1 mon -31 days' / CAST('Infinity' AS DOUBLE PRECISION) AS a
+ar/divRecipMonths	-	sql	SELECT INTERVAL '49 mons' / 49 AS a, INTERVAL '49 mons' * (CAST(1 AS DOUBLE PRECISION) / 49) AS b
+ar/divRecipDays	-	sql	SELECT INTERVAL '49 days' / 49 AS a, INTERVAL '49 days' * (CAST(1 AS DOUBLE PRECISION) / 49) AS b
+ar/divRecipJudge	-	sql	SELECT INTERVAL '9007199254740993 microseconds' / 3 AS a, INTERVAL '9007199254740993 microseconds' * (CAST(1 AS DOUBLE PRECISION) / 3) AS b
+justify/bigDays24h	-	sql	SELECT justify_interval(INTERVAL '2147483647 days 24 hours') AS i
+justify/bigDays24h/hoursOfDays	-	sql	SELECT justify_hours(justify_days(INTERVAL '2147483647 days 24 hours')) AS hd
+justify/bigDays24h/daysOfHours	-	sql	SELECT justify_days(justify_hours(INTERVAL '2147483647 days 24 hours')) AS dh
+justify/negBigDays24h	-	sql	SELECT justify_interval(INTERVAL '-2147483648 days -24 hours') AS i
+justify/negBigDays24h/hoursOfDays	-	sql	SELECT justify_hours(justify_days(INTERVAL '-2147483648 days -24 hours')) AS hd
+justify/negBigDays24h/daysOfHours	-	sql	SELECT justify_days(justify_hours(INTERVAL '-2147483648 days -24 hours')) AS dh
+justify/monMinus25h	-	sql	SELECT justify_interval(INTERVAL '1 mon -25 hours') AS i
+justify/monMinus25h/hoursOfDays	-	sql	SELECT justify_hours(justify_days(INTERVAL '1 mon -25 hours')) AS hd
+justify/monMinus25h/daysOfHours	-	sql	SELECT justify_days(justify_hours(INTERVAL '1 mon -25 hours')) AS dh
+justify/negMonPlus25h	-	sql	SELECT justify_interval(INTERVAL '-1 mon 25 hours') AS i
+justify/negMonPlus25h/hoursOfDays	-	sql	SELECT justify_hours(justify_days(INTERVAL '-1 mon 25 hours')) AS hd
+justify/negMonPlus25h/daysOfHours	-	sql	SELECT justify_days(justify_hours(INTERVAL '-1 mon 25 hours')) AS dh
+infop/tsInfPlusNegInf	-	sql	SELECT TIMESTAMP 'infinity' + INTERVAL '-infinity' AS a
+infop/tsNegInfPlusInf	-	sql	SELECT TIMESTAMP '-infinity' + INTERVAL 'infinity' AS a
+infop/tsNegInfMinusNegInf	-	sql	SELECT TIMESTAMP '-infinity' - INTERVAL '-infinity' AS a
+infop/tsNegInfMinusInf	-	sql	SELECT TIMESTAMP '-infinity' - INTERVAL 'infinity' AS a
+infop/tsInfPlusFinite	-	sql	SELECT TIMESTAMP 'infinity' + INTERVAL '-1 day' AS a
+infop/dateInfPlusNegInf	-	sql	SELECT DATE 'infinity' + INTERVAL '-infinity' AS a
+infop/dateFinitePlusInf	-	sql	SELECT DATE '2024-01-01' + INTERVAL 'infinity' AS a
+infop/ivInfMinusNegInf	-	sql	SELECT INTERVAL 'infinity' - INTERVAL '-infinity' AS a
+epoch/yearVs360	-	sql	SELECT extract(epoch FROM INTERVAL '1 year') AS y, extract(epoch FROM INTERVAL '360 days') AS d, INTERVAL '1 year' = INTERVAL '360 days' AS eq, extract(epoch FROM INTERVAL '12 mons') AS m12, extract(epoch FROM INTERVAL '13 mons') AS m13, extract(epoch FROM INTERVAL '1 mon') AS m1, extract(epoch FROM INTERVAL '-13 mons') AS mneg
+epoch/yearVs360Float	-	sql	SELECT date_part('epoch', INTERVAL '1 year') AS y, date_part('epoch', INTERVAL '360 days') AS d
+epoch/bigFinite	-	sql	SELECT extract(epoch FROM INTERVAL '2147483647 months 2147483647 days 9223372036854775806 microseconds') AS e, date_part('epoch', INTERVAL '2147483647 months 2147483647 days 9223372036854775806 microseconds') AS p
+epoch/bigFiniteNeg	-	sql	SELECT extract(epoch FROM INTERVAL '-2147483648 months -2147483648 days -9223372036854775807 microseconds') AS e
+epoch/negInf	-	sql	SELECT extract(epoch FROM INTERVAL '-infinity') AS e, date_part('epoch', INTERVAL '-infinity') AS p
+sentinel/minusToNegInf	-	sql	SELECT INTERVAL '-2147483648 months -2147483648 days -9223372036854775807 microseconds' - INTERVAL '00:00:00.000001' AS a
+sentinel/plusToNegInf	-	sql	SELECT INTERVAL '-2147483648 months -2147483648 days' + INTERVAL '-9223372036854775808 microseconds' AS a
+sentinel/sumToNegInf	-	sql	SELECT sum(v) AS s FROM (VALUES (INTERVAL '-2147483648 months -2147483648 days'), (INTERVAL '-9223372036854775808 microseconds')) t(v)
+sentinel/negOfNearMax	-	sql	SELECT -INTERVAL '2147483647 months 2147483647 days 9223372036854775806 microseconds' AS a
+sentinel/negOfNearMin	-	sql	SELECT -INTERVAL '-2147483648 months -2147483647 days -9223372036854775807 microseconds' AS a
+sentinel/negOfInfinityTriple	-	sql	SELECT -INTERVAL '2147483647 months 2147483647 days 9223372036854775807 microseconds' AS a
+sentinel/mulNegInfinityTriple	-	sql	SELECT INTERVAL '-2147483648 months -2147483648 days -9223372036854775808 microseconds' * 1 AS a
+age/borrow	-	sql	SELECT age(TIMESTAMP '2023-03-01', TIMESTAMP '2023-01-31') AS a, age(TIMESTAMP '2023-01-31', TIMESTAMP '2023-03-01') AS b, age(TIMESTAMP '2024-03-01', TIMESTAMP '2024-02-15') AS c, age(TIMESTAMP '2024-02-15', TIMESTAMP '2024-03-01') AS d, age(TIMESTAMP '2024-03-15', TIMESTAMP '2024-01-31') AS e
+age/timeBorrow	-	sql	SELECT age(TIMESTAMP '2024-03-01 00:00:00', TIMESTAMP '2024-02-29 23:00:00') AS a, age(TIMESTAMP '2024-02-29 23:00:00', TIMESTAMP '2024-03-01 00:00:00') AS b, age(TIMESTAMP '2024-01-01 00:00:00', TIMESTAMP '2023-12-31 23:59:59.999999') AS c
+age/null	-	sql	SELECT age(CAST(NULL AS TIMESTAMP), TIMESTAMP '2024-01-01') AS a, age(TIMESTAMP '2024-01-01', CAST(NULL AS TIMESTAMP)) AS b
+age/infLeft	-	sql	SELECT age(TIMESTAMP 'infinity', TIMESTAMP '2024-01-01') AS a, age(TIMESTAMP '-infinity', TIMESTAMP '2024-01-01') AS b
+age/infRight	-	sql	SELECT age(TIMESTAMP '2024-01-01', TIMESTAMP 'infinity') AS a, age(TIMESTAMP '2024-01-01', TIMESTAMP '-infinity') AS b
+age/infOpposed	-	sql	SELECT age(TIMESTAMP 'infinity', TIMESTAMP '-infinity') AS a, age(TIMESTAMP '-infinity', TIMESTAMP 'infinity') AS b
+age/infInf	-	sql	SELECT age(TIMESTAMP 'infinity', TIMESTAMP 'infinity') AS a
+age/negInfNegInf	-	sql	SELECT age(TIMESTAMP '-infinity', TIMESTAMP '-infinity') AS a
+age/bc	-	sql	SELECT age(TIMESTAMP '0001-03-01 BC', TIMESTAMP '0001-01-31') AS a, age(TIMESTAMP '0001-01-01', TIMESTAMP '0001-12-31 BC') AS b
+age/date	-	sql	SELECT age(DATE '2024-03-01', DATE '2024-01-31') AS a
+age/dateNY	TimeZone=America/New_York	sql	SELECT age(DATE '2024-03-11', DATE '2024-03-09') AS a
+age/tz/UTC/fallBack	TimeZone=UTC	sql	SELECT age(TIMESTAMPTZ '2024-11-03 12:00:00-05', TIMESTAMPTZ '2024-11-02 12:00:00-04') AS a, age(TIMESTAMPTZ '2024-11-02 12:00:00-04', TIMESTAMPTZ '2024-11-03 12:00:00-05') AS b
+age/tz/America/New_York/fallBack	TimeZone=America/New_York	sql	SELECT age(TIMESTAMPTZ '2024-11-03 12:00:00-05', TIMESTAMPTZ '2024-11-02 12:00:00-04') AS a, age(TIMESTAMPTZ '2024-11-02 12:00:00-04', TIMESTAMPTZ '2024-11-03 12:00:00-05') AS b
+types/datePlusInt	-	sql	SELECT DATE '2024-01-31' + 1 AS a
+types/dateMinusInt	-	sql	SELECT DATE '2024-01-31' - 1 AS a
+types/intPlusDate	-	sql	SELECT 1 + DATE '2024-01-31' AS a
+types/dateMinusDate	-	sql	SELECT DATE '2024-03-01' - DATE '2024-01-31' AS a
+types/datePlusInterval	-	sql	SELECT DATE '2024-01-31' + INTERVAL '1 mon' AS a
+types/dateMinusInterval	-	sql	SELECT DATE '2024-01-31' - INTERVAL '1 day' AS a
+types/intervalPlusDate	-	sql	SELECT INTERVAL '1 day' + DATE '2024-01-31' AS a
+types/intervalMinusDate	-	sql	SELECT INTERVAL '1 day' - DATE '2024-01-31' AS a
+types/datePlusTime	-	sql	SELECT DATE '2024-01-31' + TIME '01:02:03' AS a
+types/dateMinusTime	-	sql	SELECT DATE '2024-01-31' - TIME '01:02:03' AS a
+types/tsMinusTs	-	sql	SELECT TIMESTAMP '2024-01-02 01:00:00' - TIMESTAMP '2024-01-01 00:00:00' AS a
+types/tsMinusDate	-	sql	SELECT TIMESTAMP '2024-01-02 01:00:00' - DATE '2024-01-01' AS a
+types/dateMinusTs	-	sql	SELECT DATE '2024-01-01' - TIMESTAMP '2024-01-02 01:00:00' AS a
+types/tsPlusInterval	-	sql	SELECT TIMESTAMP '2024-01-31 00:00:00' + INTERVAL '1 mon' AS a
+types/intervalPlusTs	-	sql	SELECT INTERVAL '1 mon' + TIMESTAMP '2024-01-31 00:00:00' AS a
+types/tsMinusInterval	-	sql	SELECT TIMESTAMP '2024-01-31 00:00:00' - INTERVAL '1 mon' AS a
+types/intervalMinusTs	-	sql	SELECT INTERVAL '1 mon' - TIMESTAMP '2024-01-31 00:00:00' AS a
+types/tsPlusTs	-	sql	SELECT TIMESTAMP '2024-01-31 00:00:00' + TIMESTAMP '2024-01-31 00:00:00' AS a
+types/datePlusDate	-	sql	SELECT DATE '2024-01-31' + DATE '2024-01-31' AS a
+types/dateTimesInt	-	sql	SELECT DATE '2024-01-31' * 2 AS a
+types/tsPlusInt	-	sql	SELECT TIMESTAMP '2024-01-31 00:00:00' + 1 AS a
+types/timeMinusTime	-	sql	SELECT TIME '01:00:00' - TIME '23:00:00' AS a
+types/timePlusInterval	-	sql	SELECT TIME '23:00:00' + INTERVAL '2 hours' AS a
+types/intervalPlusTime	-	sql	SELECT INTERVAL '2 hours' + TIME '23:00:00' AS a
+types/timeMinusInterval	-	sql	SELECT TIME '01:00:00' - INTERVAL '2 hours' AS a
+types/tstzMinusTstz	-	sql	SELECT TIMESTAMPTZ '2024-01-02 00:00:00+00' - TIMESTAMPTZ '2024-01-01 00:00:00+00' AS a
+types/tstzMinusTs	-	sql	SELECT TIMESTAMPTZ '2024-01-02 00:00:00+00' - TIMESTAMP '2024-01-01 00:00:00' AS a
+types/tstzPlusInterval	-	sql	SELECT TIMESTAMPTZ '2024-01-02 00:00:00+00' + INTERVAL '1 day' AS a
+types/intervalTimesInt	-	sql	SELECT INTERVAL '1 day' * 2 AS a
+types/intTimesInterval	-	sql	SELECT 2 * INTERVAL '1 day' AS a
+types/intervalDivInt	-	sql	SELECT INTERVAL '1 day' / 2 AS a
+types/negInterval	-	sql	SELECT -INTERVAL '1 day' AS a
+closure/tsMinusDate	-	sql	SELECT TIMESTAMP '2024-01-02 01:00' - DATE '2024-01-01' AS a
+closure/dateMinusTs	-	sql	SELECT DATE '2024-01-01' - TIMESTAMP '2024-01-02 01:00' AS a
+closure/coalesceText	-	sql	SELECT CAST(COALESCE(CAST(NULL AS INTERVAL), '1 mon') AS TEXT) AS a
+closure/coalesce	-	sql	SELECT COALESCE(CAST(NULL AS INTERVAL), '1 mon') AS a
+closure/caseText	-	sql	SELECT CAST(CASE WHEN true THEN INTERVAL '1 mon' ELSE '30 days' END AS TEXT) AS a
+closure/case	-	sql	SELECT CASE WHEN true THEN INTERVAL '1 mon' ELSE '30 days' END AS a
+closure/nullifText	-	sql	SELECT CAST(NULLIF(INTERVAL '1 mon', INTERVAL '30 days') AS TEXT) AS a
+closure/nullif	-	sql	SELECT NULLIF(INTERVAL '1 mon', INTERVAL '30 days') AS a, NULLIF(INTERVAL '1 mon', INTERVAL '31 days') AS b
+closure/unionNull	-	sql	SELECT CAST(x AS TEXT) AS t FROM (SELECT CAST(NULL AS INTERVAL) AS x UNION ALL SELECT INTERVAL '1 day') q ORDER BY t NULLS FIRST
+closure/whereFalse	-	sql	SELECT x FROM (SELECT CAST(NULL AS INTERVAL) AS x) q WHERE false
+closure/whereFalseText	-	sql	SELECT CAST(x AS TEXT) AS t FROM (SELECT CAST(NULL AS INTERVAL) AS x) q WHERE false
+closure/greatestMixed	-	sql	SELECT CAST(GREATEST(INTERVAL '1 mon', '30 days', NULL) AS TEXT) AS a, CAST(LEAST(INTERVAL '30 days', '1 mon') AS TEXT) AS b
+dst/gapTarget	TimeZone=America/New_York	sql	SELECT TIMESTAMPTZ '2024-03-09 02:30:00' + INTERVAL '1 day' AS a
+dst/foldTarget	TimeZone=America/New_York	sql	SELECT TIMESTAMPTZ '2024-11-02 01:30:00' + INTERVAL '1 day' AS a
+dst/foldMinus	TimeZone=America/New_York	sql	SELECT TIMESTAMPTZ '2024-11-04 01:30:00' - INTERVAL '1 day' AS a
+dst/gapInput	TimeZone=America/New_York	sql	SELECT TIMESTAMPTZ '2024-03-10 02:30:00' AS a
+dst/monthIntoGap	TimeZone=America/New_York	sql	SELECT TIMESTAMPTZ '2024-02-10 02:30:00' + INTERVAL '1 mon' AS a
+dst/hoursAcrossFold	TimeZone=America/New_York	sql	SELECT TIMESTAMPTZ '2024-11-03 00:30:00' + INTERVAL '1 hour' AS a, TIMESTAMPTZ '2024-11-03 00:30:00' + INTERVAL '2 hours' AS b
+dst/dateAddZone	TimeZone=UTC	sql	SELECT date_add(TIMESTAMPTZ '2024-03-09 02:30:00-05', INTERVAL '1 day', 'America/New_York') AS a, date_subtract(TIMESTAMPTZ '2024-11-04 01:30:00-05', INTERVAL '1 day', 'America/New_York') AS b
+dst/seriesZone	TimeZone=UTC	sql	SELECT g FROM generate_series(TIMESTAMPTZ '2024-11-02 01:30:00-04', TIMESTAMPTZ '2024-11-04 01:30:00-05', INTERVAL '1 day', 'America/New_York') AS t(g) ORDER BY g
+dst/seriesNoZone	TimeZone=America/New_York	sql	SELECT g FROM generate_series(TIMESTAMPTZ '2024-03-09 02:30:00', TIMESTAMPTZ '2024-03-11 02:30:00', INTERVAL '1 day') AS t(g) ORDER BY g
+fn/binInfStride	-	sql	SELECT date_bin(INTERVAL 'infinity', TIMESTAMP '2024-01-01 10:00:00', TIMESTAMP '2024-01-01 00:00:00') AS a
+fn/binInfSource	-	sql	SELECT date_bin(INTERVAL '1 hour', TIMESTAMP 'infinity', TIMESTAMP '2024-01-01 00:00:00') AS a
+fn/binDaysStride	-	sql	SELECT date_bin(INTERVAL '1 day 1 hour', TIMESTAMP '2024-01-03 00:00:00', TIMESTAMP '2024-01-01 00:00:00') AS a
+fn/binBeforeOrigin	-	sql	SELECT date_bin(INTERVAL '1 hour', TIMESTAMP '2023-12-31 22:30:00', TIMESTAMP '2024-01-01 00:00:00') AS a
+fn/truncMixedSign	-	sql	SELECT date_trunc('day', INTERVAL '1 mon -1 day 02:00:00') AS a, date_trunc('month', INTERVAL '-1 year 1 mon') AS b
+fn/tocharNeg	-	sql	SELECT to_char(INTERVAL '-1 day -02:03:04', 'DD HH24:MI:SS') AS a, to_char(INTERVAL '1 mon 2 days', 'MM DD') AS b
+fn/overlapsNegEnd	-	sql	SELECT (TIMESTAMP '2024-01-02 00:00:00', INTERVAL '-1 day') OVERLAPS (TIMESTAMP '2024-01-01 12:00:00', INTERVAL '1 hour') AS a
+fn/overlapsInf	-	sql	SELECT (TIMESTAMP '2024-01-01 00:00:00', INTERVAL 'infinity') OVERLAPS (TIMESTAMP '9999-01-01 00:00:00', INTERVAL '1 hour') AS a
+fn/seriesTsMonthEnd	-	sql	SELECT g FROM generate_series(TIMESTAMP '2024-01-31 00:00:00', TIMESTAMP '2024-04-30 00:00:00', INTERVAL '1 mon') AS t(g) ORDER BY g
+fn/seriesNegStepWrongWay	-	sql	SELECT count(*) AS n FROM generate_series(TIMESTAMP '2024-01-01 00:00:00', TIMESTAMP '2024-01-02 00:00:00', INTERVAL '-1 hour')
+fn/widthBucketNumeric	-	sql	SELECT width_bucket(extract(epoch FROM INTERVAL '5 days'), 0, 864000, 2) AS a

@@ -1,0 +1,78 @@
+# #1680b interval corpus statements (arc_1680b_interval_corpus_cells_test.go). name<TAB>settings<TAB>kind<TAB>sql
+plus/fields~text	-	sql	SELECT CAST(INTERVAL '1 mon 2 days 03:00:00' + INTERVAL '1 year 1 day 23:00:00' AS TEXT) AS a, CAST(INTERVAL '1 mon' + INTERVAL '-30 days' AS TEXT) AS b
+plus/noCarry~text	-	sql	SELECT CAST(INTERVAL '20 hours' + INTERVAL '20 hours' AS TEXT) AS a, CAST(INTERVAL '25 days' + INTERVAL '10 days' AS TEXT) AS b
+plus/subsec~text	-	sql	SELECT CAST(INTERVAL '00:00:00.000001' + INTERVAL '00:00:00.999999' AS TEXT) AS a, CAST(INTERVAL '-00:00:00.000001' + INTERVAL '0' AS TEXT) AS b
+minus/fields~text	-	sql	SELECT CAST(INTERVAL '1 mon' - INTERVAL '1 day' AS TEXT) AS a, CAST(INTERVAL '1 day' - INTERVAL '25 hours' AS TEXT) AS b
+minus/zero~text	-	sql	SELECT CAST(INTERVAL '1 mon' - INTERVAL '30 days' AS TEXT) AS a, (INTERVAL '1 mon' - INTERVAL '30 days') = INTERVAL '0' AS b
+plus/null~text	-	sql	SELECT CAST(INTERVAL '1 day' + CAST(NULL AS INTERVAL) AS TEXT) AS a, CAST(CAST(NULL AS INTERVAL) - INTERVAL '1 day' AS TEXT) AS b
+plus/inf~text	-	sql	SELECT CAST(INTERVAL 'infinity' + INTERVAL '1 day' AS TEXT) AS a, CAST(INTERVAL '-infinity' - INTERVAL '1 day' AS TEXT) AS b, CAST(INTERVAL 'infinity' + INTERVAL 'infinity' AS TEXT) AS c
+neg/basic~text	-	sql	SELECT CAST(-INTERVAL '1 year -2 mons 3 days -04:05:06' AS TEXT) AS a, CAST(-INTERVAL '0' AS TEXT) AS b
+neg/inf~text	-	sql	SELECT CAST(-INTERVAL 'infinity' AS TEXT) AS a, CAST(-INTERVAL '-infinity' AS TEXT) AS b
+neg/minTimeBuiltAlone~text	-	sql	SELECT CAST(INTERVAL '-2562047788:00:54.775807' - INTERVAL '00:00:00.000001' AS TEXT) AS a
+mul/int~text	-	sql	SELECT CAST(INTERVAL '1 mon 1 day 01:00:00' * 3 AS TEXT) AS a, CAST(INTERVAL '1 mon 1 day 01:00:00' * 3 AS TEXT) AS t
+mul/zero~text	-	sql	SELECT CAST(INTERVAL '1 mon 1 day 01:00:00' * 0 AS TEXT) AS a, CAST(INTERVAL '1 mon 1 day 01:00:00' * 0 AS TEXT) AS t
+mul/neg~text	-	sql	SELECT CAST(INTERVAL '1 mon 1 day 01:00:00' * -2 AS TEXT) AS a, CAST(INTERVAL '1 mon 1 day 01:00:00' * -2 AS TEXT) AS t
+mul/halfMonth~text	-	sql	SELECT CAST(INTERVAL '1 mon' * 0.5 AS TEXT) AS a, CAST(INTERVAL '1 mon' * 0.5 AS TEXT) AS t
+mul/thirdMonth~text	-	sql	SELECT CAST(INTERVAL '1 mon' * 0.333333 AS TEXT) AS a, CAST(INTERVAL '1 mon' * 0.333333 AS TEXT) AS t
+mul/monthCascade~text	-	sql	SELECT CAST(INTERVAL '7 mons' * 0.3 AS TEXT) AS a, CAST(INTERVAL '7 mons' * 0.3 AS TEXT) AS t
+mul/monthToTime~text	-	sql	SELECT CAST(INTERVAL '1 mon' * 0.1 AS TEXT) AS a, CAST(INTERVAL '1 mon' * 0.1 AS TEXT) AS t
+mul/dayFrac~text	-	sql	SELECT CAST(INTERVAL '1 day' * 1.5 AS TEXT) AS a, CAST(INTERVAL '1 day' * 1.5 AS TEXT) AS t
+mul/dayCascade~text	-	sql	SELECT CAST(INTERVAL '5 days' * 0.3 AS TEXT) AS a, CAST(INTERVAL '5 days' * 0.3 AS TEXT) AS t
+mul/yearFrac~text	-	sql	SELECT CAST(INTERVAL '1 year' * 1.1 AS TEXT) AS a, CAST(INTERVAL '1 year' * 1.1 AS TEXT) AS t
+mul/mixedSign~text	-	sql	SELECT CAST(INTERVAL '1 mon -1 day' * 1.5 AS TEXT) AS a, CAST(INTERVAL '1 mon -1 day' * 1.5 AS TEXT) AS t
+mul/negFrac~text	-	sql	SELECT CAST(INTERVAL '-1 mon' * 1.5 AS TEXT) AS a, CAST(INTERVAL '-1 mon' * 1.5 AS TEXT) AS t
+mul/timeOver24~text	-	sql	SELECT CAST(INTERVAL '20:00:00' * 2 AS TEXT) AS a, CAST(INTERVAL '20:00:00' * 2 AS TEXT) AS t
+mul/usHalfEven1~text	-	sql	SELECT CAST(INTERVAL '00:00:00.000001' * 1.5 AS TEXT) AS a, CAST(INTERVAL '00:00:00.000001' * 1.5 AS TEXT) AS t
+mul/usHalfEven2~text	-	sql	SELECT CAST(INTERVAL '00:00:00.000001' * 2.5 AS TEXT) AS a, CAST(INTERVAL '00:00:00.000001' * 2.5 AS TEXT) AS t
+mul/usHalfEven3~text	-	sql	SELECT CAST(INTERVAL '00:00:00.000001' * 0.5 AS TEXT) AS a, CAST(INTERVAL '00:00:00.000001' * 0.5 AS TEXT) AS t
+mul/usNeg~text	-	sql	SELECT CAST(INTERVAL '-00:00:00.000001' * 1.5 AS TEXT) AS a, CAST(INTERVAL '-00:00:00.000001' * 1.5 AS TEXT) AS t
+mul/tinyMonth~text	-	sql	SELECT CAST(INTERVAL '1 mon' * 0.0000001 AS TEXT) AS a, CAST(INTERVAL '1 mon' * 0.0000001 AS TEXT) AS t
+mul/float8~text	-	sql	SELECT CAST(INTERVAL '1 day' * CAST(2.5 AS DOUBLE PRECISION) AS TEXT) AS a, CAST(INTERVAL '1 day' * CAST(2.5 AS DOUBLE PRECISION) AS TEXT) AS t
+mul/real~text	-	sql	SELECT CAST(INTERVAL '1 day' * CAST(0.1 AS REAL) AS TEXT) AS a, CAST(INTERVAL '1 day' * CAST(0.1 AS REAL) AS TEXT) AS t
+mul/bigint~text	-	sql	SELECT CAST(INTERVAL '1 day' * CAST(3 AS BIGINT) AS TEXT) AS a, CAST(INTERVAL '1 day' * CAST(3 AS BIGINT) AS TEXT) AS t
+mul/numeric~text	-	sql	SELECT CAST(INTERVAL '1 day' * CAST(1.25 AS NUMERIC) AS TEXT) AS a, CAST(INTERVAL '1 day' * CAST(1.25 AS NUMERIC) AS TEXT) AS t
+mul/unknown~text	-	sql	SELECT CAST(INTERVAL '1 day' * '2' AS TEXT) AS a, CAST(INTERVAL '1 day' * '2' AS TEXT) AS t
+mul/null~text	-	sql	SELECT CAST(INTERVAL '1 day' * NULL AS TEXT) AS a, CAST(INTERVAL '1 day' * NULL AS TEXT) AS t
+mul/infFactor~text	-	sql	SELECT CAST(INTERVAL '1 day' * CAST('Infinity' AS DOUBLE PRECISION) AS TEXT) AS a, CAST(INTERVAL '1 day' * CAST('Infinity' AS DOUBLE PRECISION) AS TEXT) AS t
+mul/negInfFactor~text	-	sql	SELECT CAST(INTERVAL '1 day' * CAST('-Infinity' AS DOUBLE PRECISION) AS TEXT) AS a, CAST(INTERVAL '1 day' * CAST('-Infinity' AS DOUBLE PRECISION) AS TEXT) AS t
+mul/infTimesNeg~text	-	sql	SELECT CAST(INTERVAL 'infinity' * -1 AS TEXT) AS a, CAST(INTERVAL 'infinity' * -1 AS TEXT) AS t
+mul/commuted~text	-	sql	SELECT CAST(2 * INTERVAL '1 mon 1 day' AS TEXT) AS a, CAST(0.5 * INTERVAL '1 mon' AS TEXT) AS b
+div/int~text	-	sql	SELECT CAST(INTERVAL '1 mon 1 day 01:00:00' / 2 AS TEXT) AS a, CAST(INTERVAL '1 mon 1 day 01:00:00' / 2 AS TEXT) AS t
+div/thirdMonth~text	-	sql	SELECT CAST(INTERVAL '1 mon' / 3 AS TEXT) AS a, CAST(INTERVAL '1 mon' / 3 AS TEXT) AS t
+div/thirdDay~text	-	sql	SELECT CAST(INTERVAL '1 day' / 3 AS TEXT) AS a, CAST(INTERVAL '1 day' / 3 AS TEXT) AS t
+div/monthCascade~text	-	sql	SELECT CAST(INTERVAL '3 mons' / 2 AS TEXT) AS a, CAST(INTERVAL '3 mons' / 2 AS TEXT) AS t
+div/yearBy7~text	-	sql	SELECT CAST(INTERVAL '1 year' / 7 AS TEXT) AS a, CAST(INTERVAL '1 year' / 7 AS TEXT) AS t
+div/neg~text	-	sql	SELECT CAST(INTERVAL '3 days' / -2 AS TEXT) AS a, CAST(INTERVAL '3 days' / -2 AS TEXT) AS t
+div/frac~text	-	sql	SELECT CAST(INTERVAL '1 day' / 1.5 AS TEXT) AS a, CAST(INTERVAL '1 day' / 1.5 AS TEXT) AS t
+div/half~text	-	sql	SELECT CAST(INTERVAL '1 day' / 0.5 AS TEXT) AS a, CAST(INTERVAL '1 day' / 0.5 AS TEXT) AS t
+div/us~text	-	sql	SELECT CAST(INTERVAL '00:00:00.000001' / 2 AS TEXT) AS a, CAST(INTERVAL '00:00:00.000001' / 2 AS TEXT) AS t
+div/us3~text	-	sql	SELECT CAST(INTERVAL '00:00:00.000003' / 2 AS TEXT) AS a, CAST(INTERVAL '00:00:00.000003' / 2 AS TEXT) AS t
+div/usNeg~text	-	sql	SELECT CAST(INTERVAL '-00:00:00.000001' / 2 AS TEXT) AS a, CAST(INTERVAL '-00:00:00.000001' / 2 AS TEXT) AS t
+div/infDivisor~text	-	sql	SELECT CAST(INTERVAL '1 day' / CAST('Infinity' AS DOUBLE PRECISION) AS TEXT) AS a, CAST(INTERVAL '1 day' / CAST('Infinity' AS DOUBLE PRECISION) AS TEXT) AS t
+div/infDividend~text	-	sql	SELECT CAST(INTERVAL 'infinity' / 2 AS TEXT) AS a, CAST(INTERVAL 'infinity' / 2 AS TEXT) AS t
+div/unknown~text	-	sql	SELECT CAST(INTERVAL '1 day' / '2' AS TEXT) AS a, CAST(INTERVAL '1 day' / '2' AS TEXT) AS t
+div/null~text	-	sql	SELECT CAST(INTERVAL '1 day' / NULL AS TEXT) AS a, CAST(INTERVAL '1 day' / NULL AS TEXT) AS t
+div/roundTrip~text	-	sql	SELECT CAST((INTERVAL '1 mon' / 3) * 3 AS TEXT) AS a, (INTERVAL '1 mon' / 3) * 3 = INTERVAL '1 mon' AS b, CAST((INTERVAL '1 day' / 7) * 7 AS TEXT) AS c
+justify/pos~text	-	sql	SELECT CAST(justify_days(INTERVAL '1 mon 35 days 27:00:00') AS TEXT) AS d, CAST(justify_hours(INTERVAL '1 mon 35 days 27:00:00') AS TEXT) AS h, CAST(justify_interval(INTERVAL '1 mon 35 days 27:00:00') AS TEXT) AS i
+justify/neg~text	-	sql	SELECT CAST(justify_days(INTERVAL '-1 mon -35 days -27:00:00') AS TEXT) AS d, CAST(justify_hours(INTERVAL '-1 mon -35 days -27:00:00') AS TEXT) AS h, CAST(justify_interval(INTERVAL '-1 mon -35 days -27:00:00') AS TEXT) AS i
+justify/mixed1~text	-	sql	SELECT CAST(justify_days(INTERVAL '1 mon -1 day') AS TEXT) AS d, CAST(justify_hours(INTERVAL '1 mon -1 day') AS TEXT) AS h, CAST(justify_interval(INTERVAL '1 mon -1 day') AS TEXT) AS i
+justify/mixed2~text	-	sql	SELECT CAST(justify_days(INTERVAL '-1 mon 35 days') AS TEXT) AS d, CAST(justify_hours(INTERVAL '-1 mon 35 days') AS TEXT) AS h, CAST(justify_interval(INTERVAL '-1 mon 35 days') AS TEXT) AS i
+justify/mixed3~text	-	sql	SELECT CAST(justify_days(INTERVAL '1 day -25:00:00') AS TEXT) AS d, CAST(justify_hours(INTERVAL '1 day -25:00:00') AS TEXT) AS h, CAST(justify_interval(INTERVAL '1 day -25:00:00') AS TEXT) AS i
+justify/mixed4~text	-	sql	SELECT CAST(justify_days(INTERVAL '-1 day 25:00:00') AS TEXT) AS d, CAST(justify_hours(INTERVAL '-1 day 25:00:00') AS TEXT) AS h, CAST(justify_interval(INTERVAL '-1 day 25:00:00') AS TEXT) AS i
+justify/zero~text	-	sql	SELECT CAST(justify_days(INTERVAL '0') AS TEXT) AS d, CAST(justify_hours(INTERVAL '0') AS TEXT) AS h, CAST(justify_interval(INTERVAL '0') AS TEXT) AS i
+justify/us~text	-	sql	SELECT CAST(justify_days(INTERVAL '-00:00:00.000001') AS TEXT) AS d, CAST(justify_hours(INTERVAL '-00:00:00.000001') AS TEXT) AS h, CAST(justify_interval(INTERVAL '-00:00:00.000001') AS TEXT) AS i
+justify/bigHours~text	-	sql	SELECT CAST(justify_days(INTERVAL '2562047788:00:54.775807') AS TEXT) AS d, CAST(justify_hours(INTERVAL '2562047788:00:54.775807') AS TEXT) AS h, CAST(justify_interval(INTERVAL '2562047788:00:54.775807') AS TEXT) AS i
+justify/inf~text	-	sql	SELECT CAST(justify_days(INTERVAL 'infinity') AS TEXT) AS d, CAST(justify_hours(INTERVAL 'infinity') AS TEXT) AS h, CAST(justify_interval(INTERVAL 'infinity') AS TEXT) AS i
+justify/null~text	-	sql	SELECT CAST(justify_days(CAST(NULL AS INTERVAL)) AS TEXT) AS d, CAST(justify_hours(CAST(NULL AS INTERVAL)) AS TEXT) AS h, CAST(justify_interval(CAST(NULL AS INTERVAL)) AS TEXT) AS i
+agg/sumAvg~text	-	sql	SELECT CAST(sum(CAST(s AS INTERVAL)) AS TEXT) AS s, CAST(avg(CAST(s AS INTERVAL)) AS TEXT) AS a, count(CAST(s AS INTERVAL)) AS n FROM iv80_m
+agg/sumAvgSubset~text	-	sql	SELECT CAST(sum(CAST(s AS INTERVAL)) AS TEXT) AS s, CAST(avg(CAST(s AS INTERVAL)) AS TEXT) AS a FROM iv80_m WHERE id IN (1, 4)
+agg/avgCascade~text	-	sql	SELECT CAST(avg(CAST(s AS INTERVAL)) AS TEXT) AS a FROM iv80_m WHERE id IN (1, 5)
+agg/avgThirds~text	-	sql	SELECT CAST(avg(v) AS TEXT) AS a FROM (VALUES (INTERVAL '1 mon'), (INTERVAL '0'), (INTERVAL '0')) t(v)
+agg/avgUs~text	-	sql	SELECT CAST(avg(v) AS TEXT) AS a FROM (VALUES (INTERVAL '00:00:00.000001'), (INTERVAL '0')) t(v)
+agg/avgUs3~text	-	sql	SELECT CAST(avg(v) AS TEXT) AS a FROM (VALUES (INTERVAL '00:00:00.000003'), (INTERVAL '0')) t(v)
+agg/sumEmpty~text	-	sql	SELECT CAST(sum(CAST(s AS INTERVAL)) AS TEXT) AS s, CAST(avg(CAST(s AS INTERVAL)) AS TEXT) AS a FROM iv80_m WHERE id < 0
+agg/sumNull~text	-	sql	SELECT CAST(sum(CAST(s AS INTERVAL)) AS TEXT) AS s, CAST(avg(CAST(s AS INTERVAL)) AS TEXT) AS a FROM iv80_m WHERE id = 6
+agg/sumGroup~text	-	sql	SELECT id % 2 AS g, CAST(sum(CAST(s AS INTERVAL)) AS TEXT) AS s, CAST(avg(CAST(s AS INTERVAL)) AS TEXT) AS a FROM iv80_m GROUP BY id % 2 ORDER BY g
+agg/sumInf~text	-	sql	SELECT CAST(sum(v) AS TEXT) AS s, CAST(avg(v) AS TEXT) AS a FROM (VALUES (INTERVAL 'infinity'), (INTERVAL '1 day')) t(v)
+agg/sumWindow~text	-	sql	SELECT id, CAST(sum(CAST(s AS INTERVAL)) OVER (ORDER BY id) AS TEXT) AS s FROM iv80_m WHERE id <= 4 ORDER BY id
+agg/avgWindowSliding~text	-	sql	SELECT id, CAST(avg(CAST(s AS INTERVAL)) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS TEXT) AS a FROM iv80_m WHERE id <= 5 ORDER BY id

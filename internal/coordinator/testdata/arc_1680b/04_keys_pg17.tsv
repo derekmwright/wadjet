@@ -1,6 +1,6 @@
 # PostgreSQL 17.11 answers for the #1680b interval corpus, section 04_keys (TestArc1680bMeasure; postgres:17-alpine, initdb --locale=C --encoding=UTF8, --memory=4g).
 # PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit; datcollate=C datctype=C server_encoding=UTF8; defaults IntervalStyle=postgres DateStyle=ISO, MDY TimeZone=UTC; a cell's settings column overrides them for that cell only.
-# name<TAB>answer: ok | (0 rows) | ERR <SQLSTATE>: message | col:type(oid),... | row; row
+# name<TAB>answer: ok | ERR <SQLSTATE>: message | col:type(oid),... | row; row (or | (0 rows)), then any " !! <severity> <SQLSTATE>: message" PostgreSQL raised
 ddl/create/iv80_k	ok
 ddl/insert/iv80_k	ok
 ddl/create/iv80_kr	ok
@@ -77,14 +77,14 @@ join/anti	id:bigint(20) | 9; 10; 13; 14
 setLit/union/default	x:interval(1186) | 1 mon
 setLit/unionRev/default	x:interval(1186) | 720:00:00
 setLit/intersect/default	x:interval(1186) | 30 days
-setLit/except/default	(0 rows)
+setLit/except/default	x:interval(1186) | (0 rows)
 setLit/exceptAll/default	x:interval(1186) | 1 mon; 1 mon
 setLit/intersectAll/default	x:interval(1186) | 720:00:00; 720:00:00
 setLit/valuesDistinct/default	x:interval(1186) | 30 days
 setLit/union/sortagg	x:interval(1186) | 1 mon
 setLit/unionRev/sortagg	x:interval(1186) | 720:00:00
 setLit/intersect/sortagg	x:interval(1186) | 30 days
-setLit/except/sortagg	(0 rows)
+setLit/except/sortagg	x:interval(1186) | (0 rows)
 setLit/exceptAll/sortagg	x:interval(1186) | 1 mon; 1 mon
 setLit/intersectAll/sortagg	x:interval(1186) | 720:00:00; 720:00:00
 setLit/valuesDistinct/sortagg	x:interval(1186) | 30 days

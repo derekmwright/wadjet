@@ -1,0 +1,123 @@
+# PostgreSQL 17.11 answers for the #1680b interval corpus, section 01_input_cast (TestArc1680bMeasure; postgres:17-alpine, initdb --locale=C --encoding=UTF8, --memory=4g).
+# PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit; datcollate=C datctype=C server_encoding=UTF8; defaults IntervalStyle=postgres DateStyle=ISO, MDY TimeZone=UTC; a cell's settings column overrides them for that cell only.
+# name<TAB>answer: ok | ERR <SQLSTATE>: message | col:type(oid),... | row; row (or | (0 rows)), then any " !! <severity> <SQLSTATE>: message" PostgreSQL raised
+lit/0/1 day~text	a:text(25) | 1 day
+lit/1/1 day 2 hours~text	a:text(25) | 1 day 02:00:00
+lit/2/1 year 2 months 3 days 4 hours 5 minutes 6 seconds~text	a:text(25) | 1 year 2 mons 3 days 04:05:06
+lit/3/1-2~text	a:text(25) | 1 year 2 mons
+lit/4/-1-2~text	a:text(25) | -1 years -2 mons
+lit/5/3 4:05:06~text	a:text(25) | 3 days 04:05:06
+lit/6/-3 -4:05:06~text	a:text(25) | -3 days -04:05:06
+lit/7/1-2 3 4:05:06~text	a:text(25) | 1 year 2 mons 3 days 04:05:06
+lit/8/4:05:06~text	a:text(25) | 04:05:06
+lit/9/4:05~text	a:text(25) | 04:05:00
+lit/10/-4:05:06~text	a:text(25) | -04:05:06
+lit/11/1 day 25:00:00~text	a:text(25) | 1 day 25:00:00
+lit/12/-1 day +25:00:00~text	a:text(25) | -1 days +25:00:00
+lit/13/1 mon -30 days~text	a:text(25) | 1 mon -30 days
+lit/14/-1 year -2 mons +3 days~text	a:text(25) | -1 years -2 mons +3 days
+lit/15/1 year -1 second~text	a:text(25) | 1 year -00:00:01
+lit/16/P1Y2M3DT4H5M6S~text	a:text(25) | 1 year 2 mons 3 days 04:05:06
+lit/17/P1Y2M3DT4H5M6.5S~text	a:text(25) | 1 year 2 mons 3 days 04:05:06.5
+lit/18/PT36H~text	a:text(25) | 36:00:00
+lit/19/P1.5M~text	a:text(25) | 1 mon 15 days
+lit/20/P0.5Y~text	a:text(25) | 6 mons
+lit/21/P1W~text	a:text(25) | 7 days
+lit/23/P-1DT-1H~text	a:text(25) | -1 days -01:00:00
+lit/24/P0001-02-03T04:05:06~text	a:text(25) | 1 year 2 mons 3 days 04:05:06
+lit/25/PT0S~text	a:text(25) | 00:00:00
+lit/26/@ 1 year 2 mons~text	a:text(25) | 1 year 2 mons
+lit/27/@ 1 year 2 mons ago~text	a:text(25) | -1 years -2 mons
+lit/28/1 day ago~text	a:text(25) | -1 days
+lit/29/-1 day ago~text	a:text(25) | 1 day
+lit/30/@ 3 days 4 hours 5 mins 6 secs~text	a:text(25) | 3 days 04:05:06
+lit/31/1.5 months~text	a:text(25) | 1 mon 15 days
+lit/32/1.5 days~text	a:text(25) | 1 day 12:00:00
+lit/33/1.5 years~text	a:text(25) | 1 year 6 mons
+lit/34/0.5 weeks~text	a:text(25) | 3 days 12:00:00
+lit/35/1.5 hours~text	a:text(25) | 01:30:00
+lit/36/1.5 minutes~text	a:text(25) | 00:01:30
+lit/37/0.1 months~text	a:text(25) | 3 days
+lit/38/1.0333333 months~text	a:text(25) | 1 mon 23:59:59.9136
+lit/39/-1.5 months~text	a:text(25) | -1 mons -15 days
+lit/40/-1.5 days~text	a:text(25) | -1 days -12:00:00
+lit/41/1.5 centuries~text	a:text(25) | 150 years
+lit/42/1 decade~text	a:text(25) | 10 years
+lit/43/1 century~text	a:text(25) | 100 years
+lit/44/1 millennium~text	a:text(25) | 1000 years
+lit/45/10 weeks~text	a:text(25) | 70 days
+lit/46/1.000001 seconds~text	a:text(25) | 00:00:01.000001
+lit/47/0.0000005 seconds~text	a:text(25) | 00:00:00
+lit/48/0.0000015 seconds~text	a:text(25) | 00:00:00.000001
+lit/49/0.0000025 seconds~text	a:text(25) | 00:00:00.000002
+lit/50/1 microsecond~text	a:text(25) | 00:00:00.000001
+lit/51/1 millisecond~text	a:text(25) | 00:00:00.001
+lit/52/1.5 microseconds~text	a:text(25) | 00:00:00.000001
+lit/53/1:2:3.123456789~text	a:text(25) | 01:02:03.123457
+lit/54/-0.000001 seconds~text	a:text(25) | -00:00:00.000001
+lit/55/00:00:00.000001~text	a:text(25) | 00:00:00.000001
+lit/56/0~text	a:text(25) | 00:00:00
+lit/57/0 seconds~text	a:text(25) | 00:00:00
+lit/58/00:00:00~text	a:text(25) | 00:00:00
+lit/59/-0 days~text	a:text(25) | 00:00:00
+lit/60/100~text	a:text(25) | 00:01:40
+lit/61/1.5~text	a:text(25) | 00:00:01.5
+lit/62/-100~text	a:text(25) | -00:01:40
+lit/63/178956970 years 7 months~text	a:text(25) | 178956970 years 7 mons
+lit/65/-178956970 years -8 months~text	a:text(25) | -178956970 years -8 mons
+lit/67/2147483647 months~text	a:text(25) | 178956970 years 7 mons
+lit/69/-2147483648 months~text	a:text(25) | -178956970 years -8 mons
+lit/71/2147483647 days~text	a:text(25) | 2147483647 days
+lit/73/-2147483648 days~text	a:text(25) | -2147483648 days
+lit/75/2562047788:00:54.775807~text	a:text(25) | 2562047788:00:54.775807
+lit/79/2147483647 months 2147483647 days 2562047788:00:54.775807~text	a:text(25) | infinity
+lit/81/infinity~text	a:text(25) | infinity
+lit/82/-infinity~text	a:text(25) | -infinity
+lit/83/+infinity~text	a:text(25) | infinity
+lit/84/INFINITY~text	a:text(25) | infinity
+lit/null~text	a:text(25) | NULL
+std/ym~text	a:text(25) | 1 year 2 mons
+std/ymNeg~text	a:text(25) | -1 years -2 mons
+std/ds~text	a:text(25) | 3 days 04:05:06
+std/dsFrac~text	a:text(25) | 3 days 04:05:06.789
+std/year~text	a:text(25) | 5 years
+std/month~text	a:text(25) | 5 mons
+std/day~text	a:text(25) | 5 days
+std/hour~text	a:text(25) | 05:00:00
+std/minute~text	a:text(25) | 00:05:00
+std/second~text	a:text(25) | 00:00:05
+std/secondFrac~text	a:text(25) | 00:00:05.123456
+std/dh~text	a:text(25) | 1 day 02:00:00
+std/dm~text	a:text(25) | 1 day 02:03:00
+std/hm~text	a:text(25) | 01:30:00
+std/ms~text	a:text(25) | 00:01:30
+std/hs~text	a:text(25) | 01:30:15
+std/dayDropsTime~text	a:text(25) | 1 day
+std/yearDropsMonths~text	a:text(25) | 1 year
+std/monthDropsDays~text	a:text(25) | 1 year 2 mons
+std/hourDropsMinutes~text	a:text(25) | 1 day 02:00:00
+std/yearFrac~text	a:text(25) | 1 year
+std/dayFrac~text	a:text(25) | 1 day
+std/hourNeg~text	a:text(25) | -25:00:00
+prec/iv3~text	a:text(25) | 00:00:01.123
+prec/iv0~text	a:text(25),b:text(25),c:text(25) | 00:00:02,00:00:03,-00:00:02
+prec/literal3~text	a:text(25) | 00:00:01.123
+prec/second3~text	a:text(25) | 00:00:01.123
+prec/ds2~text	a:text(25) | 1 day 02:03:04.57
+prec/iv6~text	a:text(25) | 00:00:01.123457
+prec/iv7~text	a:text(25) | 00:00:01 !! WARNING 22023: INTERVAL(7) precision reduced to maximum allowed, 6
+prec/castDay~text	a:text(25) | 1 day
+prec/castYear~text	a:text(25) | 1 year
+prec/castMonthTyp~text	a:text(25) | 1 year 2 mons
+cast/fromText~text	a:text(25) | 1 day 02:00:00
+cast/colon~text	a:text(25) | 1 day
+cast/fromTime~text	a:text(25) | 01:02:03.5
+make/all~text	a:text(25) | 1 year 2 mons 25 days 05:06:07.5
+make/days~text	a:text(25) | 10 days
+make/secs~text	a:text(25),b:text(25) | 00:00:01.5,00:00:00.000002
+make/negMins~text	a:text(25) | -01:30:00
+make/weeks~text	a:text(25) | 8 days
+make/zero~text	a:text(25) | 00:00:00
+make/null~text	a:text(25) | NULL
+make/hoursOver~text	a:text(25) | 2147483647:00:00
+row/cast~text	id:bigint(20),v:text(25) | 1,1 day; 2,1 day 02:00:00; 3,1 mon -30 days; 4,1 year 2 mons; 5,NULL; 6,-10 mons; 7,00:00:00.000001; 9,infinity

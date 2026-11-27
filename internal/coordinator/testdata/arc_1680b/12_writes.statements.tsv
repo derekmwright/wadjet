@@ -1,0 +1,20 @@
+# #1680b interval corpus statements (arc_1680b_interval_corpus_cells_test.go). name<TAB>settings<TAB>kind<TAB>sql
+ddl/create/iv80_wt	-	ddl	CREATE TABLE iv80_wt (id BIGINT, s TEXT)
+ddl/insert/iv80_wt	-	ddl	INSERT INTO iv80_wt VALUES (1, 'x'), (2, 'y')
+w/insertSelect	-	write	INSERT INTO iv80_wt SELECT id, CAST(s AS INTERVAL) FROM iv80_r WHERE id = 1
+w/insertDerived	-	write	INSERT INTO iv80_wt SELECT id, v FROM (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r) q WHERE id = 2
+w/insertValues	-	write	INSERT INTO iv80_wt VALUES (100, INTERVAL '1 day')
+w/insertZero	-	write	INSERT INTO iv80_wt SELECT id, CAST(s AS INTERVAL) FROM iv80_r WHERE false
+w/insertSubquery	-	write	INSERT INTO iv80_wt VALUES (101, (SELECT CAST(s AS INTERVAL) FROM iv80_r WHERE id = 1))
+w/insertTsDiff	-	write	INSERT INTO iv80_wt SELECT id, ts - ts FROM iv80_rt WHERE id = 1
+w/update	-	write	UPDATE iv80_wt SET s = INTERVAL '1 day' WHERE id = 1
+w/updateDerived	-	write	UPDATE iv80_wt SET s = (SELECT CAST(s AS INTERVAL) FROM iv80_r WHERE id = 2) WHERE id = 2
+w/updateZero	-	write	UPDATE iv80_wt SET s = INTERVAL '1 day' WHERE false
+w/merge	-	write	MERGE INTO iv80_wt t USING iv80_r r ON t.id = r.id + 1000 WHEN NOT MATCHED AND r.id = 3 THEN INSERT VALUES (r.id + 1000, CAST(r.s AS INTERVAL))
+w/ctas	-	write	CREATE TABLE iv80_wc1 AS SELECT CAST(s AS INTERVAL) AS v FROM iv80_r
+w/ctasDerived	-	write	CREATE TABLE iv80_wc2 AS SELECT v FROM (SELECT CAST(s AS INTERVAL) AS v FROM iv80_r) q
+w/ctasNoData	-	write	CREATE TABLE iv80_wc3 AS SELECT CAST(s AS INTERVAL) AS v FROM iv80_r WITH NO DATA
+w/ctasNoDataDerived	-	write	CREATE TABLE iv80_wc4 AS SELECT v FROM (SELECT CAST(s AS INTERVAL) AS v FROM iv80_r) q WITH NO DATA
+w/ctasZero	-	write	CREATE TABLE iv80_wc5 AS SELECT CAST(s AS INTERVAL) AS v FROM iv80_r WHERE false
+w/ctasText	-	write	CREATE TABLE iv80_wc6 AS SELECT CAST(CAST(s AS INTERVAL) AS TEXT) AS v FROM iv80_r
+w/ctasTsDiffNoData	-	write	CREATE TABLE iv80_wc7 AS SELECT ts - ts AS v FROM iv80_rt WITH NO DATA

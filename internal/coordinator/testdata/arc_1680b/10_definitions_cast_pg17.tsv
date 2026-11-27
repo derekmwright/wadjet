@@ -1,0 +1,96 @@
+# PostgreSQL 17.11 answers for the #1680b interval corpus, section 10_definitions_cast (TestArc1680bMeasure; postgres:17-alpine, initdb --locale=C --encoding=UTF8, --memory=4g).
+# PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit; datcollate=C datctype=C server_encoding=UTF8; defaults IntervalStyle=postgres DateStyle=ISO, MDY TimeZone=UTC; a cell's settings column overrides them for that cell only.
+# name<TAB>answer: ok | ERR <SQLSTATE>: message | col:type(oid),... | row; row (or | (0 rows)), then any " !! <severity> <SQLSTATE>: message" PostgreSQL raised
+in/usMinUnit~text	a:text(25) | -2562047788:00:54.775808
+in/usMaxUnit~text	a:text(25) | 2562047788:00:54.775807
+in/usMinUnitAgo~text	a:text(25) | -2562047788:00:54.775807
+in/allMin~text	a:text(25) | -infinity
+in/allMinNear~text	a:text(25) | -178956970 years -8 mons -2147483648 days -2562047788:00:54.775807
+in/allMaxUnits~text	a:text(25) | infinity
+in/allMaxNear~text	a:text(25) | 178956970 years 7 mons 2147483647 days 2562047788:00:54.775806
+in/allMinCastText~text	a:text(25) | -infinity
+in/allMinMake~text	a:text(25) | -178956970 years -8 mons -2147483648 days
+frac/1.5us~text	a:text(25),b:text(25) | 00:00:00.000002,00:00:00.000001
+frac/-1.5us~text	a:text(25),b:text(25) | -00:00:00.000002,-00:00:00.000001
+frac/2.5us~text	a:text(25),b:text(25) | 00:00:00.000002,00:00:00.000002
+frac/3.5us~text	a:text(25),b:text(25) | 00:00:00.000004,00:00:00.000003
+frac/0.5us~text	a:text(25),b:text(25) | 00:00:00,00:00:00
+frac/clockNearSecond~text	a:text(25),b:text(25) | 00:00:01.5,00:00:01.499999
+frac/minuteUnit~text	a:text(25),b:text(25) | 00:00:00.000001,00:00:00.000001
+frac/years1~text	a:text(25),b:text(25) | 2 mons,4 mons
+frac/years2~text	a:text(25),b:text(25) | -2 mons,00:00:00
+frac/decade~text	a:text(25),b:text(25) | 2 mons,2 mons
+frac/months~text	a:text(25),b:text(25) | 15 days,-23:59:59.9136
+frac/weeks1~text	a:text(25),b:text(25) | 10 days 12:00:00,16:48:00
+frac/weeks2~text	a:text(25),b:text(25) | -3 days -12:00:00,7 days 12:00:00
+ago/1 day 02:00:00 ago~text	a:text(25) | -1 days -02:00:00
+ago/1-2 ago~text	a:text(25) | -1 years -2 mons
+ago/3 4:05:06 ago~text	a:text(25) | -3 days -04:05:06
+ago/-1 day +02:00:00 ago~text	a:text(25) | 1 day -02:00:00
+ago/2147483647 days ago~text	a:text(25) | -2147483647 days
+ago/@ 1 mon ago~text	a:text(25) | -1 mons
+typmod/bareHM~text	a:text(25) | 01:30:00
+typmod/hm~text	a:text(25) | 01:30:00
+typmod/ms~text	a:text(25) | 00:01:30
+typmod/dm~text	a:text(25) | 01:30:00
+typmod/bareNumber~text	a:text(25) | 00:01:30
+typmod/minute~text	a:text(25) | 01:30:00
+typmod/dayToHour~text	a:text(25) | 02:00:00
+typmod/yearToMonth~text	a:text(25) | 2 mons
+typmod/hourFrac~text	a:text(25) | 00:01:00
+typmod/secondTyp5~text	a:text(25) | 00:00:05
+typmod/prec7~text	a:text(25) | 00:00:01.123457 !! WARNING 22023: INTERVAL(7) precision reduced to maximum allowed, 6
+typmod/prec7Literal~text	a:text(25) | 00:00:01.123457 !! WARNING 22023: INTERVAL(7) precision reduced to maximum allowed, 6
+typmod/prec7Half~text	a:text(25),b:text(25) | 00:00:00.000001,00:00:00.000002 !! WARNING 22023: INTERVAL(7) precision reduced to maximum allowed, 6 !! WARNING 22023: INTERVAL(7) precision reduced to maximum allowed, 6
+ar/mulMixed~text	a:text(25) | 1 mon 14 days -12:00:00
+ar/divMixed2~text	a:text(25) | 15 days -12:00:00
+ar/divMixed3~text	a:text(25),b:text(25) | 10 days -08:00:00,-20 days +16:00:00
+ar/mulCarry~text	a:text(25),b:text(25) | 23 days 06:00:00,23 days 06:00:00
+ar/infFactorNegSign~text	a:text(25) | -infinity
+ar/infFactorPosSign~text	a:text(25) | infinity
+ar/negInfFactorNegSign~text	a:text(25) | infinity
+ar/infDivFiniteSign~text	a:text(25) | 00:00:00
+ar/divRecipMonths~text	a:text(25),b:text(25) | 1 mon,30 days
+ar/divRecipDays~text	a:text(25),b:text(25) | 1 day,1 day
+ar/divRecipJudge~text	a:text(25),b:text(25) | 833999:55:51.58033,833999:55:51.58033
+justify/bigDays24h~text	i:text(25) | 5965232 years 4 mons 8 days
+justify/bigDays24h/hoursOfDays~text	hd:text(25) | 5965232 years 4 mons 8 days
+justify/negBigDays24h~text	i:text(25) | -5965232 years -4 mons -9 days
+justify/negBigDays24h/hoursOfDays~text	hd:text(25) | -5965232 years -4 mons -9 days
+justify/monMinus25h~text	i:text(25) | 28 days 23:00:00
+justify/monMinus25h/hoursOfDays~text	hd:text(25) | 1 mon -1 days -01:00:00
+justify/monMinus25h/daysOfHours~text	dh:text(25) | 29 days -01:00:00
+justify/negMonPlus25h~text	i:text(25) | -28 days -23:00:00
+justify/negMonPlus25h/hoursOfDays~text	hd:text(25) | -1 mons +1 day 01:00:00
+justify/negMonPlus25h/daysOfHours~text	dh:text(25) | -29 days +01:00:00
+infop/ivInfMinusNegInf~text	a:text(25) | infinity
+sentinel/negOfNearMax~text	a:text(25) | -178956970 years -7 mons -2147483647 days -2562047788:00:54.775806
+sentinel/negOfInfinityTriple~text	a:text(25) | -infinity
+sentinel/mulNegInfinityTriple~text	a:text(25) | -infinity
+age/borrow~text	a:text(25),b:text(25),c:text(25),d:text(25),e:text(25) | 1 mon 1 day,-1 mons -1 days,15 days,-15 days,1 mon 15 days
+age/timeBorrow~text	a:text(25),b:text(25),c:text(25) | 01:00:00,-01:00:00,00:00:00.000001
+age/null~text	a:text(25),b:text(25) | NULL,NULL
+age/infLeft~text	a:text(25),b:text(25) | infinity,-infinity
+age/infRight~text	a:text(25),b:text(25) | -infinity,infinity
+age/infOpposed~text	a:text(25),b:text(25) | infinity,-infinity
+age/bc~text	a:text(25),b:text(25) | -10 mons -30 days,1 day
+age/date~text	a:text(25) | 1 mon 1 day
+age/dateNY~text	a:text(25) | 2 days
+age/tz/UTC/fallBack~text	a:text(25),b:text(25) | 1 day 01:00:00,-1 days -01:00:00
+age/tz/America/New_York/fallBack~text	a:text(25),b:text(25) | 1 day,-1 days
+types/tsMinusTs~text	a:text(25) | 1 day 01:00:00
+types/tsMinusDate~text	a:text(25) | 1 day 01:00:00
+types/dateMinusTs~text	a:text(25) | -1 days -01:00:00
+types/timeMinusTime~text	a:text(25) | -22:00:00
+types/tstzMinusTstz~text	a:text(25) | 1 day
+types/tstzMinusTs~text	a:text(25) | 1 day
+types/intervalTimesInt~text	a:text(25) | 2 days
+types/intTimesInterval~text	a:text(25) | 2 days
+types/intervalDivInt~text	a:text(25) | 12:00:00
+types/negInterval~text	a:text(25) | -1 days
+closure/tsMinusDate~text	a:text(25) | 1 day 01:00:00
+closure/dateMinusTs~text	a:text(25) | -1 days -01:00:00
+closure/coalesce~text	a:text(25) | 1 mon
+closure/case~text	a:text(25) | 1 mon
+closure/nullif~text	a:text(25),b:text(25) | NULL,1 mon
+fn/truncMixedSign~text	a:text(25),b:text(25) | 1 mon -1 days,-11 mons

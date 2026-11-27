@@ -1,0 +1,8 @@
+# PostgreSQL 17.11 answers for the #1680b interval corpus, section 11_relational_cast (TestArc1680bMeasure; postgres:17-alpine, initdb --locale=C --encoding=UTF8, --memory=4g).
+# PostgreSQL 17.11 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit; datcollate=C datctype=C server_encoding=UTF8; defaults IntervalStyle=postgres DateStyle=ISO, MDY TimeZone=UTC; a cell's settings column overrides them for that cell only.
+# name<TAB>answer: ok | ERR <SQLSTATE>: message | col:type(oid),... | row; row (or | (0 rows)), then any " !! <severity> <SQLSTATE>: message" PostgreSQL raised
+rt/bare~text	id:bigint(20),v:text(25) | 1,1 mon; 2,30 days; 3,720:00:00; 4,1 mon -30 days; 5,00:00:00; 6,NULL; 7,infinity; 8,-infinity; 9,-1 days; 10,-24:00:00; 11,1 day 02:00:00; 12,1 year -00:00:01
+lag/tsDiffBare~text	id:bigint(20),t:text(25) | 1,00:00:00; 2,NULL; 3,NULL; 4,NULL
+tsdate/bare~text	id:bigint(20),a:text(25) | 1,30 days 10:00:00; 2,-01:00:00; 3,NULL; 4,NULL
+sub/scalarPublish~text	a:text(25) | 1 mon
+empty/bare~text	v:text(25) | (0 rows)

@@ -1,53 +1,53 @@
 # This engine's disposition of the #1680b interval corpus, section 03_order, per arm (TestArc1680bRecordEngine; held by TestArc1680bEngineBaseline).
 # Settings are PostgreSQL's only: the engine runs each statement as written. A TIMESTAMP value is printed as text (iv80EngineText). name<TAB>arms<TAB>class<TAB>answer
-cmp/1 mon~30 days	*	refused	ERR 0A000
-cmp/1 mon~720:00:00	*	refused	ERR 42601
-cmp/30 days~720:00:00	*	refused	ERR 42601
-cmp/1 mon -30 days~0	*	refused	ERR 22007
+cmp/1 mon~30 days	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+cmp/1 mon~720:00:00	*	error	ERR 42601: syntax error at or near "AS"
+cmp/30 days~720:00:00	*	error	ERR 42601: syntax error at or near "AS"
+cmp/1 mon -30 days~0	*	error	ERR 22007: invalid input syntax for type interval: "1 mon -30 days"
 cmp/1 year~360 days	*	agree	eq:boolean,ne:boolean,lt:boolean,le:boolean,gt:boolean,ge:boolean,dist:boolean | true,false,false,true,false,true,false
-cmp/1 year~12 mons	*	refused	ERR 0A000
-cmp/1 day~24:00:00	*	refused	ERR 42601
-cmp/-1 day~-24:00:00	*	refused	ERR 42601
-cmp/1 mon~29 days 24:00:00.000001	*	refused	ERR 22007
-cmp/1 mon~30 days -00:00:00.000001	*	refused	ERR 22007
-cmp/00:00:00.000001~0	*	refused	ERR 42601
-cmp/-00:00:00.000001~0	*	refused	ERR 42601
-cmp/1 day -1 second~23:59:59	*	refused	ERR 22007
-cmp/-1 mon 1 day~-29 days	*	refused	ERR 22007
-cmp/1 year -1 day~359 days	*	refused	ERR 22007
-cmp/178956970 years 7 mons~178956970 years 6 mons 30 days	*	refused	ERR 22007
-cmp/178956970 years 7 mons~2147483647 days	*	refused	ERR 22007
-cmp/178956970 years 7 mons~-178956970 years -8 mons	*	refused	ERR 22007
-cmp/2147483647 days 2562047788:00:54.775807~178956970 years 7 mons	*	refused	ERR 22007
-cmp/106751991 days 04:00:54.775808~0	*	refused	ERR 22007
-cmp/106751991 days 04:00:54.775807~106751991 days 04:00:54.775808	*	refused	ERR 22007
-cmp/213503982 days 08:01:49.551616~0	*	refused	ERR 22007
-cmp/213503982 days 08:01:49.551616~00:00:00.000001	*	refused	ERR 22007
-cmp/-213503982 days -08:01:49.551616~0	*	refused	ERR 22007
-cmp/infinity~178956970 years 7 mons	*	refused	ERR 42601
-cmp/-infinity~-178956970 years -8 mons	*	refused	ERR 42601
-cmp/infinity~infinity	*	refused	ERR 42601
-cmp/infinity~-infinity	*	refused	ERR 42601
-cmp/2147483647 months 2147483647 days 2562047788:00:54.775807~infinity	*	refused	ERR 22007
+cmp/1 year~12 mons	*	refusal	ERR 0A000: interval unit "mons" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+cmp/1 day~24:00:00	*	error	ERR 42601: syntax error at or near "AS"
+cmp/-1 day~-24:00:00	*	error	ERR 42601: syntax error at or near "AS"
+cmp/1 mon~29 days 24:00:00.000001	*	error	ERR 22007: invalid input syntax for type interval: "29 days 24:00:00.000001"
+cmp/1 mon~30 days -00:00:00.000001	*	error	ERR 22007: invalid input syntax for type interval: "30 days -00:00:00.000001"
+cmp/00:00:00.000001~0	*	error	ERR 42601: syntax error at or near "="
+cmp/-00:00:00.000001~0	*	error	ERR 42601: syntax error at or near "="
+cmp/1 day -1 second~23:59:59	*	error	ERR 22007: invalid input syntax for type interval: "1 day -1 second"
+cmp/-1 mon 1 day~-29 days	*	error	ERR 22007: invalid input syntax for type interval: "-1 mon 1 day"
+cmp/1 year -1 day~359 days	*	error	ERR 22007: invalid input syntax for type interval: "1 year -1 day"
+cmp/178956970 years 7 mons~178956970 years 6 mons 30 days	*	error	ERR 22007: invalid input syntax for type interval: "178956970 years 7 mons"
+cmp/178956970 years 7 mons~2147483647 days	*	error	ERR 22007: invalid input syntax for type interval: "178956970 years 7 mons"
+cmp/178956970 years 7 mons~-178956970 years -8 mons	*	error	ERR 22007: invalid input syntax for type interval: "178956970 years 7 mons"
+cmp/2147483647 days 2562047788:00:54.775807~178956970 years 7 mons	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 days 2562047788:00:54.775807"
+cmp/106751991 days 04:00:54.775808~0	*	error	ERR 22007: invalid input syntax for type interval: "106751991 days 04:00:54.775808"
+cmp/106751991 days 04:00:54.775807~106751991 days 04:00:54.775808	*	error	ERR 22007: invalid input syntax for type interval: "106751991 days 04:00:54.775807"
+cmp/213503982 days 08:01:49.551616~0	*	error	ERR 22007: invalid input syntax for type interval: "213503982 days 08:01:49.551616"
+cmp/213503982 days 08:01:49.551616~00:00:00.000001	*	error	ERR 22007: invalid input syntax for type interval: "213503982 days 08:01:49.551616"
+cmp/-213503982 days -08:01:49.551616~0	*	error	ERR 22007: invalid input syntax for type interval: "-213503982 days -08:01:49.551616"
+cmp/infinity~178956970 years 7 mons	*	error	ERR 42601: syntax error at or near "="
+cmp/-infinity~-178956970 years -8 mons	*	error	ERR 42601: syntax error at or near "="
+cmp/infinity~infinity	*	error	ERR 42601: syntax error at or near "="
+cmp/infinity~-infinity	*	error	ERR 42601: syntax error at or near "="
+cmp/2147483647 months 2147483647 days 2562047788:00:54.775807~infinity	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 months 2147483647 days 2562047788:00:54.775807"
 cmp/null	*	agree	eq:boolean,ne:boolean,lt:boolean,le:boolean,gt:boolean,ge:boolean,dist:boolean,nn:boolean | NULL,NULL,NULL,NULL,NULL,NULL,true,true
-between	*	refused	ERR 42601
-in	*	refused	ERR 42601
+between	*	error	ERR 42601: syntax error at or near "AS"
+in	*	error	ERR 42601: syntax error at or near "IN"
 ddl/create/iv80_o	writer	ok	ok
 ddl/insert/iv80_o	writer	ok	ok
-order/asc	*	refused	ERR 0A000
-order/desc	*	refused	ERR 0A000
-order/ascNullsFirst	*	refused	ERR 0A000
-order/descNullsLast	*	refused	ERR 0A000
-order/idDesc	*	refused	ERR 0A000
-order/minMax	*	refused	ERR 0A000
-order/minMaxFinite	*	refused	ERR 0A000
-order/minTieFwd	*	refused	ERR 42601
-order/minTieRev	*	refused	ERR 42601
-order/minTieTable	*	refused	ERR 0A000
-order/greatestTie	*	refused	ERR 0A000
-order/topN	*	refused	ERR 0A000
-order/wrap	*	refused	ERR 0A000
-filter/eq	*	refused	ERR 0A000
-filter/eqZero	*	refused	ERR 0A000
-filter/lt	*	refused	ERR 0A000
-filter/gtWrap	*	refused	ERR 0A000
+order/asc	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+order/desc	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+order/ascNullsFirst	*	refusal	ERR 0A000: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+order/descNullsLast	*	refusal	ERR 0A000: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+order/idDesc	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+order/minMax	*	refusal	ERR 0A000: min over an interval argument is not supported
+order/minMaxFinite	*	refusal	ERR 0A000: min over an interval argument is not supported
+order/minTieFwd	*	error	ERR 42601: syntax error at or near ")"
+order/minTieRev	*	error	ERR 42601: syntax error at or near ")"
+order/minTieTable	*	refusal	ERR 0A000: min over an interval argument is not supported
+order/greatestTie	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
+order/topN	*	refusal	ERR 0A000: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+order/wrap	*	refusal	ERR 0A000: interval values cannot yet be used as an ORDER BY key: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+filter/eq	*	refusal	ERR 0A000: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+filter/eqZero	*	refusal	ERR 0A000: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+filter/lt	*	refusal	ERR 0A000: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+filter/gtWrap	*	refusal	ERR 0A000: interval "1 mon" cannot be compared: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported

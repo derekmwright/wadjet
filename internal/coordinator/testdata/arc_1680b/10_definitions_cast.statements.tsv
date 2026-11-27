@@ -1,0 +1,94 @@
+# #1680b interval corpus statements (arc_1680b_interval_corpus_cells_test.go). name<TAB>settings<TAB>kind<TAB>sql
+in/usMinUnit~text	-	sql	SELECT CAST(INTERVAL '-9223372036854775808 microseconds' AS TEXT) AS a
+in/usMaxUnit~text	-	sql	SELECT CAST(INTERVAL '9223372036854775807 microseconds' AS TEXT) AS a
+in/usMinUnitAgo~text	-	sql	SELECT CAST(INTERVAL '9223372036854775807 microseconds ago' AS TEXT) AS a
+in/allMin~text	-	sql	SELECT CAST(INTERVAL '-2147483648 months -2147483648 days -9223372036854775808 microseconds' AS TEXT) AS a
+in/allMinNear~text	-	sql	SELECT CAST(INTERVAL '-2147483648 months -2147483648 days -9223372036854775807 microseconds' AS TEXT) AS a
+in/allMaxUnits~text	-	sql	SELECT CAST(INTERVAL '2147483647 months 2147483647 days 9223372036854775807 microseconds' AS TEXT) AS a
+in/allMaxNear~text	-	sql	SELECT CAST(INTERVAL '2147483647 months 2147483647 days 9223372036854775806 microseconds' AS TEXT) AS a
+in/allMinCastText~text	-	sql	SELECT CAST(CAST('-2147483648 months -2147483648 days -9223372036854775808 microseconds' AS INTERVAL) AS TEXT) AS a
+in/allMinMake~text	-	sql	SELECT CAST(make_interval(months => -2147483648, days => -2147483648) AS TEXT) AS a
+frac/1.5us~text	-	sql	SELECT CAST(INTERVAL '00:00:00.0000015' AS TEXT) AS a, CAST(INTERVAL '0.0000015 seconds' AS TEXT) AS b
+frac/-1.5us~text	-	sql	SELECT CAST(INTERVAL '-00:00:00.0000015' AS TEXT) AS a, CAST(INTERVAL '-0.0000015 seconds' AS TEXT) AS b
+frac/2.5us~text	-	sql	SELECT CAST(INTERVAL '00:00:00.0000025' AS TEXT) AS a, CAST(INTERVAL '0.0000025 seconds' AS TEXT) AS b
+frac/3.5us~text	-	sql	SELECT CAST(INTERVAL '00:00:00.0000035' AS TEXT) AS a, CAST(INTERVAL '0.0000035 seconds' AS TEXT) AS b
+frac/0.5us~text	-	sql	SELECT CAST(INTERVAL '00:00:00.0000005' AS TEXT) AS a, CAST(INTERVAL '0.0000005 seconds' AS TEXT) AS b
+frac/clockNearSecond~text	-	sql	SELECT CAST(INTERVAL '00:00:01.4999995' AS TEXT) AS a, CAST(INTERVAL '1.4999995 seconds' AS TEXT) AS b
+frac/minuteUnit~text	-	sql	SELECT CAST(INTERVAL '0.0000000125 minutes' AS TEXT) AS a, CAST(INTERVAL '00:00:00.00000075' AS TEXT) AS b
+frac/years1~text	-	sql	SELECT CAST(INTERVAL '0.125 years' AS TEXT) AS a, CAST(INTERVAL '0.375 years' AS TEXT) AS b
+frac/years2~text	-	sql	SELECT CAST(INTERVAL '-0.125 years' AS TEXT) AS a, CAST(INTERVAL '0.04 years' AS TEXT) AS b
+frac/decade~text	-	sql	SELECT CAST(INTERVAL '0.0125 decades' AS TEXT) AS a, CAST(INTERVAL '0.00125 centuries' AS TEXT) AS b
+frac/months~text	-	sql	SELECT CAST(INTERVAL '0.5 months' AS TEXT) AS a, CAST(INTERVAL '-0.0333333 months' AS TEXT) AS b
+frac/weeks1~text	-	sql	SELECT CAST(INTERVAL '1.5 weeks' AS TEXT) AS a, CAST(INTERVAL '0.1 weeks' AS TEXT) AS b
+frac/weeks2~text	-	sql	SELECT CAST(INTERVAL '-0.5 weeks' AS TEXT) AS a, CAST(INTERVAL '1 week 0.5 days' AS TEXT) AS b
+ago/1 day 02:00:00 ago~text	-	sql	SELECT CAST(INTERVAL '1 day 02:00:00 ago' AS TEXT) AS a
+ago/1-2 ago~text	-	sql	SELECT CAST(INTERVAL '1-2 ago' AS TEXT) AS a
+ago/3 4:05:06 ago~text	-	sql	SELECT CAST(INTERVAL '3 4:05:06 ago' AS TEXT) AS a
+ago/-1 day +02:00:00 ago~text	-	sql	SELECT CAST(INTERVAL '-1 day +02:00:00 ago' AS TEXT) AS a
+ago/2147483647 days ago~text	-	sql	SELECT CAST(INTERVAL '2147483647 days ago' AS TEXT) AS a
+ago/@ 1 mon ago~text	-	sql	SELECT CAST(INTERVAL '@ 1 mon ago' AS TEXT) AS a
+typmod/bareHM~text	-	sql	SELECT CAST(INTERVAL '1:30' AS TEXT) AS a
+typmod/hm~text	-	sql	SELECT CAST(INTERVAL '1:30' HOUR TO MINUTE AS TEXT) AS a
+typmod/ms~text	-	sql	SELECT CAST(INTERVAL '1:30' MINUTE TO SECOND AS TEXT) AS a
+typmod/dm~text	-	sql	SELECT CAST(INTERVAL '1:30' DAY TO MINUTE AS TEXT) AS a
+typmod/bareNumber~text	-	sql	SELECT CAST(INTERVAL '90' AS TEXT) AS a
+typmod/minute~text	-	sql	SELECT CAST(INTERVAL '90' MINUTE AS TEXT) AS a
+typmod/dayToHour~text	-	sql	SELECT CAST(INTERVAL '2' DAY TO HOUR AS TEXT) AS a
+typmod/yearToMonth~text	-	sql	SELECT CAST(INTERVAL '2' YEAR TO MONTH AS TEXT) AS a
+typmod/hourFrac~text	-	sql	SELECT CAST(INTERVAL '1.5' HOUR TO MINUTE AS TEXT) AS a
+typmod/secondTyp5~text	-	sql	SELECT CAST(INTERVAL '5' MINUTE TO SECOND AS TEXT) AS a
+typmod/prec7~text	-	sql	SELECT CAST(CAST(INTERVAL '1.1234567 seconds' AS INTERVAL(7)) AS TEXT) AS a
+typmod/prec7Literal~text	-	sql	SELECT CAST(INTERVAL(7) '1.1234567 seconds' AS TEXT) AS a
+typmod/prec7Half~text	-	sql	SELECT CAST(CAST(INTERVAL '0.0000015 seconds' AS INTERVAL(7)) AS TEXT) AS a, CAST(CAST(INTERVAL '00:00:00.0000015' AS INTERVAL(7)) AS TEXT) AS b
+ar/mulMixed~text	-	sql	SELECT CAST(INTERVAL '1 mon -1 day' * 1.5 AS TEXT) AS a
+ar/divMixed2~text	-	sql	SELECT CAST(INTERVAL '1 mon -1 day' / 2 AS TEXT) AS a
+ar/divMixed3~text	-	sql	SELECT CAST(INTERVAL '1 mon -1 day' / 3 AS TEXT) AS a, CAST(INTERVAL '-1 mon 1 day' / 1.5 AS TEXT) AS b
+ar/mulCarry~text	-	sql	SELECT CAST(INTERVAL '1 mon 1 day' * 0.75 AS TEXT) AS a, CAST(INTERVAL '1 mon 1 day' / (4.0 / 3.0) AS TEXT) AS b
+ar/infFactorNegSign~text	-	sql	SELECT CAST(INTERVAL '1 mon -31 days' * CAST('Infinity' AS DOUBLE PRECISION) AS TEXT) AS a
+ar/infFactorPosSign~text	-	sql	SELECT CAST(INTERVAL '-1 mon 31 days' * CAST('Infinity' AS DOUBLE PRECISION) AS TEXT) AS a
+ar/negInfFactorNegSign~text	-	sql	SELECT CAST(INTERVAL '1 mon -31 days' * CAST('-Infinity' AS DOUBLE PRECISION) AS TEXT) AS a
+ar/infDivFiniteSign~text	-	sql	SELECT CAST(INTERVAL '1 mon -31 days' / CAST('Infinity' AS DOUBLE PRECISION) AS TEXT) AS a
+ar/divRecipMonths~text	-	sql	SELECT CAST(INTERVAL '49 mons' / 49 AS TEXT) AS a, CAST(INTERVAL '49 mons' * (CAST(1 AS DOUBLE PRECISION) / 49) AS TEXT) AS b
+ar/divRecipDays~text	-	sql	SELECT CAST(INTERVAL '49 days' / 49 AS TEXT) AS a, CAST(INTERVAL '49 days' * (CAST(1 AS DOUBLE PRECISION) / 49) AS TEXT) AS b
+ar/divRecipJudge~text	-	sql	SELECT CAST(INTERVAL '9007199254740993 microseconds' / 3 AS TEXT) AS a, CAST(INTERVAL '9007199254740993 microseconds' * (CAST(1 AS DOUBLE PRECISION) / 3) AS TEXT) AS b
+justify/bigDays24h~text	-	sql	SELECT CAST(justify_interval(INTERVAL '2147483647 days 24 hours') AS TEXT) AS i
+justify/bigDays24h/hoursOfDays~text	-	sql	SELECT CAST(justify_hours(justify_days(INTERVAL '2147483647 days 24 hours')) AS TEXT) AS hd
+justify/negBigDays24h~text	-	sql	SELECT CAST(justify_interval(INTERVAL '-2147483648 days -24 hours') AS TEXT) AS i
+justify/negBigDays24h/hoursOfDays~text	-	sql	SELECT CAST(justify_hours(justify_days(INTERVAL '-2147483648 days -24 hours')) AS TEXT) AS hd
+justify/monMinus25h~text	-	sql	SELECT CAST(justify_interval(INTERVAL '1 mon -25 hours') AS TEXT) AS i
+justify/monMinus25h/hoursOfDays~text	-	sql	SELECT CAST(justify_hours(justify_days(INTERVAL '1 mon -25 hours')) AS TEXT) AS hd
+justify/monMinus25h/daysOfHours~text	-	sql	SELECT CAST(justify_days(justify_hours(INTERVAL '1 mon -25 hours')) AS TEXT) AS dh
+justify/negMonPlus25h~text	-	sql	SELECT CAST(justify_interval(INTERVAL '-1 mon 25 hours') AS TEXT) AS i
+justify/negMonPlus25h/hoursOfDays~text	-	sql	SELECT CAST(justify_hours(justify_days(INTERVAL '-1 mon 25 hours')) AS TEXT) AS hd
+justify/negMonPlus25h/daysOfHours~text	-	sql	SELECT CAST(justify_days(justify_hours(INTERVAL '-1 mon 25 hours')) AS TEXT) AS dh
+infop/ivInfMinusNegInf~text	-	sql	SELECT CAST(INTERVAL 'infinity' - INTERVAL '-infinity' AS TEXT) AS a
+sentinel/negOfNearMax~text	-	sql	SELECT CAST(-INTERVAL '2147483647 months 2147483647 days 9223372036854775806 microseconds' AS TEXT) AS a
+sentinel/negOfInfinityTriple~text	-	sql	SELECT CAST(-INTERVAL '2147483647 months 2147483647 days 9223372036854775807 microseconds' AS TEXT) AS a
+sentinel/mulNegInfinityTriple~text	-	sql	SELECT CAST(INTERVAL '-2147483648 months -2147483648 days -9223372036854775808 microseconds' * 1 AS TEXT) AS a
+age/borrow~text	-	sql	SELECT CAST(age(TIMESTAMP '2023-03-01', TIMESTAMP '2023-01-31') AS TEXT) AS a, CAST(age(TIMESTAMP '2023-01-31', TIMESTAMP '2023-03-01') AS TEXT) AS b, CAST(age(TIMESTAMP '2024-03-01', TIMESTAMP '2024-02-15') AS TEXT) AS c, CAST(age(TIMESTAMP '2024-02-15', TIMESTAMP '2024-03-01') AS TEXT) AS d, CAST(age(TIMESTAMP '2024-03-15', TIMESTAMP '2024-01-31') AS TEXT) AS e
+age/timeBorrow~text	-	sql	SELECT CAST(age(TIMESTAMP '2024-03-01 00:00:00', TIMESTAMP '2024-02-29 23:00:00') AS TEXT) AS a, CAST(age(TIMESTAMP '2024-02-29 23:00:00', TIMESTAMP '2024-03-01 00:00:00') AS TEXT) AS b, CAST(age(TIMESTAMP '2024-01-01 00:00:00', TIMESTAMP '2023-12-31 23:59:59.999999') AS TEXT) AS c
+age/null~text	-	sql	SELECT CAST(age(CAST(NULL AS TIMESTAMP), TIMESTAMP '2024-01-01') AS TEXT) AS a, CAST(age(TIMESTAMP '2024-01-01', CAST(NULL AS TIMESTAMP)) AS TEXT) AS b
+age/infLeft~text	-	sql	SELECT CAST(age(TIMESTAMP 'infinity', TIMESTAMP '2024-01-01') AS TEXT) AS a, CAST(age(TIMESTAMP '-infinity', TIMESTAMP '2024-01-01') AS TEXT) AS b
+age/infRight~text	-	sql	SELECT CAST(age(TIMESTAMP '2024-01-01', TIMESTAMP 'infinity') AS TEXT) AS a, CAST(age(TIMESTAMP '2024-01-01', TIMESTAMP '-infinity') AS TEXT) AS b
+age/infOpposed~text	-	sql	SELECT CAST(age(TIMESTAMP 'infinity', TIMESTAMP '-infinity') AS TEXT) AS a, CAST(age(TIMESTAMP '-infinity', TIMESTAMP 'infinity') AS TEXT) AS b
+age/bc~text	-	sql	SELECT CAST(age(TIMESTAMP '0001-03-01 BC', TIMESTAMP '0001-01-31') AS TEXT) AS a, CAST(age(TIMESTAMP '0001-01-01', TIMESTAMP '0001-12-31 BC') AS TEXT) AS b
+age/date~text	-	sql	SELECT CAST(age(DATE '2024-03-01', DATE '2024-01-31') AS TEXT) AS a
+age/dateNY~text	TimeZone=America/New_York	sql	SELECT CAST(age(DATE '2024-03-11', DATE '2024-03-09') AS TEXT) AS a
+age/tz/UTC/fallBack~text	TimeZone=UTC	sql	SELECT CAST(age(TIMESTAMPTZ '2024-11-03 12:00:00-05', TIMESTAMPTZ '2024-11-02 12:00:00-04') AS TEXT) AS a, CAST(age(TIMESTAMPTZ '2024-11-02 12:00:00-04', TIMESTAMPTZ '2024-11-03 12:00:00-05') AS TEXT) AS b
+age/tz/America/New_York/fallBack~text	TimeZone=America/New_York	sql	SELECT CAST(age(TIMESTAMPTZ '2024-11-03 12:00:00-05', TIMESTAMPTZ '2024-11-02 12:00:00-04') AS TEXT) AS a, CAST(age(TIMESTAMPTZ '2024-11-02 12:00:00-04', TIMESTAMPTZ '2024-11-03 12:00:00-05') AS TEXT) AS b
+types/tsMinusTs~text	-	sql	SELECT CAST(TIMESTAMP '2024-01-02 01:00:00' - TIMESTAMP '2024-01-01 00:00:00' AS TEXT) AS a
+types/tsMinusDate~text	-	sql	SELECT CAST(TIMESTAMP '2024-01-02 01:00:00' - DATE '2024-01-01' AS TEXT) AS a
+types/dateMinusTs~text	-	sql	SELECT CAST(DATE '2024-01-01' - TIMESTAMP '2024-01-02 01:00:00' AS TEXT) AS a
+types/timeMinusTime~text	-	sql	SELECT CAST(TIME '01:00:00' - TIME '23:00:00' AS TEXT) AS a
+types/tstzMinusTstz~text	-	sql	SELECT CAST(TIMESTAMPTZ '2024-01-02 00:00:00+00' - TIMESTAMPTZ '2024-01-01 00:00:00+00' AS TEXT) AS a
+types/tstzMinusTs~text	-	sql	SELECT CAST(TIMESTAMPTZ '2024-01-02 00:00:00+00' - TIMESTAMP '2024-01-01 00:00:00' AS TEXT) AS a
+types/intervalTimesInt~text	-	sql	SELECT CAST(INTERVAL '1 day' * 2 AS TEXT) AS a
+types/intTimesInterval~text	-	sql	SELECT CAST(2 * INTERVAL '1 day' AS TEXT) AS a
+types/intervalDivInt~text	-	sql	SELECT CAST(INTERVAL '1 day' / 2 AS TEXT) AS a
+types/negInterval~text	-	sql	SELECT CAST(-INTERVAL '1 day' AS TEXT) AS a
+closure/tsMinusDate~text	-	sql	SELECT CAST(TIMESTAMP '2024-01-02 01:00' - DATE '2024-01-01' AS TEXT) AS a
+closure/dateMinusTs~text	-	sql	SELECT CAST(DATE '2024-01-01' - TIMESTAMP '2024-01-02 01:00' AS TEXT) AS a
+closure/coalesce~text	-	sql	SELECT CAST(COALESCE(CAST(NULL AS INTERVAL), '1 mon') AS TEXT) AS a
+closure/case~text	-	sql	SELECT CAST(CASE WHEN true THEN INTERVAL '1 mon' ELSE '30 days' END AS TEXT) AS a
+closure/nullif~text	-	sql	SELECT CAST(NULLIF(INTERVAL '1 mon', INTERVAL '30 days') AS TEXT) AS a, CAST(NULLIF(INTERVAL '1 mon', INTERVAL '31 days') AS TEXT) AS b
+fn/truncMixedSign~text	-	sql	SELECT CAST(date_trunc('day', INTERVAL '1 mon -1 day 02:00:00') AS TEXT) AS a, CAST(date_trunc('month', INTERVAL '-1 year 1 mon') AS TEXT) AS b
