@@ -518,7 +518,7 @@ A CASE, COALESCE, GREATEST, LEAST or set operation over two ROW columns of diffe
 
 **TIME_BUCKET supplies a default origin.**
 
-It follows date_bin with default origin `1970-01-01`; PostgreSQL requires an origin. The stride must be an INTERVAL value — an `INTERVAL '…'` literal or a `CAST(… AS INTERVAL)` — and a text stride is 42804; the interval grammar is the SQL parser's, so `INTERVAL '1 day 6 hours'` is 22007. Months/years raise 0A000 and non-positive strides 22008, as in date_bin. (catalog: [extensions#r1, r2, r3](adr/0012-divergences/extensions.md#catalog); #965-TIME_BUCKET)
+It follows date_bin with default origin `1970-01-01`; PostgreSQL requires an origin. The stride must be an INTERVAL value — an `INTERVAL '…'` literal or a `CAST(… AS INTERVAL)` — and a text stride is 42804; the interval grammar is the SQL parser's, so `INTERVAL '1 day 6 hours'` is refused 0A000 (interval-input-form: PostgreSQL reads that text; the literal reader reads one `N unit` pair; 22007 until stage A of #1680). Months/years raise 0A000 and non-positive strides 22008, as in date_bin. (catalog: [extensions#r1, r2, r3](adr/0012-divergences/extensions.md#catalog); #965-TIME_BUCKET)
 
 **OHLCV returns a bar.**
 

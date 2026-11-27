@@ -705,36 +705,68 @@ direction, SUM / AVG changed beside MIN / MAX, the rule-3 value under the
 wrong type, unordered and ordered permutations, a doubled row, the ruling-11
 alternative and a wrong finite sum).
 
-**The architect's rulings on 1680c's conflicts (r3)** amend the manifest
-(`iv80Ruled`), for a cell the rules gave an A refusal that the baseline did
-not meet: (1) a cell right on main on every arm is `supported`, owned by A
-(8 cells: the typmod display casts `INTERVAL '5' YEAR … ~text`); (2) a cell
-this engine's parser rejects (`plansql.Parse`: the SQL grammar, 42601, and
-the interval literal reader, 22007) is **outside the program**: outcome
-`not-parsed <SQLSTATE>`, no owning stage, held only to the parser's
-refusal (325 cells); (3) the six TIME cells (`TIME - TIME`, `DATE ± TIME`)
-stay A refusals `time-type`. A owned 645 cells before the rulings and 320
-after.
+**The architect's rulings on 1680c** (complete and binding,
+2026-11-27; `iv80Ruled`, `iv80Rulings`) decide a cell's outcome by one
+principle, stated in ADR-0052 §8: (1) a statement that returns PostgreSQL's
+value and declared type on main, on every arm, stays answering, its cell
+`supported` and owned by A; (2) a statement that must be refused names the
+reason of the earliest rule that truthfully applies to it, found by
+measurement; (3) where PostgreSQL itself errors, its SQLSTATE is the outcome
+and no capability refusal pre-empts it; (4) `operator does not exist`,
+`function does not exist` / `unknown function`, or an out-of-range or
+invalid-value error raised for something PostgreSQL accepts and answers is
+untruthful, and at the same raise point becomes the named capability refusal
+(0A000 with its stable identity), a change of message and code, never a
+lifted check; (5) a statement refused on main stays refused, its SQLSTATE
+moving only as (2) to (4) say; (6) statements outside the interval program
+leave the manifest; (7) a later-stage cell keeps its recorded disposition,
+except where (4) at a shared raise point moves it from one refusal to another.
 
-**The rulings on 1680c r3's 41 unmet cells** (`iv80R4Rulings`) rest on one
-principle: a cell's outcome is the earliest truthful rule that decides it;
-PostgreSQL's own error is never pre-empted; a code untrue of PostgreSQL (a
-42883 for a function or operator it has) becomes a named refusal. So the
-bare typmod literals are the bare-result refusal, and the two that overflow
-are PostgreSQL's 22008 / 22015. `age` is declared an interval producer.
-The binder names its refusal of `timestamp - date`, `date - timestamp`
-(`timestamp-date-difference`) and the timestamptz pairs (`timestamptz`).
-EXTRACT's and the opaque value's interim refusals decide their cells.
+The three kinds **outside the program** (rule 6), pinned at their current
+behaviour on every arm and owned by no stage: `not-accepted 42601`, a
+statement the engine does not accept as a statement form (a 42601 raised at
+or after the parse: WITHIN GROUP, an ORDER BY inside an aggregate call, a
+typmod qualifier the grammar lacks, a RANGE offset frame, a named argument,
+the one-field literal spellings the reader does not read; 181 cells);
+`no-capability <SQLSTATE>`, a capability the engine lacks for every type
+(`07_functions:widthBucketArray`, `width_bucket(operand, ARRAY[...])`,
+42883 for every type, an untruthful error kept as it is); `not-interval`, a
+statement that is not an interval operation (`10_definitions:dst/gapInput`,
+the bare TIMESTAMPTZ literal, which answers a zoneless TIMESTAMP on main: a
+silent wrong answer outside this program, reported, not fixed here).
 
-A statement the engine does not accept as a statement form (the literal a
-later parse cannot read under `EXCEPT ALL` / `INTERSECT ALL` over VALUES; a
-write door's subquery in VALUES or SET, or a MERGE ON that is not a column
-equality) is **outside the program**: `not-accepted <SQLSTATE>`, no owning
-stage, met while every arm refuses it with that SQLSTATE and no refusal
-identity. Four A cells fit no ruling and remain unmet
-(`05_arith:mul/numeric`, `06_calendar:tsdiff/inf`,
-`07_functions:widthBucketArray`, `10_definitions:dst/gapInput`), so stage A
-is not declared landed.
+Applied cell by cell (1680c r5): the bare typmod literals (`SELECT INTERVAL
+'5' YEAR`) are the bare-result refusal and their display casts `supported`;
+`std/yearOver` / `std/dayOver` are PostgreSQL's 22008 / 22015. `age` is not
+declared an interval producer: every call is `function-age`, raised where
+`unknown function` was (`expr.checkKnown`, and in the binder where an
+operator beside an interval would have said `operator does not exist:
+unknown > interval`). The binder names its refusal of `timestamp - date` /
+`date - timestamp` (`timestamp-date-difference`) and of the timestamptz
+pairs PostgreSQL accepts (`timestamptz`), its check not lifted; on the
+INSERT VALUES, INSERT … SELECT, UPDATE SET and MERGE SET / INSERT doors that
+refusal precedes PostgreSQL's 42804, a known code mismatch (the write door's
+own check does not type the pair), pinned. The INTERVAL literal reader's
+22007 for text PostgreSQL accepts (`'1 day 2 hours'`, `'1.5 days'`) is
+`interval-input-form` (`expr.pgIntervalLiteralAccepted`, never wider than
+PostgreSQL, measured over a 190-literal matrix): 146 A cells take it as
+their earliest truthful rule. `interval * numeric` is `interval-numeric-factor`
+where it was `operator does not exist: interval * text`. An infinite
+timestamp difference keeps 22008 only where PostgreSQL raises it (the same
+infinity on both sides), else the guard's named refusal. The three DML
+statement-shape refusals carry identities (`dml-values-subquery`,
+`dml-set-subquery`, `merge-on-equality`) and are their cells' outcome. The
+EXTRACT cells whose numeric result is infinite are C's (`numeric-infinity`);
+`06_calendar:rows/plus` is the run-time guard's `interval-opaque-value`.
+`07_functions:trunc/bogus`, `series/zero` and `series/zeroNormalized` are
+PostgreSQL's 22023, owned by C (rule 3); `trunc/week` is PostgreSQL's 0A000,
+met. Stage A is landed (`iv80LandedStages = "A"`): 458 A-owned cells, every
+one met on every arm (447 refusals, 8 supported, 3 PostgreSQL errors).
+
+The earlier rounds' application, superseded by the above: r3 recorded every
+cell the parser rejected as `not-parsed` (325 cells, 22007 among them, which
+rule 4 returns to the program), and r4 declared `age` a producer and recorded
+the DML statement-shape cells as outside the program.
 
 **Ownership: the earliest stage that admits what the cell needs**
 (`iv80EarliestStage`, `TestArc1680bStageRules`). Every refusal is owned by
