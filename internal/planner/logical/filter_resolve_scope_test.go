@@ -124,8 +124,77 @@ func TestResolveFilterThroughProjectsScoping(t *testing.T) {
 // substitutions and a definition already qualified stay as written, no
 // qualifier (every carrier but a join stage) leaves the old spelling, and the
 // logical plan's own definitions are never written to.
+//
+// Which arm a reference came from must not be read off the definition's NODE
+// identity: a CTE read on both sides of the join hands both arms the same
+// definition nodes, and round 1 of this line, which did that, left the build
+// arm's `upper(s)` bare there — `(upper(s)) < (upper(s))`, zero rows on every
+// DAG arm. sharedDefs makes the two arms share their definition nodes outright,
+// whatever the plan builder does for a CTE. And a definition qualified by a
+// name the join's stream does not carry (the table's own, `upper(t.s)`) is
+// re-qualified: left as written the worker read it as the probe's bare `s`.
 func TestResolveFilterThroughProjectsQualifiesBuildArmDefinitions(t *testing.T) {
-	qual := func(string) string { return "bq" }
+	// The stream carries the build alias bq and, for the AlreadyQualified
+	// case, the inner scan alias x (the stage's build alias there).
+	qual := func(table, _ string) string {
+		if strings.EqualFold(table, "x") {
+			return table
+		}
+		return "bq"
+	}
+	// sharedDefs points every build-arm definition at the probe arm's node of
+	// the same text, so the two arms share definition nodes.
+	sharedDefs := func(t *testing.T, n *Node) {
+		var join func(*Node) *Node
+		join = func(n *Node) *Node {
+			if n == nil {
+				return nil
+			}
+			if n.Type == NodeJoin {
+				return n
+			}
+			for _, c := range n.Children {
+				if j := join(c); j != nil {
+					return j
+				}
+			}
+			return nil
+		}
+		var proj func(*Node) *Node
+		proj = func(n *Node) *Node {
+			for ; n != nil; n = n.Children[0] {
+				if n.Type == NodeProject {
+					return n
+				}
+				if len(n.Children) == 0 {
+					return nil
+				}
+			}
+			return nil
+		}
+		j := join(n)
+		if j == nil || len(j.Children) != 2 {
+			t.Fatal("no two-armed join below the filter")
+		}
+		probe, build := proj(j.Children[0]), proj(j.Children[1])
+		if probe == nil || build == nil {
+			t.Fatal("an arm has no Project")
+		}
+		shared := 0
+		for i := range build.Projections {
+			for k := range probe.Projections {
+				bp, pp := build.Projections[i].ASTExpr, probe.Projections[k].ASTExpr
+				if bp != nil && pp != nil && bp != pp && bp.String() == pp.String() {
+					build.Projections[i].ASTExpr = pp
+					shared++
+					break
+				}
+			}
+		}
+		if shared == 0 {
+			t.Fatal("no definition shared between the arms")
+		}
+	}
 	defs := func(n *Node) string {
 		var b strings.Builder
 		var walk func(*Node)
@@ -144,19 +213,28 @@ func TestResolveFilterThroughProjectsQualifiesBuildArmDefinitions(t *testing.T) 
 	}
 	for _, c := range []struct {
 		name, sql string
-		qualify   func(string) string
+		qualify   func(table, column string) string
 		want      string
+		share     bool
 	}{
+		{"SharedDefinitionNodes", `SELECT a.id FROM (SELECT id, upper(s) AS k FROM t) a, (SELECT id, upper(s) AS k FROM t) b WHERE a.k < b.k`,
+			qual, "(upper(s)) < (upper(bq.s))", true},
+		{"SharedDefinitionNodesUnderCalls", `SELECT a.id FROM (SELECT id, upper(s) AS k FROM t) a, (SELECT id, upper(s) AS k FROM t) b WHERE lower(a.k) = lower(b.k) || '' AND a.id < b.id`,
+			qual, "lower((upper(s))) = lower((upper(bq.s))) || ''", true},
+		{"CTEOnBothSides", `WITH c AS (SELECT id, upper(s) AS k FROM t) SELECT a.id FROM c a, c b WHERE a.k < b.k`,
+			qual, "(upper(s)) < (upper(bq.s))", false},
+		{"TableQualified", `SELECT a.id FROM t a, (SELECT t.id, upper(t.s) AS k FROM t) b WHERE upper(a.s) = b.k`,
+			qual, "upper(a.s) = (upper(bq.s))", false},
 		{"BuildExpression", `SELECT a.id FROM t a, (SELECT id, upper(s) AS k FROM t) b WHERE upper(a.s) = b.k`,
-			qual, "upper(a.s) = (upper(bq.s))"},
+			qual, "upper(a.s) = (upper(bq.s))", false},
 		{"BuildRename", `SELECT a.id FROM t a, (SELECT id, s AS k FROM t) b WHERE a.s = b.k OR a.id = b.id`,
-			qual, "a.s = bq.s or a.id = b.id"},
+			qual, "a.s = bq.s or a.id = b.id", false},
 		{"ProbeArmStaysBare", `SELECT a.id FROM (SELECT id, upper(s) AS k FROM t) a, (SELECT id, lower(s) AS k FROM t) b WHERE lower(a.k) = b.k`,
-			qual, "lower((upper(s))) = (lower(bq.s))"},
+			qual, "lower((upper(s))) = (lower(bq.s))", false},
 		{"AlreadyQualified", `SELECT a.id FROM t a, (SELECT x.id, upper(x.s) AS k FROM t x) b WHERE upper(a.s) = b.k`,
-			qual, "upper(a.s) = (upper(x.s))"},
+			qual, "upper(a.s) = (upper(x.s))", false},
 		{"NoQualifier", `SELECT a.id FROM t a, (SELECT id, upper(s) AS k FROM t) b WHERE upper(a.s) = b.k`,
-			nil, "upper(a.s) = (upper(s))"},
+			nil, "upper(a.s) = (upper(s))", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			parsed, err := plansql.Parse(c.sql)
@@ -174,6 +252,9 @@ func TestResolveFilterThroughProjectsQualifiesBuildArmDefinitions(t *testing.T) 
 			filter := findTopFilter(Optimize(plan))
 			if filter == nil {
 				t.Fatalf("no Filter node in the optimized plan for %q", c.sql)
+			}
+			if c.share {
+				sharedDefs(t, filter.Children[0])
 			}
 			before := defs(filter.Children[0])
 			ast, _, ok := ResolveFilterThroughProjects(filter.Predicates[0], filter.Children[0], c.qualify)

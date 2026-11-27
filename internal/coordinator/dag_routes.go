@@ -140,6 +140,13 @@ func (c *Coordinator) dagRefusalRoute(err error) localRoute {
 	// column. The single-process pipeline runs the body as written.
 	case errors.Is(err, dagplan.ErrLateralIdentityDistributed):
 		return c.runLateralIdentityLocal
+	// And an OUTER join whose filter reads a derived table's column (#1678
+	// line j): the re-spelled filter is right, but an empty partition shapes
+	// its side from a declared schema that disagrees with the stream and the
+	// gather refuses the files (ADR-0010). The single-process join holds
+	// whole inputs.
+	case errors.Is(err, dagplan.ErrOuterJoinDerivedFilterDistributed):
+		return c.runOuterJoinDerivedFilterLocal
 	}
 	return nil
 }

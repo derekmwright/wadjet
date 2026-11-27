@@ -724,12 +724,15 @@ func rewriteASTThroughProject(ast plansql.Node, p projRefs) (plansql.Node, bool)
 // See docs/internals/dag-filter-project-respelling.md for the design.
 //
 // qualifyBuild, when non-nil, is for a predicate the outermost join's OWN
-// stage evaluates: each bare column reference a definition substituted from
-// that join's BUILD arm brings in is qualified by qualifyBuild(name) (left
-// bare when it answers ""). The definition's bare names were bound in the
-// arm's scope; on the join's stream a bare name binds the PROBE first, so
-// left bare they read the other arm's column of that name (#1678 line j).
-func ResolveFilterThroughProjects(pred Predicate, child *Node, qualifyBuild func(string) string) (ast plansql.Node, aliases []string, ok bool) {
+// stage evaluates: each column reference a definition substituted from that
+// join's BUILD arm brings in is re-qualified by qualifyBuild(table, column),
+// table being the qualifier the definition wrote ("" when bare); an answer
+// of "" or of table itself leaves the reference as it stands. The
+// definition's names were bound in the arm's scope: on the join's stream a
+// bare name binds the PROBE first, and a qualifier from inside the arm (the
+// table's own name, `upper(t.s)`) is one the stream may not carry, so left
+// as written they read the other arm's column of that name (#1678 line j).
+func ResolveFilterThroughProjects(pred Predicate, child *Node, qualifyBuild func(table, column string) string) (ast plansql.Node, aliases []string, ok bool) {
 	if pred.ASTExpr == nil {
 		return nil, nil, false
 	}
@@ -747,7 +750,7 @@ func ResolveFilterThroughProjects(pred Predicate, child *Node, qualifyBuild func
 // so far, which is the spelling the predicate had on entry to that subtree.
 // qualifyBuild applies to the FIRST join the walk meets (see
 // ResolveFilterThroughProjects); joins below it resolve as before.
-func resolveFilterInSubtree(ast plansql.Node, n *Node, changed bool, subst *[]string, qualifyBuild func(string) string) (plansql.Node, bool) {
+func resolveFilterInSubtree(ast plansql.Node, n *Node, changed bool, subst *[]string, qualifyBuild func(table, column string) string) (plansql.Node, bool) {
 	for ; n != nil; n = n.Children[0] {
 		switch n.Type {
 		case NodeJoin:
@@ -761,14 +764,20 @@ func resolveFilterInSubtree(ast plansql.Node, n *Node, changed bool, subst *[]st
 			if qualifyBuild == nil {
 				return resolveFilterInSubtree(ast, n.Children[1], changed, subst, nil)
 			}
-			// Every bare reference present now is the query's own or the
-			// probe arm's; a bare reference the build arm's walk leaves that
-			// is not among them came from a build-arm definition.
+			// Every reference present now is the query's own or the probe
+			// arm's. They are re-made as fresh nodes first: a definition the
+			// build arm's walk splices in is the logical plan's own node, and
+			// the probe arm's walk may already have spliced in the very same
+			// node (a CTE read on both sides shares its definitions), so only
+			// nodes the build walk cannot produce tell the arms apart. A
+			// reference the build walk leaves that is not one of these fresh
+			// nodes came from a build-arm definition.
+			ast = rewriteColRefs(ast, func(r *plansql.ColRef) *plansql.ColRef { c := *r; return &c })
 			before := map[*plansql.ColRef]bool{}
 			plansql.WalkColRefs(ast, func(r *plansql.ColRef) { before[r] = true })
 			built, bchanged := resolveFilterInSubtree(ast, n.Children[1], changed, subst, nil)
 			if built != ast {
-				built = qualifyIntroducedBareRefs(built, before, qualifyBuild)
+				built = qualifyIntroducedRefs(built, before, qualifyBuild)
 			}
 			return built, bchanged
 		case NodeDistinct, NodeSort, NodeLimit, NodeWindow:
@@ -817,26 +826,35 @@ func resolveFilterInSubtree(ast plansql.Node, n *Node, changed bool, subst *[]st
 	return ast, changed
 }
 
-// qualifyIntroducedBareRefs returns ast with every bare column reference that
-// is not in keep qualified by qualify(name), copy-on-write: the definitions a
-// substitution spliced in are the logical plan's own nodes, shared with the
+// qualifyIntroducedRefs returns ast with every column reference that is not in
+// keep re-qualified by qualify(table, column), copy-on-write: the definitions
+// a substitution spliced in are the logical plan's own nodes, shared with the
 // single-process path, and are never written to. A reference qualify answers
-// "" for is left as it stands.
-func qualifyIntroducedBareRefs(ast plansql.Node, keep map[*plansql.ColRef]bool, qualify func(string) string) plansql.Node {
+// "" or its own qualifier for is left as it stands.
+func qualifyIntroducedRefs(ast plansql.Node, keep map[*plansql.ColRef]bool, qualify func(table, column string) string) plansql.Node {
+	return rewriteColRefs(ast, func(r *plansql.ColRef) *plansql.ColRef {
+		if keep[r] {
+			return r
+		}
+		q := qualify(r.Table, r.Column)
+		if q == "" || strings.EqualFold(q, r.Table) {
+			return r
+		}
+		c := *r
+		c.Table = q
+		return &c
+	})
+}
+
+// rewriteColRefs returns ast with every column reference of its own block
+// replaced by f's answer for it, copy-on-write as plansql.RewriteExpr is,
+// except that a call keeps every field RewriteExpr would drop.
+func rewriteColRefs(ast plansql.Node, f func(*plansql.ColRef) *plansql.ColRef) plansql.Node {
 	var fn func(plansql.Node) (plansql.Node, bool)
 	fn = func(n plansql.Node) (plansql.Node, bool) {
 		switch e := n.(type) {
 		case *plansql.ColRef:
-			if e.Table != "" || keep[e] {
-				return n, true
-			}
-			q := qualify(e.Column)
-			if q == "" {
-				return n, true
-			}
-			c := *e
-			c.Table = q
-			return &c, true
+			return f(e), true
 		case *plansql.FuncCallNode:
 			// RewriteExpr rebuilds a call from its name and arguments only;
 			// keep every other field (a ROW field access renders through

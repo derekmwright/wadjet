@@ -195,6 +195,9 @@ func (p *StagePlanner) PlanDistributed(ctx context.Context, node *logical.Node) 
 	if p.windowRouteErr != nil {
 		return nil, p.windowRouteErr
 	}
+	if p.outerJoinFilterRouteErr != nil {
+		return nil, p.outerJoinFilterRouteErr
+	}
 	// A STAR OVER A BLOCK NO STAGE COULD PUBLISH (#984). Asked AFTER stage
 	// generation, because the answer is what the pass DID: every block a star
 	// reads whose projection differs from its stream is materialized onto a

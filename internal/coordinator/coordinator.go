@@ -415,6 +415,10 @@ type Coordinator struct {
 	// localResidualSides counts queries whose plan the stage DAG refused
 	// because a join residual's re-spelling merged its two sides (arc DC).
 	localResidualSides atomic.Int64
+	// localOuterJoinFilter counts queries whose plan the stage DAG refused
+	// because an outer join's filter read a derived table's
+	// column (dagplan.ErrOuterJoinDerivedFilterDistributed, #1678 line j).
+	localOuterJoinFilter atomic.Int64
 	// localPolicedWindow counts queries whose plan the stage DAG refused for
 	// a window over a policed scan feeding a join
 	// (dagplan.ErrPolicedWindowUnderJoinDistributed) and that ran on the
@@ -3846,6 +3850,15 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		// arm shares a name with another relation does not take (arc JP
 		//). Run it as one task rather than refuse it.
 		c.localLateralIdentity.Add(1)
+		c.logger.Info("stage DAG refused the plan, running it as one pipeline task",
+			"query", queryID, "refusal", err)
+		physStages, err = nil, nil
+	}
+	if errors.Is(err, dagplan.ErrOuterJoinDerivedFilterDistributed) {
+		// Same door, same answer: the refusal is about the stage DAG's
+		// partitioned outer join (#1678 line j), and one pipeline task joins
+		// whole inputs. Run it as one task rather than refuse it.
+		c.localOuterJoinFilter.Add(1)
 		c.logger.Info("stage DAG refused the plan, running it as one pipeline task",
 			"query", queryID, "refusal", err)
 		physStages, err = nil, nil

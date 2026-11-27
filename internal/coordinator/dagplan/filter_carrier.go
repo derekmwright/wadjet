@@ -3,6 +3,7 @@
 package dagplan
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -230,22 +231,80 @@ func resolveFilterAliasSpelling(stages []Stage) {
 // as `upper(a.s) = upper(s)` — the probe compared with itself, every pair
 // with a non-NULL probe value admitted (#1678 line j). The outer-join
 // residual follows the same rule (residualWithStageSpellings).
-func joinCarrierBuildQualifier(s *Stage) func(string) string {
+//
+// A definition's reference that is already QUALIFIED keeps its qualifier only
+// when the stream carries it (the build alias, or a scan alias in
+// BuildColOrigins); any other qualifier is the arm's own inner name — the
+// table's name, `upper(t.s)` over `FROM t` — which the stream does not carry,
+// and the worker read it as the bare, probe-first name.
+//
+// requalified reports, after the resolution, whether the qualifier gave any
+// reference a qualifier other than the one it had (an OUTER join carrier
+// routes on that, ErrOuterJoinDerivedFilterDistributed).
+func joinCarrierBuildQualifier(s *Stage) (qualify func(table, col string) string, requalified func() bool) {
+	fired := false
+	requalified = func() bool { return fired }
 	switch s.Type {
 	case StageHashJoin, StageBroadcastJoin, StageSortMergeJoin:
 	default:
-		return nil
+		return nil, requalified
 	}
 	if s.BuildTableAlias == "" {
-		return nil
+		return nil, requalified
 	}
 	alias, origins := s.BuildTableAlias, s.BuildColOrigins
-	return func(col string) string {
+	answer := func(table, col string) string {
+		if table != "" {
+			if strings.EqualFold(table, alias) {
+				return table
+			}
+			for _, o := range origins {
+				if strings.EqualFold(table, o) {
+					return table
+				}
+			}
+		}
 		if o := origins[strings.ToLower(col)]; o != "" {
 			return o
 		}
 		return alias
 	}
+	return func(table, col string) string {
+		q := answer(table, col)
+		if q != "" && !strings.EqualFold(q, table) {
+			fired = true
+		}
+		return q
+	}, requalified
+}
+
+// ErrOuterJoinDerivedFilterDistributed hands the coordinator's single-process
+// pipeline a plan in which an OUTER join stage carries a filter that reads a
+// derived table's column: one ResolveFilterThroughProjects re-spelled into
+// the table's definition, or one joinCarrierBuildQualifier re-qualified onto
+// the stage's stream (#1678 line j).
+//
+// The re-spelled filter reads the right columns. What it cannot survive is
+// the stage's EMPTY partitions: a task whose build (or, for RIGHT and FULL,
+// probe) partition holds no rows shapes that side from the plan-declared side
+// schema, and for a derived side that computes a column that declaration puts
+// the computed column FIRST and leaves out the source columns the stream
+// carries ([k id] or [k id s] where the stream is [id s k]). Its file then
+// names its columns differently from its siblings' and the gather refuses
+// the statement, uncoded (`names column 2 "b.id" where an earlier file of the
+// same stage input named it "k"`, ADR-0010), whenever the WHERE keeps a
+// NULL-padded row; before the build arm's definitions were qualified the
+// same statements answered wrong in silence instead. The declared-schema
+// disagreement is wider than this filter — a plain LEFT JOIN that selects a
+// derived table's computed column reaches it with no filter at all — and is
+// recorded on #1678; until it is repaired, this class runs where the join is
+// one operator over whole inputs.
+var ErrOuterJoinDerivedFilterDistributed = errors.New(
+	"an outer join's filter over a derived table's column is not evaluable on the distributed path")
+
+// isOuterJoinType reports whether a join stage's type pads one side with NULLs.
+func isOuterJoinType(t string) bool {
+	return t == "left" || t == "right" || t == "full"
 }
 
 // filterInputStage returns the stage whose output columns the filter on the

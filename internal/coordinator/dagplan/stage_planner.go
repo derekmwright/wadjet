@@ -64,6 +64,11 @@ type StagePlanner struct {
 	// producer could compute (materializeWindowDeclaredInput).
 	windowRouteErr error
 
+	// outerJoinFilterRouteErr refuses a plan in which an OUTER join stage
+	// carries a filter whose build-arm definitions had to be re-qualified
+	// (ErrOuterJoinDerivedFilterDistributed).
+	outerJoinFilterRouteErr error
+
 	// shadowRouteErr refuses a plan whose SELECT list reads a derived table
 	// that computes a column under the name of a column of its own input,
 	// when an item cannot be spelled in the table's definitions

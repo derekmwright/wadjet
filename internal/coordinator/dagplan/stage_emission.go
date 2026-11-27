@@ -1190,9 +1190,15 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				// never writes to the logical plan the single-process path
 				// shares.
 				if len(node.Children) == 1 {
-					if ast, names, ok := logical.ResolveFilterThroughProjects(pred, node.Children[0],
-						joinCarrierBuildQualifier(&(*stages)[filterIdx])); ok {
+					qualify, requalified := joinCarrierBuildQualifier(&(*stages)[filterIdx])
+					ast, names, resolved := logical.ResolveFilterThroughProjects(pred, node.Children[0], qualify)
+					if resolved {
 						exprStr, aliasNames, exprTree = ast.String(), names, ast
+					}
+					if (resolved || requalified()) && isOuterJoinType((*stages)[filterIdx].JoinType) &&
+						p.outerJoinFilterRouteErr == nil {
+						p.outerJoinFilterRouteErr = fmt.Errorf("%w: stage %s, filter %q",
+							ErrOuterJoinDerivedFilterDistributed, (*stages)[filterIdx].ID, exprStr)
 					}
 				}
 				// The spelling the query wrote, kept alongside the resolved
