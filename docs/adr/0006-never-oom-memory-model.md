@@ -1305,3 +1305,48 @@ answering and a failed own spill fails the statement
 `exec.TestStaleReliefAtBuildEnd`,
 `worker.TestFragmentJoinBuildFailureReleasesTheSharedPool`,
 `physical.TestPoolJoinBuildFailureReleasesOnEveryRoute`.
+
+### 2026-11-27: the compact semi/anti builds are charged before they grow (#1706, line 1706p)
+
+Factual record of what is charged; no architecture changes. A key-only
+semi/anti build (`SemiAntiKeyOnly`: an unfiltered `IN`, `NOT IN`, `EXISTS`,
+`NOT EXISTS`) and the distinct-pair `<>` build (`join_semianti_ne.go`) keep no
+batches, so they are never grace-partitioned, cannot spill and are not
+registered for relief. Measured at 085c26e5 with an independent enumeration of
+their structures (`exec.TestCompactBuildCensus`): the parallel key-only build
+(one worker per `runtime.NumCPU()`) charged nothing — 1M distinct int keys held
+65–68 MB at the merge, 5M held 327 MB, 1M 40-byte string keys 150 MB, and each
+completed at an 8 MiB budget; the serial key-only build charged nothing while it
+grew and force-charged its index once finished; the NE build did the same and
+never charged its pairs (1M keys: 64.4 MB held, 35.7 MB charged).
+
+Every allocation those builds make is now an ordinary, refusable reservation on
+the join's tracker taken before the allocation: the initial and every
+replacement table (the full replacement while the old one is live), string
+key-arena chunks and their header slice, the workers' key buffers, the merge
+(each donor charged until it is dropped), the part headers, the NE pairs and
+the bloom. Held equals charged at every synchronized point
+(`exec.TestCompactBuildHeldEqualsCharged`). A refusal fails the build with the
+budget error naming the join and that it cannot spill, and every failure exit
+drops the tables and releases the reservation before the error leaves `Build`
+(`exec.TestCompactBuildRefusalIsHonestAndReleases`,
+`exec.TestCompactBuildFailureReleasesEverything`). Exceptions: a refused bloom
+is omitted (the probe treats a nil bloom as "may contain"); the hinted
+per-worker table and the hinted NE preallocation fall back to the unhinted
+size; the key-encoding buffer is charged after the batch whose longest key grew
+it. These builds no longer use the forced index reconciliation, so their bytes
+are charged once, as ordinary bytes.
+
+An NE-eligible join whose distinct-pair state, estimated from the plan's row
+estimate, exceeds the budget's room takes the generic filtered,
+grace-partitioned build at `Build` entry, before any row is read, when it has a
+spill manager (`exec.TestNEBuildDeclinesToTheSpillingBuild`,
+`coordinator.TestCompactBuildBudgetEveryArm`). No such route exists for the
+key-only builds or once rows are consumed: those refuse.
+
+Remaining bounds: the parallel key-only build's per-worker tables are sized for
+a whole batch of new keys each, so with many CPUs it holds megabytes for a few
+thousand distinct keys and now refuses at small budgets where it used to answer
+uncharged; the worker count follows `runtime.NumCPU()`, not
+`WADJET_SCAN_WORKERS`; a DAG worker's NE build declines only when its stage
+carries a row estimate.
