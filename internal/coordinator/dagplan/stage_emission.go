@@ -618,6 +618,21 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// (#467, #468). Record the source column;
 			// resolveDerivedAliasSortKeys decides once that is settled.
 			annotateDerivedAliasSortKey(&key, sortChild)
+			// A key nothing above re-targeted is still the ORDER BY term as
+			// the user WROTE it, delimiters included: `"Bq".id` names no
+			// column of the join's stream (which carries `Bq.id`), and the
+			// fragment's qualified-to-bare fallback then sorted on the bare
+			// `id` — the probe's (#1678 line m). The identifier, not its
+			// text, is what the stream is keyed by. Only a QUALIFIED
+			// reference: a bare quoted term may name a SELECT-list alias, and
+			// two aliases differing only by case ("X", "x") are told apart by
+			// no stage today — left as text, that shape keeps the refusal it
+			// had instead of reaching a silently wrong order.
+			if key.Column == strings.TrimSpace(ob.Column) {
+				if q, c, ok := plansql.SplitIdentRef(key.Column); ok && q != "" {
+					key.Column = q + "." + c
+				}
+			}
 			sortKeys = append(sortKeys, key)
 		}
 

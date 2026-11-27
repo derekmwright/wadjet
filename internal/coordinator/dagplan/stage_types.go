@@ -544,6 +544,31 @@ type OutputRename struct {
 	ElementType *parquet.Column
 	// Dimension is a computed VECTOR rename's width (arc CW).
 	Dimension int
+	// SourceQualifier and SourceColumn are the parsed IDENTIFIERS of a source
+	// that is a plain column reference — each with its exact case and without
+	// SQL delimiters — so the gather compares identifiers, not text: `"Bq".id`
+	// is qualifier `Bq` and column `id`, and `"x.y".id` is qualifier `x.y`, not
+	// `x` (#1678 line m). They describe From only while From is still their
+	// join (IdentSource); a pass that re-targets From to another stage's
+	// spelling leaves them stale, and the gather then treats From as text.
+	SourceQualifier string
+	SourceColumn    string
+}
+
+// IdentSource reports whether From is still the identifier reference
+// SourceQualifier/SourceColumn describe, and returns its parts.
+func (r OutputRename) IdentSource() (qualifier, column string, ok bool) {
+	if r.SourceColumn == "" || r.Expr != nil {
+		return "", "", false
+	}
+	want := r.SourceColumn
+	if r.SourceQualifier != "" {
+		want = r.SourceQualifier + "." + r.SourceColumn
+	}
+	if r.From != want {
+		return "", "", false
+	}
+	return r.SourceQualifier, r.SourceColumn, true
 }
 
 // UnionArm is one arm of a StageUnion: the projection that puts its output

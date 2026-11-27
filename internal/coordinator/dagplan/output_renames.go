@@ -96,6 +96,7 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 	renameScope := localPlanFacts.FindOutputProjectionNode(root)
 	for _, p := range proj {
 		var src, target string
+		var srcQual, srcCol string
 		var astExpr plansql.Node
 		var declType expr.DeclType
 		declKnown := false
@@ -159,12 +160,18 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 			if p.Expr != "" {
 				src = strings.ToLower(p.Expr)
 			}
+			if q, c, ok := colRefRenameSource(p.ASTExpr); ok {
+				src, srcQual, srcCol = joinIdentRef(q, c), q, c
+			}
 			target = p.Alias
 		case p.Expr != "":
 			src = strings.ToLower(p.Expr)
+			if q, c, ok := colRefRenameSource(p.ASTExpr); ok {
+				src, srcQual, srcCol = joinIdentRef(q, c), q, c
+			}
 			target = p.Alias
 			if target == "" {
-				target = src
+				target = strings.ToLower(p.Expr)
 				// No AS on a plain column reference: SQL names the output
 				// column after the COLUMN, not the qualified reference the
 				// user typed — `SELECT d.label` is a column named "label",
@@ -198,11 +205,40 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 			From: src, To: target, Expr: astExpr, IsAgg: isAgg,
 			Type: declType.ID, TypeKnown: declKnown,
 			Precision: declType.Precision, Scale: declType.Scale, Fields: declType.RowFields(),
-			ElementType: localPlanFacts.DeclTypeParts(declType).ElementType,
-			Dimension:   localPlanFacts.DeclTypeParts(declType).Dimension,
+			ElementType:     localPlanFacts.DeclTypeParts(declType).ElementType,
+			Dimension:       localPlanFacts.DeclTypeParts(declType).Dimension,
+			SourceQualifier: srcQual, SourceColumn: srcCol,
 		})
 	}
 	return renames
+}
+
+// colRefRenameSource returns the parsed IDENTIFIERS of a SELECT item that is
+// a plain column reference — qualifier and column, each with its exact case
+// and without SQL delimiters. They are the gather's source, not the item's
+// rendered text lowercased: `"Bq".id` lowercased is `"bq".id`, which names no
+// column of any stream, and the gather's qualified-to-bare fallback then took
+// the bare `id` — the PROBE's column — for the build's (#1678 line m). A
+// quoted identifier is case-significant (PostgreSQL), so `"Bq"` and `"bq"`
+// stay two names; an unquoted one was folded to lower case by the lexer.
+//
+// ok is false for anything else (an expression, a planner slot), whose
+// source stays its lowercased text, the spelling a computing stage emits.
+func colRefRenameSource(n plansql.Node) (qualifier, column string, ok bool) {
+	c, isRef := n.(*plansql.ColRef)
+	if !isRef || c.Slot || c.Column == "" {
+		return "", "", false
+	}
+	return c.Table, c.Column, true
+}
+
+// joinIdentRef spells an identifier reference the way a join stream names a
+// qualified column: `qualifier.column`, no delimiters.
+func joinIdentRef(qualifier, column string) string {
+	if qualifier == "" {
+		return column
+	}
+	return qualifier + "." + column
 }
 
 // referencesSyntheticWindow reports whether an AST references a nested-window

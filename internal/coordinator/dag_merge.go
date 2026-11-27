@@ -157,21 +157,19 @@ func renameSourceIndices(names []string, renames []dagplan.OutputRename) []int {
 		if r.Expr != nil {
 			continue // resolved by evaluation, not by column
 		}
-		key := strings.ToLower(strings.TrimSpace(r.From))
+		// Grouped by the EXACT source: a quoted identifier is case-significant
+		// (#1678 line m), so `Bq.id` and `bq.id` are two sources, not one
+		// name written twice.
+		key := strings.TrimSpace(r.From)
 		groups[key] = append(groups[key], i)
 	}
-	for key, group := range groups {
+	for _, group := range groups {
 		if len(group) > 1 {
 			// Exact matches only: a duplicate arises from one literal alias
 			// written N times, so the qualified/bare fallbacks resolveRename
 			// Source applies have no part in deciding WHICH of the N a rename
 			// means.
-			var matches []int
-			for i, n := range names {
-				if strings.EqualFold(strings.TrimSpace(n), key) {
-					matches = append(matches, i)
-				}
-			}
+			matches := renameExactMatches(names, renames[group[0]])
 			if len(matches) >= len(group) {
 				// A group that MIXES an aggregate output with a group-key
 				// reference of one name (#575) cannot be assigned by plain
@@ -253,9 +251,60 @@ func renameSourceIndices(names []string, renames []dagplan.OutputRename) []int {
 				continue
 			}
 		}
-		out[group[0]] = resolveRenameSource(names, renames[group[0]].From)
+		out[group[0]] = resolveRename(names, renames[group[0]])
 	}
 	return out
+}
+
+// renameExactMatches returns the columns that ARE a rename's source, before
+// any qualified/bare fallback. For an identifier source (#1678 line m) that
+// is the columns whose name is its exact spelling, else those whose
+// QUALIFIER is its qualifier exactly and whose column matches ignoring case:
+// a relation alias is case-significant when quoted (`"Bq"` and `"bq"` are two
+// relations, as in PostgreSQL), while a column name answers case-
+// insensitively under this engine's identity rule (a schema cannot hold two
+// columns differing only by case). Any other source is text, matched exactly
+// and then ignoring case, as it always was.
+func renameExactMatches(names []string, r dagplan.OutputRename) []int {
+	qual, col, ok := r.IdentSource()
+	if !ok || qual == "" {
+		return namesMatching(names, strings.TrimSpace(r.From))
+	}
+	var exact, folded []int
+	prefix := qual + "."
+	for i, n := range names {
+		n = strings.TrimSpace(n)
+		if !strings.HasPrefix(n, prefix) {
+			continue
+		}
+		if rest := n[len(prefix):]; rest == col {
+			exact = append(exact, i)
+		} else if strings.EqualFold(rest, col) {
+			folded = append(folded, i)
+		}
+	}
+	if len(exact) > 0 {
+		return exact
+	}
+	return folded
+}
+
+// resolveRename is resolveRenameSource for one OutputRename: an identifier
+// source resolves by its parsed parts (renameExactMatches, then its bare
+// COLUMN — the probe side of a join ships its columns unqualified), any
+// other source by its text.
+func resolveRename(names []string, r dagplan.OutputRename) int {
+	qual, col, ok := r.IdentSource()
+	if !ok || qual == "" {
+		return resolveRenameSource(names, r.From)
+	}
+	if m := renameExactMatches(names, r); len(m) > 0 {
+		return m[0]
+	}
+	if m := namesMatching(names, col); len(m) > 0 {
+		return m[0]
+	}
+	return -1
 }
 
 // classScopedMatch resolves ONE rename whose source name several columns
@@ -266,18 +315,16 @@ func classScopedMatch(names []string, r dagplan.OutputRename) (int, bool) {
 	if r.Expr != nil {
 		return 0, false
 	}
-	matchesOf := func(key string) []int {
-		var out []int
-		for i, n := range names {
-			if strings.EqualFold(strings.TrimSpace(n), key) {
-				out = append(out, i)
-			}
+	matchesOf := func(key string) []int { return namesMatching(names, key) }
+	key := strings.TrimSpace(r.From)
+	matches := renameExactMatches(names, r)
+	if qual, col, ok := r.IdentSource(); ok {
+		// An identifier source splits at its PARSED qualifier, not at the
+		// first dot of its text (`x.y.id` is qualifier `x.y`).
+		if len(matches) == 0 && qual != "" {
+			matches = matchesOf(col)
 		}
-		return out
-	}
-	key := strings.ToLower(strings.TrimSpace(r.From))
-	matches := matchesOf(key)
-	if len(matches) == 0 {
+	} else if len(matches) == 0 {
 		// Use resolveRenameSource's qualified→bare fallback when counting duplicates (#785).
 		// ONLY rescan when the exact spelling matched NOTHING: a unique qualified match
 		// must never be replaced by its bare spelling, which may bind another output's column.
@@ -312,17 +359,12 @@ func classScopedMatch(names []string, r dagplan.OutputRename) (int, bool) {
 // columnIndexFallback: exact, then qualified→bare, then bare→qualified with
 // ambiguity (2+ matches) refused rather than guessed.
 func resolveRenameSource(names []string, from string) int {
-	for i, n := range names {
-		if strings.EqualFold(n, from) {
-			return i
-		}
+	if m := namesMatching(names, from); len(m) > 0 {
+		return m[0]
 	}
 	if dot := strings.IndexByte(from, '.'); dot >= 0 {
-		bare := from[dot+1:]
-		for i, n := range names {
-			if strings.EqualFold(n, bare) {
-				return i
-			}
+		if m := namesMatching(names, from[dot+1:]); len(m) > 0 {
+			return m[0]
 		}
 		return -1
 	}
@@ -358,11 +400,39 @@ func (br *batchRenamer) renameColumns(columns []string) []string {
 
 func (br *batchRenamer) renameOne(name string) string {
 	for _, r := range br.renames {
+		if name == r.From {
+			return r.To
+		}
+	}
+	for _, r := range br.renames {
 		if strings.EqualFold(name, r.From) {
 			return r.To
 		}
 	}
 	return name
+}
+
+// namesMatching returns the indices of the columns named key: those whose
+// name equals it EXACTLY when there are any, else those equal to it ignoring
+// case. Exact first is PostgreSQL's identifier rule — a quoted identifier is
+// case-significant, so a stream carrying both `Bq.id` and `bq.id` answers
+// `Bq.id` with the first alone (#1678 line m). The case-insensitive tier
+// stays for what it has always matched: a computing stage emits its column
+// under the LOWERCASED expression text, while a source may keep its case.
+func namesMatching(names []string, key string) []int {
+	var exact, folded []int
+	for i, n := range names {
+		n = strings.TrimSpace(n)
+		if n == key {
+			exact = append(exact, i)
+		} else if strings.EqualFold(n, key) {
+			folded = append(folded, i)
+		}
+	}
+	if len(exact) > 0 {
+		return exact
+	}
+	return folded
 }
 
 // apply transforms one batch: project mode keeps only the renamed/computed
