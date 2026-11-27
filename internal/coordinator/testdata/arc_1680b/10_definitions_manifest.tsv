@@ -43,7 +43,7 @@ typmod/hm	-	not-parsed 42601	met	-
 typmod/ms	-	not-parsed 42601	met	-
 typmod/dm	-	not-parsed 42601	met	-
 typmod/bareNumber	A	refusal bare-interval-result	met	-
-typmod/minute	A	refusal typmod	unmet	-
+typmod/minute	A	refusal bare-interval-result	met	-
 typmod/dayToHour	-	not-parsed 42601	met	-
 typmod/yearToMonth	-	not-parsed 42601	met	-
 typmod/hourFrac	-	not-parsed 42601	met	-
@@ -99,15 +99,15 @@ sentinel/negOfNearMax	-	not-parsed 22007	met	-
 sentinel/negOfNearMin	C	pg-error 22008	unmet	-
 sentinel/negOfInfinityTriple	-	not-parsed 22007	met	-
 sentinel/mulNegInfinityTriple	-	not-parsed 22007	met	-
-age/borrow	A	refusal bare-interval-result	unmet	-
-age/timeBorrow	A	refusal timestamp-millisecond-carrier	met	-
-age/null	A	refusal bare-interval-result	unmet	-
-age/infLeft	A	refusal bare-interval-result	unmet	-
-age/infRight	A	refusal bare-interval-result	unmet	-
-age/infOpposed	A	refusal bare-interval-result	unmet	-
+age/borrow	A	refusal bare-interval-result	met	-
+age/timeBorrow	A	refusal bare-interval-result	met	-
+age/null	A	refusal bare-interval-result	met	-
+age/infLeft	A	refusal bare-interval-result	met	-
+age/infRight	A	refusal bare-interval-result	met	-
+age/infOpposed	A	refusal bare-interval-result	met	-
 age/infInf	C	pg-error 22008	unmet	-
 age/negInfNegInf	C	pg-error 22008	unmet	-
-age/bc	A	refusal bare-interval-result	unmet	-
+age/bc	A	refusal bare-interval-result	met	-
 age/date	A	refusal timestamptz	met	-
 age/dateNY	A	refusal timestamptz	met	-
 age/dateUTC	A	refusal timestamptz	met	-
@@ -127,8 +127,8 @@ types/intervalMinusDate	C	pg-error 42883	met	-
 types/datePlusTime	A	refusal time-type	met	-
 types/dateMinusTime	A	refusal time-type	met	-
 types/tsMinusTs	A	refusal bare-interval-result	met	-
-types/tsMinusDate	A	refusal bare-interval-result	unmet	-
-types/dateMinusTs	A	refusal bare-interval-result	unmet	-
+types/tsMinusDate	A	refusal timestamp-date-difference	met	-
+types/dateMinusTs	A	refusal timestamp-date-difference	met	-
 types/tsPlusInterval	C	supported	unmet	-
 types/intervalPlusTs	C	supported	unmet	-
 types/tsMinusInterval	C	supported	unmet	-
@@ -148,8 +148,8 @@ types/intervalTimesInt	A	refusal bare-interval-result	met	-
 types/intTimesInterval	A	refusal bare-interval-result	met	-
 types/intervalDivInt	A	refusal bare-interval-result	met	-
 types/negInterval	A	refusal bare-interval-result	met	-
-closure/tsMinusDate	A	refusal bare-interval-result	unmet	-
-closure/dateMinusTs	A	refusal bare-interval-result	unmet	-
+closure/tsMinusDate	A	refusal timestamp-date-difference	met	-
+closure/dateMinusTs	A	refusal timestamp-date-difference	met	-
 closure/coalesceText	C	supported	unmet	-
 closure/coalesce	A	refusal bare-interval-result	met	-
 closure/caseText	C	supported	unmet	-
@@ -171,7 +171,7 @@ dst/foldMinus	A	refusal timestamptz	met	-
 dst/gapInput	A	refusal timestamptz	unmet	-
 dst/monthIntoGap	A	refusal timestamptz	met	-
 dst/hoursAcrossFold	A	refusal timestamptz	met	-
-dst/dateAddZone	A	refusal timestamptz	unmet	-
+dst/dateAddZone	A	refusal timestamptz	met	-
 dst/seriesZone	A	refusal timestamptz	met	-
 dst/seriesNoZone	A	refusal timestamptz	met	-
 fn/binInfStride	C	pg-error 22008	unmet	-

@@ -60,6 +60,10 @@ var iv80Reasons = map[string]string{
 	"timestamp-difference-to-number": "a timestamp difference compared with or written as a number",
 	"implicit-text-conversion":       "an interval converted to text implicitly: || concatenation (ADR-0052 section 5; the third judge)",
 	"interval-lineage-unresolved":    "a consumer of a slot whose interval lineage the planner cannot resolve (ADR-0052 section 8: unresolved lineage is a loud refusal, never a pass)",
+	// The rulings on 1680c r3 (the earliest truthful rule):
+	"timestamp-date-difference": "timestamp - date / date - timestamp, an interval in PostgreSQL the engine does not compute (the binder's named refusal)",
+	"interval-extract":          "EXTRACT over an interval argument (the interim's refusal; stage C admits it)",
+	"interval-opaque-value":     "an interval value the engine cannot hold or apply, decided at run time from the row (the interim's refusal)",
 }
 
 // iv80InternalFailure: an engine answer no outcome may accept, decided by

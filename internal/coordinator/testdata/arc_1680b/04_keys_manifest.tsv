@@ -56,15 +56,15 @@ setLit/union/default	-	not-parsed 42601	met	-
 setLit/unionRev/default	-	not-parsed 42601	met	-
 setLit/intersect/default	A	refusal bare-interval-result	met	-
 setLit/except/default	A	refusal bare-interval-result	met	-
-setLit/exceptAll/default	A	refusal bare-interval-result	unmet	-
-setLit/intersectAll/default	A	refusal bare-interval-result	unmet	-
+setLit/exceptAll/default	-	not-accepted 42601	met	-
+setLit/intersectAll/default	-	not-accepted 42601	met	-
 setLit/valuesDistinct/default	-	not-parsed 42601	met	-
 setLit/union/sortagg	-	not-parsed 42601	met	-
 setLit/unionRev/sortagg	-	not-parsed 42601	met	-
 setLit/intersect/sortagg	A	refusal bare-interval-result	met	-
 setLit/except/sortagg	A	refusal bare-interval-result	met	-
-setLit/exceptAll/sortagg	A	refusal bare-interval-result	unmet	-
-setLit/intersectAll/sortagg	A	refusal bare-interval-result	unmet	-
+setLit/exceptAll/sortagg	-	not-accepted 42601	met	-
+setLit/intersectAll/sortagg	-	not-accepted 42601	met	-
 setLit/valuesDistinct/sortagg	-	not-parsed 42601	met	-
 wrap/group	D	supported	unmet	-
 wrap/join	D	supported	unmet	-

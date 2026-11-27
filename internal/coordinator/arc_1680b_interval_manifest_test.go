@@ -354,6 +354,12 @@ func iv80Meets(outcome, engine, pg string, x iv80Check) bool {
 		return ok && strings.HasPrefix(engine, "ERR ") && code == "0A000" && iv80ErrIdentity(engine) == arg
 	case "rep-divergence":
 		return x.rep != nil && iv80SameAnswer(engine, iv80RepAnswer(pg, *x.rep), x.ordered)
+	case "not-accepted":
+		// Outside the program (the rulings on 1680c r3): the statement form
+		// is refused with that SQLSTATE before any interval rule, so the
+		// answer carries no refusal identity of the program.
+		code, _ := iv80ErrCode(engine)
+		return strings.HasPrefix(engine, "ERR ") && code == arg && iv80ErrIdentity(engine) == ""
 	}
 	return false
 }
@@ -406,7 +412,7 @@ func iv80Manifest(t *testing.T, sec iv80Section) []string {
 				}
 			}
 		}
-		outcome, stage, now = iv80Ruled(c, outcome, stage, now, eng[c.name], ans, x)
+		outcome, stage, now = iv80Ruled(key, c, outcome, stage, now, eng[c.name], ans, x)
 		alt := "-"
 		if len(alts) > 0 {
 			var as []string
@@ -442,7 +448,10 @@ const iv80OutsideStage = "-"
 //
 // An IntervalStyle cell is decided at the door (the SET), never by its
 // statement, so neither ruling touches it. Every other cell is unchanged.
-func iv80Ruled(c iv80Cell, outcome, stage, now string, eng []string, pg string, x iv80Check) (string, string, string) {
+func iv80Ruled(key string, c iv80Cell, outcome, stage, now string, eng []string, pg string, x iv80Check) (string, string, string) {
+	if r, ok := iv80R4Rulings[key]; ok {
+		return iv80ApplyR4(r, eng, pg, x)
+	}
 	if stage != "A" || !strings.HasPrefix(outcome, "refusal ") || now == "met" || iv80CellStyle(c) != "" || len(eng) == 0 {
 		return outcome, stage, now
 	}
@@ -473,6 +482,83 @@ func iv80Ruled(c iv80Cell, outcome, stage, now string, eng []string, pg string, 
 		return "not-parsed " + code, iv80OutsideStage, now
 	}
 	return outcome, stage, now
+}
+
+// iv80R4Ruling is the architect's ruling on one of the A cells 1680c r3 could
+// not meet: the outcome the principle gives it, and the ruling class.
+type iv80R4Ruling struct {
+	outcome, class string
+}
+
+// The principle of the rulings on 1680c r3 (ADR-0052 §8): a cell's outcome
+// is the EARLIEST TRUTHFUL rule that decides it; PostgreSQL's own error is
+// never pre-empted; a code that is untrue of PostgreSQL (42883 for a
+// function or operator it has) becomes a named refusal. A statement the
+// engine does not accept as a statement form (a later parse of a literal it
+// cannot read, a write door's statement-shape refusal) is outside the
+// program: "not-accepted <SQLSTATE>", owned by no stage, met while every arm
+// refuses it with that SQLSTATE and no refusal identity.
+const (
+	iv80ClassTypmodBare    = "R1 typmod, bare: the qualifier is implemented; the bare result is the truthful rule"
+	iv80ClassTypmodPGError = "R2 typmod, PostgreSQL's own error: never pre-empted"
+	iv80ClassAge           = "R3 age: declared an interval producer; a bare age(...) is a query result column, first in column order"
+	iv80ClassTsDate        = "R4 date - timestamp / timestamp - date: the binder's untrue 42883 becomes the named refusal timestamp-date-difference"
+	iv80ClassTstz          = "R5 timestamptz pairs: the binder's untrue 42883 becomes the timestamptz refusal"
+	iv80ClassNotAccepted   = "R6 not accepted as a statement form"
+	iv80ClassEarliest      = "R7 an earlier named refusal already decides the cell"
+)
+
+// iv80R4Rulings are the cells the rulings decide whose outcome differs from
+// the rules' (iv80ManifestOutcome). The age cells (R3) and the timestamptz
+// cells (R5) whose outcome the rules already give are met by the engine
+// change alone and need no entry; they are listed in 1680c_r4.md.
+var iv80R4Rulings = map[string]iv80R4Ruling{
+	"01_input:std/year":                   {"refusal bare-interval-result", iv80ClassTypmodBare},
+	"01_input:std/month":                  {"refusal bare-interval-result", iv80ClassTypmodBare},
+	"01_input:std/day":                    {"refusal bare-interval-result", iv80ClassTypmodBare},
+	"01_input:std/hour":                   {"refusal bare-interval-result", iv80ClassTypmodBare},
+	"01_input:std/minute":                 {"refusal bare-interval-result", iv80ClassTypmodBare},
+	"01_input:std/second":                 {"refusal bare-interval-result", iv80ClassTypmodBare},
+	"01_input:std/hourNeg":                {"refusal bare-interval-result", iv80ClassTypmodBare},
+	"10_definitions:typmod/minute":        {"refusal bare-interval-result", iv80ClassTypmodBare},
+	"01_input:std/yearOver":               {"pg-error 22008", iv80ClassTypmodPGError},
+	"01_input:std/dayOver":                {"pg-error 22015", iv80ClassTypmodPGError},
+	"06_calendar:age/time":                {"refusal bare-interval-result", iv80ClassAge},
+	"10_definitions:age/timeBorrow":       {"refusal bare-interval-result", iv80ClassAge},
+	"10_definitions:types/tsMinusDate":    {"refusal timestamp-date-difference", iv80ClassTsDate},
+	"10_definitions:types/dateMinusTs":    {"refusal timestamp-date-difference", iv80ClassTsDate},
+	"10_definitions:closure/tsMinusDate":  {"refusal timestamp-date-difference", iv80ClassTsDate},
+	"10_definitions:closure/dateMinusTs":  {"refusal timestamp-date-difference", iv80ClassTsDate},
+	"11_relational:tsdate/bare":           {"refusal timestamp-date-difference", iv80ClassTsDate},
+	"04_keys:setLit/exceptAll/default":    {"not-accepted 42601", iv80ClassNotAccepted},
+	"04_keys:setLit/intersectAll/default": {"not-accepted 42601", iv80ClassNotAccepted},
+	"04_keys:setLit/exceptAll/sortagg":    {"not-accepted 42601", iv80ClassNotAccepted},
+	"04_keys:setLit/intersectAll/sortagg": {"not-accepted 42601", iv80ClassNotAccepted},
+	"12_writes:w/insertSubquery":          {"not-accepted 0A000", iv80ClassNotAccepted},
+	"12_writes:w/updateDerived":           {"not-accepted 0A000", iv80ClassNotAccepted},
+	"12_writes:w/merge":                   {"not-accepted 0A000", iv80ClassNotAccepted},
+	"11_relational:rt/extractDay":         {"refusal interval-extract", iv80ClassEarliest},
+	"11_relational:rt/extractEpoch":       {"refusal interval-extract", iv80ClassEarliest},
+	"06_calendar:rows/plus":               {"refusal interval-opaque-value", iv80ClassEarliest},
+}
+
+// iv80ApplyR4 is a ruled cell's outcome, owner and whether every arm meets it.
+func iv80ApplyR4(r iv80R4Ruling, eng []string, pg string, x iv80Check) (string, string, string) {
+	stage := "A"
+	if strings.HasPrefix(r.outcome, "not-accepted ") {
+		stage = iv80OutsideStage
+	}
+	now := "met"
+	if len(eng) == 0 {
+		now = "unmet"
+	}
+	for _, l := range eng {
+		f := strings.SplitN(l, "\t", 3)
+		if len(f) != 3 || !iv80Meets(r.outcome, iv80Unescape(f[2]), pg, x) {
+			now = "unmet"
+		}
+	}
+	return r.outcome, stage, now
 }
 
 // iv80SQL is a section's statement by cell name ("" when none).
@@ -520,7 +606,7 @@ func TestArc1680bStageManifest(t *testing.T) {
 				t.Errorf("%s:%s: a refusal owned by %s, not A", sec.stem, name, stage)
 			}
 			kind, arg, _ := strings.Cut(outcome, " ")
-			if _, ok := iv80Stages[stage]; !ok && !(stage == iv80OutsideStage && kind == "not-parsed") {
+			if _, ok := iv80Stages[stage]; !ok && !(stage == iv80OutsideStage && (kind == "not-parsed" || kind == "not-accepted")) {
 				t.Errorf("%s:%s: unknown stage %q", sec.stem, name, stage)
 			}
 			body, _ := iv80Notice(pg[name][0])
@@ -547,6 +633,15 @@ func TestArc1680bStageManifest(t *testing.T) {
 				}
 				if _, err := plansql.Parse(iv80SQL(sec, name)); err == nil || sqlerr.StateOf(err) != arg {
 					t.Errorf("%s:%s: not-parsed %s, but the parser answers %v", sec.stem, name, arg, err)
+				}
+			case "not-accepted":
+				// Outside the program (the rulings on 1680c r3), only where
+				// the rulings name the cell and PostgreSQL answered it.
+				if r, ok := iv80R4Rulings[iv80BaseStem(sec.stem)+":"+name]; !ok || r.class != iv80ClassNotAccepted {
+					t.Errorf("%s:%s: not-accepted without a ruling", sec.stem, name)
+				}
+				if stage != iv80OutsideStage || strings.HasPrefix(body, "ERR ") {
+					t.Errorf("%s:%s: not-accepted owned by %q, PostgreSQL %s", sec.stem, name, stage, body)
 				}
 			default:
 				t.Errorf("%s:%s: outcome %q is none of the four", sec.stem, name, outcome)

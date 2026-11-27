@@ -9,8 +9,8 @@ rt/lt	C	supported	unmet	-
 rt/tsPlus	C	supported	unmet	-
 rt/tsMinus	C	supported	unmet	-
 rt/isfinite	C	supported	unmet	-
-rt/extractDay	A	refusal numeric-infinity	unmet	-
-rt/extractEpoch	A	refusal numeric-infinity	unmet	-
+rt/extractDay	A	refusal interval-extract	met	-
+rt/extractEpoch	A	refusal interval-extract	met	-
 rt/datePart	C	supported	unmet	-
 rt/text	C	supported	unmet	-
 rt/bare	A	refusal bare-interval-result	met	-
@@ -58,7 +58,7 @@ lag/tsDiff	C	supported	unmet	-
 lag/tsDiffBare	A	refusal bare-interval-result	met	-
 lag/tsDiffCompare	D	supported	unmet	-
 tsdate/text	C	supported	unmet	-
-tsdate/bare	A	refusal bare-interval-result	unmet	-
+tsdate/bare	A	refusal timestamp-date-difference	met	-
 tsdate/compare	C	supported	unmet	-
 set/intersect/smallBig/default	D	rep-divergence	unmet	-
 set/intersect/bigSmall/default	D	rep-divergence	unmet	-

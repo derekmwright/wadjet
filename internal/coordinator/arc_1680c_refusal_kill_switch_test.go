@@ -12,7 +12,7 @@ import (
 )
 
 // TestArc1680cRefusalsUnderEveryKillSwitch: every refusal stage A owns (an
-// A refusal and every not-parsed cell of the interval corpus) is decided
+// A refusal and every not-parsed and not-accepted cell of the interval corpus) is decided
 // before any optimization, so turning any one kill switch off changes
 // neither whether the statement is refused nor its SQLSTATE nor its
 // identity, on the single and the DAG arm (#1680c; docs/testing/GATES.md,
@@ -50,7 +50,7 @@ func TestArc1680cRefusalsUnderEveryKillSwitch(t *testing.T) {
 				continue
 			}
 			f := strings.Split(m[0], "\t")
-			if len(f) < 2 || !(f[0] == "A" && strings.HasPrefix(f[1], "refusal ") || strings.HasPrefix(f[1], "not-parsed ")) {
+			if len(f) < 2 || !(f[0] == "A" && strings.HasPrefix(f[1], "refusal ") || strings.HasPrefix(f[1], "not-parsed ") || strings.HasPrefix(f[1], "not-accepted ")) {
 				continue
 			}
 			cells = append(cells, cell{sec.stem + ":" + c.name, c.sql})

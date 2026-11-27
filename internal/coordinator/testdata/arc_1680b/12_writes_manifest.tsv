@@ -3,12 +3,12 @@ w/insertSelect	A	refusal interval-write	met	-
 w/insertDerived	A	refusal interval-write	met	-
 w/insertValues	A	refusal interval-write	met	-
 w/insertZero	A	refusal interval-write	met	-
-w/insertSubquery	A	refusal interval-write	unmet	-
+w/insertSubquery	-	not-accepted 0A000	met	-
 w/insertTsDiff	A	refusal interval-write	met	-
 w/update	A	refusal interval-write	met	-
-w/updateDerived	A	refusal interval-write	unmet	-
+w/updateDerived	-	not-accepted 0A000	met	-
 w/updateZero	A	refusal interval-write	met	-
-w/merge	A	refusal interval-write	unmet	-
+w/merge	-	not-accepted 0A000	met	-
 w/ctas	A	refusal interval-write	met	-
 w/ctasDerived	A	refusal interval-write	met	-
 w/ctasNoData	A	refusal interval-write	met	-
