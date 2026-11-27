@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
 
 // AttachedFilterExprs lists the predicates the last PlanDistributed's stage
@@ -237,23 +239,17 @@ func resolveFilterAliasSpelling(stages []Stage) {
 // BuildColOrigins); any other qualifier is the arm's own inner name — the
 // table's name, `upper(t.s)` over `FROM t` — which the stream does not carry,
 // and the worker read it as the bare, probe-first name.
-//
-// requalified reports, after the resolution, whether the qualifier gave any
-// reference a qualifier other than the one it had (an OUTER join carrier
-// routes on that, ErrOuterJoinDerivedFilterDistributed).
-func joinCarrierBuildQualifier(s *Stage) (qualify func(table, col string) string, requalified func() bool) {
-	fired := false
-	requalified = func() bool { return fired }
+func joinCarrierBuildQualifier(s *Stage) func(table, col string) string {
 	switch s.Type {
 	case StageHashJoin, StageBroadcastJoin, StageSortMergeJoin:
 	default:
-		return nil, requalified
+		return nil
 	}
 	if s.BuildTableAlias == "" {
-		return nil, requalified
+		return nil
 	}
 	alias, origins := s.BuildTableAlias, s.BuildColOrigins
-	answer := func(table, col string) string {
+	return func(table, col string) string {
 		if table != "" {
 			if strings.EqualFold(table, alias) {
 				return table
@@ -269,20 +265,12 @@ func joinCarrierBuildQualifier(s *Stage) (qualify func(table, col string) string
 		}
 		return alias
 	}
-	return func(table, col string) string {
-		q := answer(table, col)
-		if q != "" && !strings.EqualFold(q, table) {
-			fired = true
-		}
-		return q
-	}, requalified
 }
 
 // ErrOuterJoinDerivedFilterDistributed hands the coordinator's single-process
-// pipeline a plan in which an OUTER join stage carries a filter that reads a
-// derived table's column: one ResolveFilterThroughProjects re-spelled into
-// the table's definition, or one joinCarrierBuildQualifier re-qualified onto
-// the stage's stream (#1678 line j).
+// pipeline a plan in which an OUTER join stage carries a filter that
+// ResolveFilterThroughProjects re-spelled into a derived table's COMPUTED
+// definition (#1678 line j; substitutesComputedDefinition).
 //
 // The re-spelled filter reads the right columns. What it cannot survive is
 // the stage's EMPTY partitions: a task whose build (or, for RIGHT and FULL,
@@ -298,9 +286,49 @@ func joinCarrierBuildQualifier(s *Stage) (qualify func(table, col string) string
 // disagreement is wider than this filter — a plain LEFT JOIN that selects a
 // derived table's computed column reaches it with no filter at all — and is
 // recorded on #1678; until it is repaired, this class runs where the join is
-// one operator over whole inputs.
+// one operator over whole inputs. A RENAME is not in the class: the
+// declaration names a renamed column by its source, as the stream does, and
+// the stage DAG answers those filters itself.
 var ErrOuterJoinDerivedFilterDistributed = errors.New(
-	"an outer join's filter over a derived table's column is not evaluable on the distributed path")
+	"an outer join's filter over a derived table's computed column is not evaluable on the distributed path")
+
+// substitutesComputedDefinition reports whether one of the output names a
+// filter's resolution substituted (ResolveFilterThroughProjects' aliases) is a
+// COMPUTED projection of a Project under n — an expression, not a bare
+// column or a rename. A name two Projects publish, one computing it, answers
+// true: the route is the conservative side.
+func substitutesComputedDefinition(n *logical.Node, names []string) bool {
+	if n == nil || len(names) == 0 {
+		return false
+	}
+	want := make(map[string]bool, len(names))
+	for _, nm := range names {
+		want[strings.ToLower(nm)] = true
+	}
+	var walk func(*logical.Node) bool
+	walk = func(cur *logical.Node) bool {
+		if cur == nil {
+			return false
+		}
+		if cur.Type == logical.NodeProject {
+			for _, pr := range cur.Projections {
+				if pr.Alias == "" || !want[strings.ToLower(pr.Alias)] || pr.ASTExpr == nil || pr.IsAgg {
+					continue
+				}
+				if pr.Column == "" && !localPlanFacts.IsSimpleColRefForRename(pr.ASTExpr) {
+					return true
+				}
+			}
+		}
+		for _, c := range cur.Children {
+			if walk(c) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(n)
+}
 
 // isOuterJoinType reports whether a join stage's type pads one side with NULLs.
 func isOuterJoinType(t string) bool {

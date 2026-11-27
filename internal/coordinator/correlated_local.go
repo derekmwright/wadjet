@@ -288,16 +288,16 @@ func (c *Coordinator) ResidualSidesLocalRoutes() int64 {
 }
 
 // runOuterJoinDerivedFilterLocal runs a plan the stage DAG refused because an
-// outer join's filter reads a derived table's column
+// outer join's filter reads a derived table's computed column
 // (dagplan.ErrOuterJoinDerivedFilterDistributed) on the coordinator-local
 // single-process pipeline.
 func (c *Coordinator) runOuterJoinDerivedFilterLocal(queryID string, lp *statementPlan, start time.Time, refusal error) (*SQLResult, error) {
 	return c.runRefusedLocal(queryID, lp, start, refusal,
-		"an outer join's filter over a derived table's column", &c.localOuterJoinFilter)
+		"an outer join's filter over a derived table's computed column", &c.localOuterJoinFilter)
 }
 
 // OuterJoinDerivedFilterLocalRoutes reports how many plans refused for an outer
-// join's filter over a derived table's column were routed to
+// join's filter over a derived table's computed column were routed to
 // the coordinator-local pipeline.
 func (c *Coordinator) OuterJoinDerivedFilterLocalRoutes() int64 {
 	return c.localOuterJoinFilter.Load()

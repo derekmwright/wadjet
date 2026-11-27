@@ -416,7 +416,7 @@ type Coordinator struct {
 	// because a join residual's re-spelling merged its two sides (arc DC).
 	localResidualSides atomic.Int64
 	// localOuterJoinFilter counts queries whose plan the stage DAG refused
-	// because an outer join's filter read a derived table's
+	// because an outer join's filter read a derived table's computed
 	// column (dagplan.ErrOuterJoinDerivedFilterDistributed, #1678 line j).
 	localOuterJoinFilter atomic.Int64
 	// localPolicedWindow counts queries whose plan the stage DAG refused for

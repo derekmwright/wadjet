@@ -1190,13 +1190,15 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 				// never writes to the logical plan the single-process path
 				// shares.
 				if len(node.Children) == 1 {
-					qualify, requalified := joinCarrierBuildQualifier(&(*stages)[filterIdx])
-					ast, names, resolved := logical.ResolveFilterThroughProjects(pred, node.Children[0], qualify)
+					ast, names, resolved := logical.ResolveFilterThroughProjects(pred, node.Children[0],
+						joinCarrierBuildQualifier(&(*stages)[filterIdx]))
 					if resolved {
 						exprStr, aliasNames, exprTree = ast.String(), names, ast
 					}
-					if (resolved || requalified()) && isOuterJoinType((*stages)[filterIdx].JoinType) &&
-						p.outerJoinFilterRouteErr == nil {
+					// An outer join's empty partitions cannot carry a filter
+					// over a computed derived column (ErrOuterJoinDerivedFilterDistributed).
+					if resolved && isOuterJoinType((*stages)[filterIdx].JoinType) &&
+						p.outerJoinFilterRouteErr == nil && substitutesComputedDefinition(node.Children[0], names) {
 						p.outerJoinFilterRouteErr = fmt.Errorf("%w: stage %s, filter %q",
 							ErrOuterJoinDerivedFilterDistributed, (*stages)[filterIdx].ID, exprStr)
 					}

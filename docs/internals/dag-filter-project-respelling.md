@@ -59,15 +59,16 @@ stream carries that name (the build alias, or a scan alias in
 `BuildColOrigins`); any other — the table's own name, `upper(t.s)` over `FROM
 t` — is re-qualified the same way.
 
-An OUTER join stage whose filter reads a derived table's column refuses the
-DAG plan (`ErrOuterJoinDerivedFilterDistributed`) and runs on the
-coordinator-local pipeline. The re-spelled filter is right; what fails is a
-task whose padded side's partition is empty, which shapes that side from the
-plan-declared side schema — a computed column first, the source columns the
-stream carries left out — so its file names its columns differently from its
-siblings' and the gather refuses the statement under ADR-0010. That
-declared-schema disagreement predates this rule and is reached by plain
-LEFT JOINs with no filter; it is recorded on #1678.
+An OUTER join stage whose filter is re-spelled into a derived table's
+COMPUTED definition refuses the DAG plan (`ErrOuterJoinDerivedFilterDistributed`)
+and runs on the coordinator-local pipeline. The re-spelled filter is right;
+what fails is a task whose padded side's partition is empty, which shapes that
+side from the plan-declared side schema — a computed column first, the source
+columns the stream carries left out — so its file names its columns
+differently from its siblings' and the gather refuses the statement under
+ADR-0010. A rename is declared by its source name, as the stream carries it,
+and stays on the DAG. The declared-schema disagreement predates this rule and
+is reached by plain LEFT JOINs with no filter; it is recorded on #1678.
 
 It also stops at a Sort or a LIMIT. Those DO emit stages, carrying the
 names above them, so a predicate re-spelled past one would name a column

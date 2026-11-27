@@ -156,14 +156,14 @@ func TestJoinStageFilterQualifiesSharedAndInnerQualifiedDefinitions(t *testing.T
 	}
 }
 
-// AN OUTER JOIN'S FILTER OVER A DERIVED TABLE'S COLUMN ROUTES, AND NOTHING
-// ELSE DOES (#1678 line j, round 2). Re-spelled, the filter reads the right
-// columns, but a task whose padded side's partition is empty shapes that side
-// from a declared schema that disagrees with the stream, and the gather
-// refused the statement (ADR-0010). The refusal fires for LEFT, RIGHT and
-// FULL with the derived table on either side, and not for the same filter
-// over an INNER join, an outer join with no filter, or an outer join whose
-// filter names only base columns.
+// AN OUTER JOIN'S FILTER OVER A DERIVED TABLE'S COMPUTED COLUMN ROUTES, AND
+// NOTHING ELSE DOES (#1678 line j, round 2). Re-spelled, the filter reads the
+// right columns, but a task whose padded side's partition is empty shapes
+// that side from a declared schema that disagrees with the stream, and the
+// gather refused the statement (ADR-0010). The refusal fires for LEFT, RIGHT
+// and FULL with the derived table on either side, and not for the same filter
+// over an INNER join, an outer join with no filter, an outer join whose
+// filter names only base columns, or one over a renamed column.
 func TestOuterJoinDerivedFilterRoutes(t *testing.T) {
 	const d = `(SELECT n_nationkey, lower(n_name) AS ln FROM nation)`
 	for _, c := range []struct {
@@ -183,6 +183,10 @@ func TestOuterJoinDerivedFilterRoutes(t *testing.T) {
 		{"leftNoFilter", `SELECT n1.n_nationkey, n2.ln FROM nation n1 LEFT JOIN ` + d + ` n2 ON n1.n_nationkey = n2.n_nationkey`, false},
 		{"leftBaseFilter", `SELECT n1.n_nationkey FROM nation n1 LEFT JOIN nation n2 ON n1.n_nationkey = n2.n_nationkey
 			WHERE n1.n_name <> n2.n_name OR n2.n_name IS NULL`, false},
+		// A RENAME is declared by its source name, as the stream carries it:
+		// the DAG answers it (R0's S3, S4, pd_left_isnull).
+		{"leftRenameFilter", `SELECT n1.n_nationkey FROM nation n1 LEFT JOIN (SELECT n_nationkey, n_name AS nm FROM nation) n2
+			ON n1.n_nationkey = n2.n_nationkey WHERE n1.n_name <> n2.nm OR n2.nm IS NULL`, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			for _, bt := range []int64{0, 1} {
