@@ -189,6 +189,14 @@ func (e *BinOpNumeric) resolveModeSlow(b *batch.RecordBatch) {
 	if e.modeReady.Load() {
 		return
 	}
+	// A timestamp difference — two column (or other temporal) operands, one
+	// a TIMESTAMP — has no value here: PostgreSQL's is an interval, and the
+	// modes below would compute milliseconds or a day count. Decided with
+	// the operand types, once; the node never resolves, so every later call
+	// refuses too (timestamp_difference_guard.go, #1713d round 8).
+	if e.Op == "-" && isTimestampDifferenceOperands(e.Left, e.Right, b) {
+		raiseTimestampDifference()
+	}
 	// The DECIMAL question is asked first and answers for the whole node: a
 	// DECIMAL beside an integer is numeric in PostgreSQL, so `d * 2` must not
 	// be caught by the int mode below, and `d * f` must not be caught by this

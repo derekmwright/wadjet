@@ -595,6 +595,12 @@ func cmpFloat64Op(lv, rv float64, op CmpOp) bool {
 type IsNull struct {
 	Operand Expr
 	Not     bool // IS NOT NULL
+	// diffL / diffR are the operands of a `-` Operand, set by the compiler:
+	// over a timestamp difference — which the minus itself refuses to
+	// compute (timestamp_difference_guard.go) — IS [NOT] NULL is answered
+	// from them (tsDiffNull), the one use whose answer needs no value.
+	diffL, diffR Expr
+	diffState    atomic.Uint32
 }
 
 func (e *IsNull) Eval(b *batch.RecordBatch, row int) any {
@@ -602,6 +608,11 @@ func (e *IsNull) Eval(b *batch.RecordBatch, row int) any {
 }
 
 func (e *IsNull) EvalBool(b *batch.RecordBatch, row int) bool {
+	if e.diffL != nil {
+		if null, ok := e.tsDiffNull(b, row); ok {
+			return null != e.Not
+		}
+	}
 	v := e.Operand.Eval(b, row)
 	if e.Not {
 		return v != nil

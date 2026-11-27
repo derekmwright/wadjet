@@ -25,7 +25,10 @@ func ConstantEvalError(node plansql.Node) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			fe, ok := r.(fatalEval)
-			if !ok {
+			if !ok || isTimestampDifferenceRefusal(fe.err) {
+				// The timestamp-difference guard is this engine's refusal,
+				// not one PostgreSQL raises while folding: the caller's own
+				// diagnostic stands (#1713d round 8).
 				err = nil
 				return
 			}

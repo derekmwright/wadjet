@@ -39,8 +39,8 @@ const (
 	// DATE and the difference a count of days.
 	UnknownAsDate
 	// UnknownAsTimestamp: `timestamp - unknown`, `unknown - timestamp` — the
-	// literal is a TIMESTAMP and the difference the documented milliseconds
-	// (this engine has no INTERVAL type for `timestamp - timestamp`).
+	// literal is a TIMESTAMP and the difference an INTERVAL, which this
+	// engine cannot compute: refused (the timestamp-difference guard).
 	UnknownAsTimestamp
 	// UnknownAsInterval: `timestamp + unknown`, `unknown + timestamp` — the
 	// literal is an INTERVAL and the sum a TIMESTAMP.
@@ -191,15 +191,16 @@ func (e *BinOp) unknownTemporalArith(b *batch.RecordBatch, row int, lv, rv any) 
 		}
 		return diff, true
 	case UnknownAsTimestamp:
+		// The literal is read first, so text that names no instant keeps
+		// PostgreSQL's 22007 / 22008; a well-formed one makes this a
+		// timestamp difference, which has no value here (its milliseconds
+		// were answered until #1713d round 8: the guard,
+		// timestamp_difference_guard.go).
 		ms, _ := castTemporalText(lit, castToTimestampKind)
 		if x, inf := timestampInfinity(ms.(int64)); inf {
 			raiseInfiniteOperand("`"+e.Op+"` between dates or timestamps", x)
 		}
-		diff := t.UnixMilli() - ms.(int64)
-		if litLeft {
-			diff = -diff
-		}
-		return float64(diff), true
+		raiseTimestampDifference()
 	case UnknownAsInterval:
 		return intervalShift(t, castToIntervalText(lit), false), true
 	}

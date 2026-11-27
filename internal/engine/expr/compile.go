@@ -400,6 +400,16 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		if err != nil {
 			return nil, err
 		}
+		// The timestamp-difference guard at compile time, where both
+		// operands' producers are already decided (a cast, a clock function,
+		// a declared scalar subquery, date or interval arithmetic): the node
+		// is built refusing, and raises when it is evaluated — not here, so
+		// the statement's own validation, which runs before execution, keeps
+		// its PostgreSQL diagnostics. Column operands decide when the node
+		// meets a batch (timestamp_difference_guard.go, #1713d round 8).
+		if n.Op == "-" && isTimestampDifferenceOperands(left, right, nil) {
+			return refusingTimestampDifference(left, right), nil
+		}
 		return compileBinOp(left, right, n.Op, ctx), nil
 
 	case *plansql.UnaryOp:
@@ -683,6 +693,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		switch n.Check {
 		case "null":
 			isNull := &IsNull{Operand: operand, Not: n.Not}
+			isNull.diffL, isNull.diffR = minusOperands(operand)
 			// Offsets-shape: IS [NOT] NULL over a bare column is a null-mask
 			// test. The generic node boxes ColRef.Eval's result — for a
 			// string column that is a full copy of the value — only to

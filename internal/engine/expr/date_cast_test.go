@@ -425,12 +425,9 @@ func TestDateArithThroughBinOp(t *testing.T) {
 			&BinOp{Left: castDate(lit("1996-01-10")), Right: castDate(lit("1996-01-01")), Op: "+"},
 			float64(19001), "adding two dates means nothing in SQL"},
 		// An instant difference is an INTERVAL in SQL and this engine has no
-		// interval column to answer with, so it stays on the numeric path
-		// (a difference in milliseconds) rather than inventing a unit.
-		{"timestamp - timestamp stays numeric",
-			&BinOp{Left: &Cast{Operand: lit("1996-01-10 00:00:01"), DestType: "timestamp"},
-				Right: &Cast{Operand: lit("1996-01-10 00:00:00"), DestType: "timestamp"}, Op: "-"},
-			float64(1000), ""},
+		// interval value to answer with: it is refused (the
+		// timestamp-difference guard, #1713d round 8), asserted below. It
+		// answered its milliseconds (1000) through round 7.
 		// A fractional shift declines rather than silently rounding a date.
 		{"date - 1.5 declines",
 			&BinOp{Left: castDate(lit("1996-01-10")), Right: &Lit{Val: 1.5}, Op: "-"},
@@ -452,6 +449,13 @@ func TestDateArithThroughBinOp(t *testing.T) {
 			}
 		})
 	}
+	t.Run("timestamp - timestamp is refused", func(t *testing.T) {
+		e := &BinOp{Left: &Cast{Operand: lit("1996-01-10 00:00:01"), DestType: "timestamp"},
+			Right: &Cast{Operand: lit("1996-01-10 00:00:00"), DestType: "timestamp"}, Op: "-"}
+		if st, _ := recoverFatalEvalForTest(t, func() { e.Eval(b, 0) }); st != "0A000" {
+			t.Errorf("SQLSTATE %q, want 0A000", st)
+		}
+	})
 }
 
 // TestDateArithOverColumnPair covers the shape the typed nodes take:

@@ -80,8 +80,13 @@ func TestArcTIInfiniteValueOwners(t *testing.T) {
 		{"SELECT d - d", [3]string{"ERR 22008", "ERR 22008", "0"}},
 		{"SELECT d - DATE '2024-01-01'", [3]string{"ERR 22008", "ERR 22008", "14"}},
 		{"SELECT d - '2024-01-01'", [3]string{"ERR 22008", "ERR 22008", "14"}},
-		{"SELECT ts - TIMESTAMP '2024-01-01 00:00:00'", [3]string{"ERR 22008", "ERR 22008", "1.2474e+09"}},
-		{"SELECT ts - '2024-01-01 00:00:00'", [3]string{"ERR 22008", "ERR 22008", "1.2474e+09"}},
+		// A timestamp difference is refused whatever the operands hold (the
+		// timestamp-difference guard, #1713d round 8): its finite row
+		// answered the milliseconds 1.2474e+09 through round 7. The quoted
+		// literal is read first, so an infinite column operand there keeps
+		// its 22008.
+		{"SELECT ts - TIMESTAMP '2024-01-01 00:00:00'", [3]string{"ERR 0A000", "ERR 0A000", "ERR 0A000"}},
+		{"SELECT ts - '2024-01-01 00:00:00'", [3]string{"ERR 22008", "ERR 22008", "ERR 0A000"}},
 		// EXTRACT: year / epoch ±Infinity, every other field NULL
 		{"SELECT extract(year FROM ts)", [3]string{"+Inf", "-Inf", "2024"}},
 		{"SELECT extract(epoch FROM d)", [3]string{"+Inf", "-Inf", "1.7052768e+09"}},

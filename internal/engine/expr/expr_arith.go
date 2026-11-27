@@ -28,9 +28,17 @@ type BinOp struct {
 	// and an integer expression under one of those keeps its domain and its
 	// 22003 rather than being read through a double (#849, int_domain.go).
 	ints intArm
+	// tsGuard is the timestamp-difference guard's decision for this node,
+	// resolved once (timestamp_difference_guard.go, #1713d round 8).
+	tsGuard atomic.Uint32
 }
 
 func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
+	// A timestamp difference has no value here (PostgreSQL's is an
+	// interval): refused before any arm below can compute its number.
+	if e.tsGuard.Load() != tsGuardClear {
+		e.tsGuardCheck(b)
+	}
 	// Exact fixed-point arithmetic, ahead of the ToFloat64 pair below: `-a + b`
 	// over two DECIMAL columns is a numeric expression in PostgreSQL and an
 	// exact one here, where reading both boxes as doubles loses every digit
