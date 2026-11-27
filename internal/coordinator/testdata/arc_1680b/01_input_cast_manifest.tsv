@@ -103,13 +103,13 @@ prec/literal3~text	-	not-parsed 42601	met	-
 prec/second3~text	-	not-parsed 42601	met	-
 prec/ds2~text	-	not-parsed 42601	met	-
 prec/iv6~text	-	not-parsed 22007	met	-
-prec/iv7~text	A	refusal typmod	unmet	-
+prec/iv7~text	A	refusal typmod	met	-
 prec/castDay~text	-	not-parsed 22007	met	-
 prec/castYear~text	-	not-parsed 22007	met	-
 prec/castMonthTyp~text	-	not-parsed 22007	met	-
 cast/fromText~text	C	supported	unmet	-
 cast/colon~text	C	supported	met	-
-cast/fromTime~text	A	refusal time-type	unmet	-
+cast/fromTime~text	A	refusal time-type	met	-
 make/all~text	C	supported	unmet	-
 make/days~text	C	supported	unmet	-
 make/secs~text	C	supported	unmet	-

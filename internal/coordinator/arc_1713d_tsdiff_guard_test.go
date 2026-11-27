@@ -135,7 +135,12 @@ func tdgCells() []tdgCell {
 			"0A000|" + tdgRuleSentence + "a GROUP BY key", ""},
 		{"orderKey", "SELECT id FROM tg_t ORDER BY ts2 - ts", "2; 1; 3",
 			"0A000|" + tdgRuleSentence + "an ORDER BY key", ""},
+		// The bare sum is the statement's interval result column, a refusal
+		// held at every stage and named first (#1680c); the argument's
+		// refusal is the display cast's (sumText).
 		{"sum", "SELECT sum(ts2 - ts) AS r FROM tg_t", "1 day 03:00:00.5",
+			"0A000|" + tdgRuleSentence + "a query result column", ""},
+		{"sumText", "SELECT CAST(sum(ts2 - ts) AS TEXT) AS r FROM tg_t", "1 day 03:00:00.5",
 			"0A000|" + tdgRuleSentence + "an argument of sum", ""},
 		{"joinKey", "SELECT a.id FROM tg_t a JOIN tg_t b ON a.ts2 - a.ts = b.ts2 - b.ts ORDER BY a.id", "1; 2",
 			"0A000|" + tdgRuleSentence, ""},

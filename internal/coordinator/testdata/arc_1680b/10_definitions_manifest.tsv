@@ -100,7 +100,7 @@ sentinel/negOfNearMin	C	pg-error 22008	unmet	-
 sentinel/negOfInfinityTriple	-	not-parsed 22007	met	-
 sentinel/mulNegInfinityTriple	-	not-parsed 22007	met	-
 age/borrow	A	refusal bare-interval-result	unmet	-
-age/timeBorrow	A	refusal timestamp-millisecond-carrier	unmet	-
+age/timeBorrow	A	refusal timestamp-millisecond-carrier	met	-
 age/null	A	refusal bare-interval-result	unmet	-
 age/infLeft	A	refusal bare-interval-result	unmet	-
 age/infRight	A	refusal bare-interval-result	unmet	-
@@ -108,14 +108,14 @@ age/infOpposed	A	refusal bare-interval-result	unmet	-
 age/infInf	C	pg-error 22008	unmet	-
 age/negInfNegInf	C	pg-error 22008	unmet	-
 age/bc	A	refusal bare-interval-result	unmet	-
-age/date	A	refusal timestamptz	unmet	-
-age/dateNY	A	refusal timestamptz	unmet	-
-age/dateUTC	A	refusal timestamptz	unmet	-
-age/dateMonthNY	A	refusal timestamptz	unmet	-
-age/dateGapUTC	A	refusal timestamptz	unmet	-
-age/dateGapHavana	A	refusal timestamptz	unmet	-
-age/tz/UTC/fallBack	A	refusal timestamptz	unmet	-
-age/tz/America/New_York/fallBack	A	refusal timestamptz	unmet	-
+age/date	A	refusal timestamptz	met	-
+age/dateNY	A	refusal timestamptz	met	-
+age/dateUTC	A	refusal timestamptz	met	-
+age/dateMonthNY	A	refusal timestamptz	met	-
+age/dateGapUTC	A	refusal timestamptz	met	-
+age/dateGapHavana	A	refusal timestamptz	met	-
+age/tz/UTC/fallBack	A	refusal timestamptz	met	-
+age/tz/America/New_York/fallBack	A	refusal timestamptz	met	-
 types/datePlusInt	C	supported	met	-
 types/dateMinusInt	C	supported	met	-
 types/intPlusDate	C	supported	met	-
@@ -124,8 +124,8 @@ types/datePlusInterval	C	supported	unmet	-
 types/dateMinusInterval	C	supported	met	-
 types/intervalPlusDate	C	supported	met	-
 types/intervalMinusDate	C	pg-error 42883	met	-
-types/datePlusTime	A	refusal time-type	unmet	-
-types/dateMinusTime	A	refusal time-type	unmet	-
+types/datePlusTime	A	refusal time-type	met	-
+types/dateMinusTime	A	refusal time-type	met	-
 types/tsMinusTs	A	refusal bare-interval-result	met	-
 types/tsMinusDate	A	refusal bare-interval-result	unmet	-
 types/dateMinusTs	A	refusal bare-interval-result	unmet	-
@@ -137,13 +137,13 @@ types/tsPlusTs	C	pg-error 42883	met	-
 types/datePlusDate	C	pg-error 42883	met	-
 types/dateTimesInt	C	pg-error 42883	met	-
 types/tsPlusInt	C	pg-error 42883	met	-
-types/timeMinusTime	A	refusal time-type	unmet	-
-types/timePlusInterval	A	refusal time-type	unmet	-
-types/intervalPlusTime	A	refusal time-type	unmet	-
-types/timeMinusInterval	A	refusal time-type	unmet	-
-types/tstzMinusTstz	A	refusal timestamptz	unmet	-
-types/tstzMinusTs	A	refusal timestamptz	unmet	-
-types/tstzPlusInterval	A	refusal timestamptz	unmet	-
+types/timeMinusTime	A	refusal time-type	met	-
+types/timePlusInterval	A	refusal time-type	met	-
+types/intervalPlusTime	A	refusal time-type	met	-
+types/timeMinusInterval	A	refusal time-type	met	-
+types/tstzMinusTstz	A	refusal timestamptz	met	-
+types/tstzMinusTs	A	refusal timestamptz	met	-
+types/tstzPlusInterval	A	refusal timestamptz	met	-
 types/intervalTimesInt	A	refusal bare-interval-result	met	-
 types/intTimesInterval	A	refusal bare-interval-result	met	-
 types/intervalDivInt	A	refusal bare-interval-result	met	-
@@ -165,15 +165,15 @@ setop/nullFirstArm	D	supported	unmet	-
 setop/intArm	D	pg-error 42804	unmet	-
 setop/textArm	D	pg-error 42804	unmet	-
 setop/tsDiffArm	D	supported	unmet	-
-dst/gapTarget	A	refusal timestamptz	unmet	-
-dst/foldTarget	A	refusal timestamptz	unmet	-
-dst/foldMinus	A	refusal timestamptz	unmet	-
+dst/gapTarget	A	refusal timestamptz	met	-
+dst/foldTarget	A	refusal timestamptz	met	-
+dst/foldMinus	A	refusal timestamptz	met	-
 dst/gapInput	A	refusal timestamptz	unmet	-
-dst/monthIntoGap	A	refusal timestamptz	unmet	-
-dst/hoursAcrossFold	A	refusal timestamptz	unmet	-
+dst/monthIntoGap	A	refusal timestamptz	met	-
+dst/hoursAcrossFold	A	refusal timestamptz	met	-
 dst/dateAddZone	A	refusal timestamptz	unmet	-
-dst/seriesZone	A	refusal timestamptz	unmet	-
-dst/seriesNoZone	A	refusal timestamptz	unmet	-
+dst/seriesZone	A	refusal timestamptz	met	-
+dst/seriesNoZone	A	refusal timestamptz	met	-
 fn/binInfStride	C	pg-error 22008	unmet	-
 fn/binInfSource	C	supported	unmet	-
 fn/binDaysStride	C	supported	unmet	-

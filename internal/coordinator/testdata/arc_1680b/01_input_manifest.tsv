@@ -124,7 +124,7 @@ prec/literal3	-	not-parsed 42601	met	-
 prec/second3	-	not-parsed 42601	met	-
 prec/ds2	-	not-parsed 42601	met	-
 prec/iv6	-	not-parsed 22007	met	-
-prec/iv7	A	refusal typmod	unmet	-
+prec/iv7	A	refusal typmod	met	-
 prec/castDay	-	not-parsed 22007	met	-
 prec/castYear	-	not-parsed 22007	met	-
 prec/castMonthTyp	-	not-parsed 22007	met	-
@@ -132,11 +132,11 @@ cast/fromText	A	refusal bare-interval-result	met	-
 cast/colon	A	refusal bare-interval-result	met	-
 cast/toText	C	supported	unmet	-
 cast/toVarchar	C	supported	unmet	-
-cast/toChar	A	refusal char-display	unmet	-
+cast/toChar	A	refusal char-display	met	-
 cast/toTextNull	C	supported	met	-
 cast/fromInt	C	pg-error 42846	met	-
 cast/fromNumeric	C	pg-error 42846	met	-
-cast/fromTime	A	refusal time-type	unmet	-
+cast/fromTime	A	refusal time-type	met	-
 cast/toTime	-	not-parsed 42601	met	-
 cast/toBigint	C	pg-error 42846	met	-
 cast/fromDuration	C	pg-error 42704	unmet	-

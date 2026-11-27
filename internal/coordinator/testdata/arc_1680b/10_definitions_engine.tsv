@@ -101,7 +101,7 @@ sentinel/negOfNearMin	*	wrong-sqlstate	ERR 22007: invalid input syntax for type 
 sentinel/negOfInfinityTriple	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 months 2147483647 days 9223372036854775807 microseconds"
 sentinel/mulNegInfinityTriple	*	error	ERR 22007: invalid input syntax for type interval: "-2147483648 months -2147483648 days -9223372036854775808 microseconds"
 age/borrow	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/timeBorrow	*	error	ERR 42883: unknown function: age (did you mean abs?)
+age/timeBorrow	*	refusal	ERR 0A000 {timestamp-millisecond-carrier}: age over a sub-millisecond TIMESTAMP literal is not supported: a TIMESTAMP here holds milliseconds, and the literal has finer digits
 age/null	*	error	ERR 42883: unknown function: age (did you mean abs?)
 age/infLeft	*	error	ERR 42883: unknown function: age (did you mean abs?)
 age/infRight	*	error	ERR 42883: unknown function: age (did you mean abs?)
@@ -109,15 +109,15 @@ age/infOpposed	*	error	ERR 42883: unknown function: age (did you mean abs?)
 age/infInf	*	wrong-sqlstate	ERR 42883: unknown function: age (did you mean abs?)
 age/negInfNegInf	*	wrong-sqlstate	ERR 42883: unknown function: age (did you mean abs?)
 age/bc	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/date	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/dateNY	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/dateUTC	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/dateMonthNY	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/dateGapUTC	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/dateGapHavana	*	error	ERR 42883: unknown function: age (did you mean abs?)
+age/date	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+age/dateNY	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+age/dateUTC	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+age/dateMonthNY	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+age/dateGapUTC	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+age/dateGapHavana	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 explain/age/date	*	pg-only	-
-age/tz/UTC/fallBack	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/tz/America/New_York/fallBack	*	error	ERR 42883: unknown function: age (did you mean abs?)
+age/tz/UTC/fallBack	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+age/tz/America/New_York/fallBack	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 types/datePlusInt	*	agree	a:DATE | 2024-02-01
 types/dateMinusInt	*	agree	a:DATE | 2024-01-30
 types/intPlusDate	*	agree	a:DATE | 2024-02-01
@@ -126,8 +126,8 @@ types/datePlusInterval	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" 
 types/dateMinusInterval	*	agree	a:TIMESTAMP | 2024-01-30 00:00:00
 types/intervalPlusDate	*	agree	a:TIMESTAMP | 2024-02-01 00:00:00
 types/intervalMinusDate	*	pg-error	ERR 42883: operator does not exist: interval - date
-types/datePlusTime	*	differs	a:text | 19754
-types/dateMinusTime	*	differs	a:text | 19752
+types/datePlusTime	*	refusal	ERR 0A000 {time-type}: TIME arithmetic (+) is not supported: this engine has no TIME type, and a TIME operand is not read as a time of day (ADR-0012 temporal r23)
+types/dateMinusTime	*	refusal	ERR 0A000 {time-type}: TIME arithmetic (-) is not supported: this engine has no TIME type, and a TIME operand is not read as a time of day (ADR-0012 temporal r23)
 types/tsMinusTs	*	refusal	ERR 0A000 {bare-interval-result}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
 types/tsMinusDate	*	error	ERR 42883: operator does not exist: timestamp without time zone - date
 types/dateMinusTs	*	error	ERR 42883: operator does not exist: date - timestamp without time zone
@@ -139,13 +139,13 @@ types/tsPlusTs	*	pg-error	ERR 42883: operator does not exist: timestamp without 
 types/datePlusDate	*	pg-error	ERR 42883: operator does not exist: date + date
 types/dateTimesInt	*	pg-error	ERR 42883: operator does not exist: date * integer
 types/tsPlusInt	*	pg-error	ERR 42883: operator does not exist: timestamp without time zone + integer
-types/timeMinusTime	*	differs	a:double precision | -22
-types/timePlusInterval	*	differs	a:text | NULL
-types/intervalPlusTime	*	differs	a:text | NULL
-types/timeMinusInterval	*	differs	a:text | NULL
-types/tstzMinusTstz	*	refusal	ERR 0A000 {bare-interval-result}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
-types/tstzMinusTs	*	refusal	ERR 0A000 {bare-interval-result}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
-types/tstzPlusInterval	*	differs	a:TIMESTAMP | 2024-01-03 00:00:00
+types/timeMinusTime	*	refusal	ERR 0A000 {time-type}: TIME arithmetic (-) is not supported: this engine has no TIME type, and a TIME operand is not read as a time of day (ADR-0012 temporal r23)
+types/timePlusInterval	*	refusal	ERR 0A000 {time-type}: TIME arithmetic (+) is not supported: this engine has no TIME type, and a TIME operand is not read as a time of day (ADR-0012 temporal r23)
+types/intervalPlusTime	*	refusal	ERR 0A000 {time-type}: TIME arithmetic (+) is not supported: this engine has no TIME type, and a TIME operand is not read as a time of day (ADR-0012 temporal r23)
+types/timeMinusInterval	*	refusal	ERR 0A000 {time-type}: TIME arithmetic (-) is not supported: this engine has no TIME type, and a TIME operand is not read as a time of day (ADR-0012 temporal r23)
+types/tstzMinusTstz	*	refusal	ERR 0A000 {timestamptz}: timestamptz - interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+types/tstzMinusTs	*	refusal	ERR 0A000 {timestamptz}: timestamptz - interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+types/tstzPlusInterval	*	refusal	ERR 0A000 {timestamptz}: timestamptz + interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 types/intervalTimesInt	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 types/intTimesInterval	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 types/intervalDivInt	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
@@ -167,15 +167,15 @@ setop/nullFirstArm	*	refusal	ERR 0A000 {bare-interval-result}: interval values c
 setop/intArm	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 setop/textArm	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 setop/tsDiffArm	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-dst/gapTarget	*	differs	a:TIMESTAMP | 2024-03-10 02:30:00
-dst/foldTarget	*	differs	a:TIMESTAMP | 2024-11-03 01:30:00
-dst/foldMinus	*	differs	a:TIMESTAMP | 2024-11-03 01:30:00
+dst/gapTarget	*	refusal	ERR 0A000 {timestamptz}: timestamptz + interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+dst/foldTarget	*	refusal	ERR 0A000 {timestamptz}: timestamptz + interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+dst/foldMinus	*	refusal	ERR 0A000 {timestamptz}: timestamptz - interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 dst/gapInput	*	differs	a:TIMESTAMP | 2024-03-10 02:30:00
-dst/monthIntoGap	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-dst/hoursAcrossFold	*	differs	a:TIMESTAMP,b:TIMESTAMP | 2024-11-03 01:30:00,2024-11-03 02:30:00
+dst/monthIntoGap	*	refusal	ERR 0A000 {timestamptz}: timestamptz + interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+dst/hoursAcrossFold	*	refusal	ERR 0A000 {timestamptz}: timestamptz + interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 dst/dateAddZone	*	error	ERR 42883: function date_add(timestamp, unknown, unknown) does not exist
-dst/seriesZone	*	refusal	ERR 0A000 {function-generate_series}: interval values cannot yet be used as a table function's argument (generate_series): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
-dst/seriesNoZone	*	refusal	ERR 0A000 {function-generate_series}: interval values cannot yet be used as a table function's argument (generate_series): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+dst/seriesZone	*	refusal	ERR 0A000 {timestamptz}: generate_series over timestamptz bounds with an interval step is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+dst/seriesNoZone	*	refusal	ERR 0A000 {timestamptz}: generate_series over timestamptz bounds with an interval step is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 fn/binInfStride	*	wrong-sqlstate	ERR 42601: syntax error at or near ","
 fn/binInfSource	*	refusal	ERR 0A000 {interval-function-argument}: date_bin over an interval argument is not supported
 fn/binDaysStride	*	error	ERR 22007: invalid input syntax for type interval: "1 day 1 hour"

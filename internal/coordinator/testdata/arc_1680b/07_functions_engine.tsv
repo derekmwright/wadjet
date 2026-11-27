@@ -50,7 +50,7 @@ series/date	*	refusal	ERR 0A000 {function-generate_series}: interval values cann
 series/zero	*	refusal	ERR 0A000 {function-generate_series}: interval values cannot yet be used as a table function's argument (generate_series): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 series/zeroNormalized	*	wrong-sqlstate	ERR 22007: invalid input syntax for type interval: "1 mon -30 days"
 series/inf	*	wrong-sqlstate	ERR 42601: syntax error at or near ")"
-series/tzDst	*	refusal	ERR 0A000 {function-generate_series}: interval values cannot yet be used as a table function's argument (generate_series): compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+series/tzDst	*	refusal	ERR 0A000 {timestamptz}: generate_series over timestamptz bounds with an interval step is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 tochar/hms	*	error	ERR 22007: invalid input syntax for type interval: "15 hours 2 minutes 12 seconds"
 tochar/days	*	error	ERR 22007: invalid input syntax for type interval: "1 year 2 mons 3 days"
 tochar/us	*	error	ERR 42601: syntax error at or near ","
@@ -82,8 +82,8 @@ operand/divInterval	*	pg-error	ERR 42883: operator does not exist: interval / in
 operand/numberDiv	*	pg-error	ERR 42883: operator does not exist: integer / interval
 operand/mod	*	pg-error	ERR 42883: operator does not exist: interval % integer
 operand/plusDate	*	agree	a:TIMESTAMP | 2024-01-02 00:00:00
-operand/plusTime	*	differs	a:text | NULL
-operand/plusTimestamptz	*	differs	a:TIMESTAMP | 2024-01-02 00:00:00
+operand/plusTime	*	refusal	ERR 0A000 {time-type}: TIME arithmetic (+) is not supported: this engine has no TIME type, and a TIME operand is not read as a time of day (ADR-0012 temporal r23)
+operand/plusTimestamptz	*	refusal	ERR 0A000 {timestamptz}: timestamptz + interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 operand/eqUnknown	*	agree	a:boolean | true
 operand/eqUnknownBad	*	pg-error	ERR 22007: invalid input syntax for type interval: "abc"
 operand/timesUnknown	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration

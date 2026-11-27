@@ -28,12 +28,12 @@ publishParamText/describe	params=[1186] fields=[a:oid=25:typmod=-1:len=-1:fmt=0]
 publishParamText/execute	ERR 0A000
 typmod/describe	params=[] fields=[]
 typmod/describeDay	params=[] fields=[]
-intervalstyle/set	fields=[] rows=[]
-intervalstyle/show	fields=[IntervalStyle:oid=25:typmod=-1:len=-1:fmt=0] rows=[iso_8601]
+intervalstyle/set	ERR 0A000
+intervalstyle/show	fields=[IntervalStyle:oid=25:typmod=-1:len=-1:fmt=0] rows=[postgres]
 intervalstyle/text	fields=[t:oid=25:typmod=-1:len=-1:fmt=0] rows=[1 day]
 intervalstyle/reset	fields=[] rows=[]
 intervalstyle/afterReset	fields=[t:oid=25:typmod=-1:len=-1:fmt=0] rows=[1 day]
-door/IntervalStyle/postgres_verbose	ok
-door/IntervalStyle/sql_standard	ok
-door/IntervalStyle/iso_8601	ok
+door/IntervalStyle/postgres_verbose	ERR 0A000 {intervalstyle}: IntervalStyle "postgres_verbose" is not supported: interval values display in the postgres style only
+door/IntervalStyle/sql_standard	ERR 0A000 {intervalstyle}: IntervalStyle "sql_standard" is not supported: interval values display in the postgres style only
+door/IntervalStyle/iso_8601	ERR 0A000 {intervalstyle}: IntervalStyle "iso_8601" is not supported: interval values display in the postgres style only
 door/IntervalStyle/postgres	ok

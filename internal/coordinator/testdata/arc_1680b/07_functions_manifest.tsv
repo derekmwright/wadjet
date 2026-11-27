@@ -49,7 +49,7 @@ series/date	A	refusal function-generate_series	met	-
 series/zero	A	refusal function-generate_series	met	-
 series/zeroNormalized	-	not-parsed 22007	met	-
 series/inf	-	not-parsed 42601	met	-
-series/tzDst	A	refusal timestamptz	unmet	-
+series/tzDst	A	refusal timestamptz	met	-
 tochar/hms	-	not-parsed 22007	met	-
 tochar/days	-	not-parsed 22007	met	-
 tochar/us	-	not-parsed 42601	met	-
@@ -79,8 +79,8 @@ operand/divInterval	C	pg-error 42883	met	-
 operand/numberDiv	C	pg-error 42883	met	-
 operand/mod	C	pg-error 42883	met	-
 operand/plusDate	C	supported	met	-
-operand/plusTime	A	refusal time-type	unmet	-
-operand/plusTimestamptz	A	refusal timestamptz	unmet	-
+operand/plusTime	A	refusal time-type	met	-
+operand/plusTimestamptz	A	refusal timestamptz	met	-
 operand/eqUnknown	C	supported	met	-
 operand/eqUnknownBad	C	pg-error 22007	met	-
 operand/timesUnknown	A	refusal bare-interval-result	met	-

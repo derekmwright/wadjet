@@ -24,35 +24,35 @@ ts/commuted	C	supported	unmet	-
 date/plus	C	supported	unmet	-
 date/plusInt	C	supported	unmet	-
 date/minusDate	C	supported	unmet	-
-tz/UTC/day	A	refusal timestamptz	unmet	-
-tz/UTC/month	A	refusal timestamptz	unmet	-
-tz/UTC/fallBack	A	refusal timestamptz	unmet	-
-tz/UTC/minus	A	refusal timestamptz	unmet	-
+tz/UTC/day	A	refusal timestamptz	met	-
+tz/UTC/month	A	refusal timestamptz	met	-
+tz/UTC/fallBack	A	refusal timestamptz	met	-
+tz/UTC/minus	A	refusal timestamptz	met	-
 tz/UTC/roundTrip	A	refusal timestamptz	unmet	-
-tz/UTC/age	A	refusal timestamptz	unmet	-
+tz/UTC/age	A	refusal timestamptz	met	-
 tz/UTC/addFn	A	refusal timestamptz	unmet	-
-tz/America/New_York/day	A	refusal timestamptz	unmet	-
-tz/America/New_York/month	A	refusal timestamptz	unmet	-
-tz/America/New_York/fallBack	A	refusal timestamptz	unmet	-
-tz/America/New_York/minus	A	refusal timestamptz	unmet	-
+tz/America/New_York/day	A	refusal timestamptz	met	-
+tz/America/New_York/month	A	refusal timestamptz	met	-
+tz/America/New_York/fallBack	A	refusal timestamptz	met	-
+tz/America/New_York/minus	A	refusal timestamptz	met	-
 tz/America/New_York/roundTrip	A	refusal timestamptz	unmet	-
-tz/America/New_York/age	A	refusal timestamptz	unmet	-
+tz/America/New_York/age	A	refusal timestamptz	met	-
 tz/America/New_York/addFn	A	refusal timestamptz	unmet	-
 time/plus	-	not-parsed 22007	met	-
-time/minusTime	A	refusal time-type	unmet	-
+time/minusTime	A	refusal time-type	met	-
 time/timetz	-	not-parsed 42601	met	-
 tsdiff/days	A	refusal bare-interval-result	met	-
 tsdiff/time	A	refusal bare-interval-result	met	-
 tsdiff/over24	A	refusal bare-interval-result	met	-
 tsdiff/neg	A	refusal bare-interval-result	met	-
 tsdiff/year	A	refusal bare-interval-result	met	-
-tsdiff/us	A	refusal timestamp-millisecond-carrier	unmet	-
+tsdiff/us	A	refusal timestamp-millisecond-carrier	met	-
 tsdiff/mixedNeg	A	refusal bare-interval-result	met	-
 tsdiff/huge	C	pg-error 22008	unmet	-
 tsdiff/inf	A	refusal bare-interval-result	unmet	-
 tsdiff/infInf	C	pg-error 22008	met	-
 age/basic	A	refusal bare-interval-result	unmet	-
-age/time	A	refusal timestamp-millisecond-carrier	unmet	-
+age/time	A	refusal timestamp-millisecond-carrier	met	-
 trip/monthEnd	C	supported	unmet	-
 trip/diff	C	supported	unmet	-
 trip/age	C	supported	unmet	-

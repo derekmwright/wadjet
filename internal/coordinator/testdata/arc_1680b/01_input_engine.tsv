@@ -125,7 +125,7 @@ prec/literal3	*	error	ERR 42601: syntax error at or near "("
 prec/second3	*	error	ERR 42601: syntax error at or near "SECOND"
 prec/ds2	*	error	ERR 42601: syntax error at or near "TO"
 prec/iv6	*	error	ERR 22007: invalid input syntax for type interval: "1.1234567 seconds"
-prec/iv7	*	error	ERR 42704: type "interval(7)" does not exist
+prec/iv7	*	refusal	ERR 0A000 {typmod}: an interval precision or field qualifier (interval(7)) is not supported
 prec/castDay	*	error	ERR 22007: invalid input syntax for type interval: "1 day 02:00:00"
 prec/castYear	*	error	ERR 22007: invalid input syntax for type interval: "14 months 3 days"
 prec/castMonthTyp	*	error	ERR 22007: invalid input syntax for type interval: "14 months 3 days"
@@ -133,11 +133,11 @@ cast/fromText	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot
 cast/colon	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
 cast/toText	*	error	ERR 22007: invalid input syntax for type interval: "1 day 2 hours"
 cast/toVarchar	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-cast/toChar	*	error	ERR 42846: cannot cast type interval to char(10)
+cast/toChar	*	refusal	ERR 0A000 {char-display}: an interval cast to char(10) is not supported: only TEXT and VARCHAR display an interval (PostgreSQL blank-pads a character(n) value this engine does not)
 cast/toTextNull	*	agree	a:text | NULL
 cast/fromInt	*	pg-error	ERR 42846: cannot cast type bigint to interval
 cast/fromNumeric	*	pg-error	ERR 42846: cannot cast type double precision to interval
-cast/fromTime	*	refusal	ERR 0A000 {bare-interval-result}: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+cast/fromTime	*	refusal	ERR 0A000 {time-type}: a cast of TIME to interval is not supported: this engine has no TIME type, and a TIME operand is not read as a time of day (ADR-0012 temporal r23)
 cast/toTime	*	error	ERR 42601: syntax error at or near "AS"
 cast/toBigint	*	pg-error	ERR 42846: cannot cast type interval to bigint
 cast/fromDuration	*	wrong-sqlstate	ERR 42846: cannot cast type bigint to interval

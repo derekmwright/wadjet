@@ -24,12 +24,12 @@ fields/21/-infinity	-	not-parsed 42601	met	-
 fields/22/NULL	C	supported	unmet	-
 print/postgres	-	not-parsed 42601	met	-
 print/text/postgres	D	supported	unmet	-
-print/postgres_verbose	A	refusal intervalstyle	unmet	-
-print/text/postgres_verbose	A	refusal intervalstyle	unmet	-
-print/sql_standard	A	refusal intervalstyle	unmet	-
-print/text/sql_standard	A	refusal intervalstyle	unmet	-
-print/iso_8601	A	refusal intervalstyle	unmet	-
-print/text/iso_8601	A	refusal intervalstyle	unmet	-
+print/postgres_verbose	A	refusal intervalstyle	met	-
+print/text/postgres_verbose	A	refusal intervalstyle	met	-
+print/sql_standard	A	refusal intervalstyle	met	-
+print/text/sql_standard	A	refusal intervalstyle	met	-
+print/iso_8601	A	refusal intervalstyle	met	-
+print/text/iso_8601	A	refusal intervalstyle	met	-
 text/0/1 mon	C	supported	unmet	-
 text/1/30 days	C	supported	met	-
 text/2/720:00:00	C	supported	unmet	-
@@ -53,6 +53,6 @@ text/19/1 year -1 second	C	supported	unmet	-
 text/20/infinity	C	supported	unmet	-
 text/21/-infinity	C	supported	unmet	-
 text/22/NULL	C	supported	met	-
-input/sqlstd/mixed	A	refusal intervalstyle	unmet	-
+input/sqlstd/mixed	A	refusal intervalstyle	met	-
 input/postgres/mixed	C	supported	unmet	-
 print/dateStyleSQL	C	supported	unmet	-

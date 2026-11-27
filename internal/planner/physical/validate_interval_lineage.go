@@ -97,6 +97,12 @@ func chooseInterval(fs []intervalFinding) error {
 	}
 	for _, f := range fs[1:] {
 		if f.permanent {
+			if sqlerr.ReasonOf(f.err) == sqlerr.ReasonOf(first.err) {
+				// The same refusal, found first deeper (a published
+				// column read by the statement's own star): its sentence
+				// stands.
+				return first.err
+			}
 			return f.err
 		}
 	}
@@ -185,6 +191,239 @@ var intervalValueArg = map[string]int{
 var intervalReturningFunctions = map[string]bool{
 	"make_interval": true,
 	"justify_days":  true, "justify_hours": true, "justify_interval": true,
+}
+
+// --- The wrong-today intersections (ADR-0052 §5; the record §11) ---------
+//
+// Where an interval operation produces or consumes a value through one of
+// the engine's pre-existing wrong TIME or timestamptz paths, or through a
+// declaration it cannot implement exactly, the statement is refused under
+// the path's name. Each rule is decided on the operation's operands as
+// written: a TIME or TIMESTAMPTZ literal is a CAST the parser builds (`TIME
+// '...'`), and this engine has neither type as a column. Measured on main
+// first (1680c_r3.md): every statement these rules refuse answered wrong
+// there or was already refused.
+
+// castTypeBase is a CAST target's base name, lower case, without its
+// parenthesised modifier.
+func castTypeBase(typeName string) string {
+	base := strings.ToLower(strings.TrimSpace(typeName))
+	if i := strings.IndexByte(base, '('); i >= 0 {
+		base = strings.TrimSpace(base[:i])
+	}
+	return base
+}
+
+// isTimeOfDayType reports PostgreSQL's TIME / TIMETZ spellings.
+func isTimeOfDayType(base string) bool {
+	switch base {
+	case "time", "timetz", "time without time zone", "time with time zone":
+		return true
+	}
+	return false
+}
+
+// isTimeOperand reports an operand typed TIME by its spelling (a TIME
+// literal or a CAST to TIME).
+func isTimeOperand(n plansql.Node) bool {
+	c, ok := plansql.Unparen(n).(*plansql.CastNode)
+	return ok && isTimeOfDayType(castTypeBase(c.TypeName))
+}
+
+// isTimestamptzOperand reports an operand typed timestamptz by its spelling.
+func isTimestamptzOperand(n plansql.Node) bool {
+	c, ok := plansql.Unparen(n).(*plansql.CastNode)
+	if !ok {
+		return false
+	}
+	switch castTypeBase(c.TypeName) {
+	case "timestamptz", "timestamp with time zone":
+		return true
+	}
+	return false
+}
+
+// isDateOperand reports an operand this rule reads as a DATE.
+func (t intervalTyper) isDateOperand(n plansql.Node) bool {
+	if c, ok := plansql.Unparen(n).(*plansql.CastNode); ok && castTypeBase(c.TypeName) == "date" {
+		return true
+	}
+	id, ok := t.declaredID(n)
+	return ok && id == parquet.TypeDate
+}
+
+// isTimestampLike reports an operand of a timestamp difference: a
+// TIMESTAMP, a timestamptz literal, a date.
+func (t intervalTyper) isTimestampLike(n plansql.Node) bool {
+	if isTimestamptzOperand(n) || t.isTimestampOperand(n) {
+		return true
+	}
+	if c, ok := plansql.Unparen(n).(*plansql.CastNode); ok && castTypeBase(c.TypeName) == "timestamp" {
+		return true
+	}
+	return false
+}
+
+// subMilliTimestampLiteral reports a TIMESTAMP literal with more than three
+// fractional digits: this engine's TIMESTAMP is a millisecond carrier
+// (ADR-0012 temporal, E36), so such a literal is not the value written.
+func subMilliTimestampLiteral(n plansql.Node) bool {
+	c, ok := plansql.Unparen(n).(*plansql.CastNode)
+	if !ok {
+		return false
+	}
+	switch castTypeBase(c.TypeName) {
+	case "timestamp", "timestamptz", "timestamp with time zone", "timestamp without time zone":
+	default:
+		return false
+	}
+	s, ok := quotedLiteral(c.Inner)
+	if !ok {
+		return false
+	}
+	if i := strings.LastIndexByte(s, '.'); i >= 0 {
+		digits := 0
+		for _, r := range s[i+1:] {
+			if r < '0' || r > '9' {
+				break
+			}
+			digits++
+		}
+		return digits > 3
+	}
+	return false
+}
+
+// timeTypeRefusal, timestamptzRefusal, typmodRefusal, charDisplayRefusal and
+// msCarrierRefusal are the named refusals of the intersections.
+func timeTypeRefusal(what string) error {
+	return sqlerr.Refuse("time-type", "%s is not supported: this engine has no TIME type, and a TIME "+
+		"operand is not read as a time of day (ADR-0012 temporal r23)", what)
+}
+
+func timestamptzRefusal(what string) error {
+	return sqlerr.Refuse("timestamptz", "%s is not supported: this engine has no timestamptz arithmetic "+
+		"(the time zone and daylight saving time are not applied); use TIMESTAMP operands", what)
+}
+
+func typmodRefusal(typeName string) error {
+	return sqlerr.Refuse("typmod", "an interval precision or field qualifier (%s) is not supported", strings.ToLower(strings.TrimSpace(typeName)))
+}
+
+func charDisplayRefusal(typeName string) error {
+	return sqlerr.Refuse("char-display", "an interval cast to %s is not supported: only TEXT and VARCHAR "+
+		"display an interval (PostgreSQL blank-pads a character(n) value this engine does not)", strings.ToLower(strings.TrimSpace(typeName)))
+}
+
+func msCarrierRefusal(what string) error {
+	return sqlerr.Refuse("timestamp-millisecond-carrier", "%s is not supported: a TIMESTAMP here holds "+
+		"milliseconds, and the literal has finer digits", what)
+}
+
+// intervalArithOp reports an interval arithmetic or shift operator over
+// node's operands: one an interval, or the difference of two timestamps.
+func (t intervalTyper) intervalArithOp(b *plansql.BinaryOp) bool {
+	if b.Op != "+" && b.Op != "-" {
+		return false
+	}
+	if t.isInterval(b.Left) || t.isInterval(b.Right) {
+		return true
+	}
+	return b.Op == "-" && t.isTimestampLike(b.Left) && t.isTimestampLike(b.Right)
+}
+
+// permanentRule is the intersections' judgment of one node, before the
+// interim's own: nil where none applies.
+func (t intervalTyper) permanentRule(node plansql.Node) error {
+	switch n := node.(type) {
+	case *plansql.BinaryOp:
+		if n.Op != "+" && n.Op != "-" {
+			return nil
+		}
+		lt, rt := isTimeOperand(n.Left), isTimeOperand(n.Right)
+		if lt || rt {
+			// TIME ± interval, interval + TIME, TIME - TIME and DATE ± TIME:
+			// measured on main, each answered NULL, a number of hours or a
+			// day count where PostgreSQL answers a time, an interval or a
+			// timestamp (the record §11; the architect's ruling on 1680c).
+			other := n.Right
+			if rt {
+				other = n.Left
+			}
+			if (lt && rt) || t.isInterval(other) || t.isDateOperand(other) {
+				return timeTypeRefusal("TIME arithmetic (" + n.Op + ")")
+			}
+			return nil
+		}
+		if !t.intervalArithOp(n) {
+			return nil
+		}
+		if isTimestamptzOperand(n.Left) || isTimestamptzOperand(n.Right) {
+			return timestamptzRefusal("timestamptz " + n.Op + " interval or a timestamptz difference")
+		}
+		if subMilliTimestampLiteral(n.Left) || subMilliTimestampLiteral(n.Right) {
+			return msCarrierRefusal("an interval operation over a sub-millisecond TIMESTAMP literal")
+		}
+	case *plansql.CastNode:
+		base := castTypeBase(n.TypeName)
+		switch {
+		case base == "interval" && strings.Contains(n.TypeName, "("):
+			return typmodRefusal(n.TypeName)
+		case base == "interval" && isTimeOperand(n.Inner):
+			return timeTypeRefusal("a cast of TIME to interval")
+		case isTimeOfDayType(base) && t.isInterval(n.Inner):
+			return timeTypeRefusal("a cast of an interval to TIME")
+		case (base == "char" || base == "character" || base == "bpchar") && t.isInterval(n.Inner):
+			return charDisplayRefusal(n.TypeName)
+		}
+	case *plansql.FuncCallNode:
+		name := strings.ToLower(strings.TrimSpace(n.Name))
+		switch name {
+		case "age":
+			// age(DATE, DATE) resolves to the timestamptz overload
+			// (measured: 10_definitions:age/dateGapHavana against
+			// age/dateGapUTC); age over timestamptz is time-zone dependent.
+			for _, a := range n.Args {
+				if isTimestamptzOperand(a) || t.isDateOperand(a) {
+					return timestamptzRefusal("age over a date or a timestamptz")
+				}
+			}
+			for _, a := range n.Args {
+				if subMilliTimestampLiteral(a) {
+					return msCarrierRefusal("age over a sub-millisecond TIMESTAMP literal")
+				}
+			}
+		case "date_add", "date_subtract", "date_sub":
+			hasIv := false
+			for _, a := range n.Args {
+				hasIv = hasIv || t.isInterval(a)
+			}
+			if !hasIv {
+				return nil
+			}
+			if len(n.Args) >= 3 || (len(n.Args) > 0 && isTimestamptzOperand(n.Args[0])) {
+				return timestamptzRefusal(name + " with a time zone or a timestamptz")
+			}
+		}
+	}
+	return nil
+}
+
+// tableFuncTimestamptz is the intersection's judgment of a table function's
+// arguments: generate_series over timestamptz bounds with an interval step.
+func (t intervalTyper) tableFuncTimestamptz(tr *plansql.TableRef) error {
+	if tr == nil || !tr.IsFunction {
+		return nil
+	}
+	tz, iv := false, false
+	for _, a := range tr.FuncArgExprs {
+		tz = tz || isTimestamptzOperand(a)
+		iv = iv || t.isInterval(a)
+	}
+	if tz && iv {
+		return timestamptzRefusal(strings.ToLower(tr.Name) + " over timestamptz bounds with an interval step")
+	}
+	return nil
 }
 
 // literalsArePGInput reports that every interval literal in n is input

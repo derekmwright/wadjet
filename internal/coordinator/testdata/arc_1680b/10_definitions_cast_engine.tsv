@@ -67,26 +67,26 @@ sentinel/negOfNearMax~text	*	error	ERR 22007: invalid input syntax for type inte
 sentinel/negOfInfinityTriple~text	*	error	ERR 22007: invalid input syntax for type interval: "2147483647 months 2147483647 days 9223372036854775807 microseconds"
 sentinel/mulNegInfinityTriple~text	*	error	ERR 22007: invalid input syntax for type interval: "-2147483648 months -2147483648 days -9223372036854775808 microseconds"
 age/borrow~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/timeBorrow~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
+age/timeBorrow~text	*	refusal	ERR 0A000 {timestamp-millisecond-carrier}: age over a sub-millisecond TIMESTAMP literal is not supported: a TIMESTAMP here holds milliseconds, and the literal has finer digits
 age/null~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
 age/infLeft~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
 age/infRight~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
 age/infOpposed~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
 age/bc~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/date~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/dateNY~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/dateUTC~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/dateMonthNY~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/dateGapUTC~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/dateGapHavana~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/tz/UTC/fallBack~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/tz/America/New_York/fallBack~text	*	error	ERR 42883: unknown function: age (did you mean abs?)
+age/date~text	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+age/dateNY~text	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+age/dateUTC~text	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+age/dateMonthNY~text	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+age/dateGapUTC~text	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+age/dateGapHavana~text	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+age/tz/UTC/fallBack~text	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+age/tz/America/New_York/fallBack~text	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 types/tsMinusTs~text	*	refusal	ERR 0A000 {timestamp-difference-to-number}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as the operand of a cast to text: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts …
 types/tsMinusDate~text	*	error	ERR 42883: operator does not exist: timestamp without time zone - date
 types/dateMinusTs~text	*	error	ERR 42883: operator does not exist: date - timestamp without time zone
-types/timeMinusTime~text	*	differs	a:text | -22
-types/tstzMinusTstz~text	*	refusal	ERR 0A000 {timestamp-difference-to-number}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as the operand of a cast to text: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts …
-types/tstzMinusTs~text	*	refusal	ERR 0A000 {timestamp-difference-to-number}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as the operand of a cast to text: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts …
+types/timeMinusTime~text	*	refusal	ERR 0A000 {time-type}: TIME arithmetic (-) is not supported: this engine has no TIME type, and a TIME operand is not read as a time of day (ADR-0012 temporal r23)
+types/tstzMinusTstz~text	*	refusal	ERR 0A000 {timestamptz}: timestamptz - interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+types/tstzMinusTs~text	*	refusal	ERR 0A000 {timestamptz}: timestamptz - interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 types/intervalTimesInt~text	*	agree	a:text | 2 days
 types/intTimesInterval~text	*	agree	a:text | 2 days
 types/intervalDivInt~text	*	agree	a:text | 12:00:00

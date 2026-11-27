@@ -642,8 +642,11 @@ func peerAddr(c net.Conn) string {
 	return ""
 }
 
-// handleSet parses "SET key = value" / "SET key TO value" and stores the session variable.
-func (c *pgConn) handleSet(sql string) {
+// handleSet parses "SET key = value" / "SET key TO value" and stores the
+// session variable. A setting this engine cannot honour is refused (an
+// IntervalStyle other than postgres, #1680c): accepting it and printing in
+// postgres style answered in the wrong style silently.
+func (c *pgConn) handleSet(sql string) error {
 	// Strip "SET " prefix, handle optional "LOCAL" or "SESSION" keywords
 	s := strings.TrimSpace(sql[4:])
 	upper := strings.ToUpper(s)
@@ -660,13 +663,46 @@ func (c *pgConn) handleSet(sql string) {
 		key = strings.TrimSpace(s[:idx])
 		val = strings.TrimSpace(s[idx+1:])
 	} else {
-		return // can't parse, silently accept
+		return nil // can't parse, silently accept
 	}
 
 	// Strip quotes from value
 	val = strings.Trim(val, "'\"")
 	key = strings.ToLower(key)
+	if err := refuseSessionSetting(key, val); err != nil {
+		return err
+	}
 	c.sessionVars[key] = val
+	return nil
+}
+
+// refuseSessionSetting refuses a SET this engine cannot honour: an
+// IntervalStyle other than postgres (ADR-0052 §5; the record §11). The
+// display of an interval is postgres style only; the other styles print
+// and READ differently (sql_standard reads '-1 2:03:04' with the sign over
+// every field), so accepting the setting answered in the wrong style.
+// `DEFAULT` and `postgres` (any case) are accepted.
+func refuseSessionSetting(key, val string) error {
+	if key != "intervalstyle" {
+		return nil
+	}
+	switch strings.ToLower(strings.TrimSpace(val)) {
+	case "postgres", "default":
+		return nil
+	}
+	return sqlerr.Refuse("intervalstyle", "IntervalStyle %s is not supported: interval values display "+
+		"in the postgres style only", sqlerr.Quote(val))
+}
+
+// sendRefusal sends a door-level refusal with its SQLSTATE and sentence, and
+// its stable identity (sqlerr.ReasonOf) in the Routine field, where a client
+// or a test reads it without matching words.
+func (c *pgConn) sendRefusal(err error) {
+	code := sqlerr.StateOf(err)
+	if code == "" {
+		code = "42000"
+	}
+	c.sendErrorRoutine("ERROR", code, sqlerr.Sentence(err).Error(), sqlerr.ReasonOf(err))
 }
 
 // copyIdent reads one COPY identifier using the lexer's naming rule (#731):
@@ -1187,7 +1223,10 @@ func (c *pgConn) runSimpleStatement(sql string) bool {
 		return true
 	}
 	if strings.HasPrefix(upper, "SET ") {
-		c.handleSet(sql)
+		if err := c.handleSet(sql); err != nil {
+			c.sendRefusal(err)
+			return false
+		}
 		c.sendCommandComplete("SET")
 		return true
 	}
@@ -1895,7 +1934,11 @@ func (c *pgConn) handleExecute(payload []byte) {
 		return
 	}
 	if strings.HasPrefix(upper, "SET ") {
-		c.handleSet(sql)
+		if err := c.handleSet(sql); err != nil {
+			c.sendRefusal(err)
+			c.skipUntilSync = true
+			return
+		}
 		c.sendCommandComplete("SET")
 		return
 	}
@@ -3578,6 +3621,12 @@ func (c *pgConn) sendCommandComplete(tag string) {
 }
 
 func (c *pgConn) sendError(severity, code, message string) {
+	c.sendErrorRoutine(severity, code, message, "")
+}
+
+// sendErrorRoutine is sendError with the Routine field ('R') when routine is
+// non-empty.
+func (c *pgConn) sendErrorRoutine(severity, code, message, routine string) {
 	// Every field here is NUL-terminated, so a NUL inside one would end it
 	// early and let the remainder be read as further fields — a message
 	// built from a recovered panic value is attacker-influenced text, so
@@ -3603,6 +3652,11 @@ func (c *pgConn) sendError(severity, code, message string) {
 	payload = append(payload, 'M')
 	payload = append(payload, message...)
 	payload = append(payload, 0)
+	if routine = stripNUL(routine); routine != "" {
+		payload = append(payload, 'R')
+		payload = append(payload, routine...)
+		payload = append(payload, 0)
+	}
 	// Terminator
 	payload = append(payload, 0)
 

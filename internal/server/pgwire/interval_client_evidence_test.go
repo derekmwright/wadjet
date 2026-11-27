@@ -182,6 +182,10 @@ func ceSetStyle(name, style string) ceStep {
 		out := "ok"
 		var pe *pgconn.PgError
 		switch {
+		case errors.As(err, &pe) && pe.Routine != "":
+			// The refusal's identity, as the door emits it (the Routine
+			// field, #1680c), in the corpus recorder's form.
+			out = "ERR " + pe.Code + " {" + pe.Routine + "}: " + pe.Message
 		case errors.As(err, &pe):
 			out = "ERR " + pe.Code + ": " + pe.Message
 		case err != nil:

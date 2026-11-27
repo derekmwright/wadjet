@@ -46,12 +46,13 @@ var lineageBoundaries = []struct{ name, seam, from string }{
 const lineageCTE = "WITH p AS (SELECT id, CAST(customer AS INTERVAL) AS v FROM lat_ord) "
 
 // lineageConsumers are unsupported consumers of v, each with the refusal it
-// earns: an item of its own, a container, a DISTINCT aggregate.
+// earns: an item of its own, a container, a DISTINCT aggregate, a TIME cast.
 var lineageConsumers = []struct{ list, reason string }{
 	{"SELECT id, to_char(v, 'HH24:MI') AS x", "function-to_char"},
 	{"SELECT id, CAST(date_trunc('hour', v) AS TEXT) AS x", "function-date_trunc"},
 	{"SELECT id, CAST(ARRAY[v] AS TEXT) AS x", "container"},
 	{"SELECT CAST(sum(DISTINCT v) AS TEXT) AS x", "distinct-aggregate"},
+	{"SELECT id, CAST(CAST(v AS TIME) AS TEXT) AS x", "time-type"},
 }
 
 func lineageSQL(from, list string) string {
@@ -133,4 +134,34 @@ func TestIntervalLineageNegativeControl(t *testing.T) {
 			}
 		}()
 	}
+}
+
+// TestIntervalIntersectionsAreRefused: the wrong-today intersections of an
+// interval with the TIME and timestamptz paths, a precision typmod, a CHAR
+// display and a sub-millisecond literal are refused under their names
+// (ADR-0052 §5; the record §11); the statements beside them that answer
+// right on main still bind.
+func TestIntervalIntersectionsAreRefused(t *testing.T) {
+	runLineageCells(t, []lineageCell{
+		{"TIME + interval answered NULL", "SELECT CAST(TIME '23:00:00' + INTERVAL '2 hours' AS TEXT) AS a", "time-type"},
+		{"interval + TIME answered NULL", "SELECT CAST(INTERVAL '2 hours' + TIME '23:00:00' AS TEXT) AS a", "time-type"},
+		{"TIME - interval answered NULL", "SELECT CAST(TIME '01:00:00' - INTERVAL '2 hours' AS TEXT) AS a", "time-type"},
+		{"TIME - TIME answered a number of hours", "SELECT CAST(TIME '01:00:00' - TIME '23:00:00' AS TEXT) AS a", "time-type"},
+		{"DATE + TIME answered a day count", "SELECT DATE '2024-01-31' + TIME '01:02:03' AS a", "time-type"},
+		{"a cast of TIME to interval", "SELECT CAST(CAST(TIME '01:02:03' AS INTERVAL) AS TEXT) AS a", "time-type"},
+		{"timestamptz + interval dropped the zone", "SELECT TIMESTAMPTZ '2024-03-09 12:00:00-05' + INTERVAL '1 day' AS a", "timestamptz"},
+		{"a timestamptz difference", "SELECT CAST(TIMESTAMPTZ '2024-01-02 00:00:00+00' - TIMESTAMPTZ '2024-01-01 00:00:00+00' AS TEXT) AS a", "timestamptz"},
+		{"age over dates resolves to timestamptz", "SELECT CAST(age(DATE '2024-03-01', DATE '2024-01-31') AS TEXT) AS a", "timestamptz"},
+		{"an interval precision", "SELECT CAST(CAST(INTERVAL '1 second' AS INTERVAL(3)) AS TEXT) AS a", "typmod"},
+		{"an interval to CHAR(n)", "SELECT CAST(INTERVAL '1 day' AS CHAR(10)) AS a", "char-display"},
+		{"a sub-millisecond timestamp in a difference", "SELECT CAST(TIMESTAMP '2024-01-01 00:00:00.000001' - TIMESTAMP '2024-01-01 00:00:00' AS TEXT) AS a", "timestamp-millisecond-carrier"},
+		// Controls: right on main, not interval operations.
+		{"control: a TIME literal alone", "SELECT TIME '01:02:03' AS a", ""},
+		{"control: a TIME cast to text", "SELECT CAST(TIME '01:02:03' AS TEXT) AS a", ""},
+		{"control: a timestamptz literal alone", "SELECT TIMESTAMPTZ '2024-01-01 00:00:00+00' AS a", ""},
+		{"control: timestamp + interval", "SELECT TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '1 day' AS a", ""},
+		{"control: a qualified literal under the display cast", "SELECT CAST(INTERVAL '5' YEAR AS TEXT) AS a", ""},
+		{"control: a millisecond timestamp in a shift", "SELECT TIMESTAMP '2024-01-01 00:00:00.123' + INTERVAL '1 day' AS a", ""},
+		{"control: an interval to VARCHAR", "SELECT CAST(INTERVAL '1 day' AS VARCHAR) AS a", ""},
+	})
 }

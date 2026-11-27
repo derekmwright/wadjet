@@ -537,6 +537,9 @@ func (t intervalTyper) walk(node plansql.Node) error {
 
 // judge decides one node over its (already walked) operands.
 func (t intervalTyper) judge(node plansql.Node) error {
+	if err := t.permanentRule(node); err != nil {
+		return err
+	}
 	switch n := node.(type) {
 	case *plansql.CastNode:
 		if strings.EqualFold(strings.TrimSpace(n.TypeName), "interval") {
@@ -1052,6 +1055,9 @@ func (t intervalTyper) tableFuncArgs(tr *plansql.TableRef) error {
 	if tr == nil || !tr.IsFunction {
 		return nil
 	}
+	if err := t.tableFuncTimestamptz(tr); err != nil && !t.collect(err, false) {
+		return err
+	}
 	for _, a := range tr.FuncArgExprs {
 		if err := t.refuseIntervalTop(a, "a table function's argument ("+strings.ToLower(tr.Name)+")"); err != nil {
 			return err
@@ -1098,6 +1104,22 @@ func (p *Planner) TimestampSubquery(sql string) bool {
 	}
 	col, ok := p.SubqueryOutputColumn(sql)
 	return ok && col.Type == parquet.TypeTimestamp
+}
+
+// WriteSourceRefusal is err as a write door whose source is a query reports
+// it (INSERT ... SELECT, CREATE TABLE AS, #1680c): the source query's
+// refusal of an interval RESULT column is, at that door, the refusal of a
+// written value — the column is what would be stored — so it is raised
+// under the write's identity (interval-write), the timestamp difference's
+// sentence kept for a difference. Every other error is returned as it is.
+func WriteSourceRefusal(err error) error {
+	if sqlerr.ReasonOf(err) != "bare-interval-result" {
+		return err
+	}
+	if strings.HasPrefix(sqlerr.SentenceOf(err), "a timestamp difference") {
+		return TsDiffWriteRefusal()
+	}
+	return IntervalWriteRefusal()
 }
 
 // IntervalWriteRefusal is the rule's refusal of an interval written to a

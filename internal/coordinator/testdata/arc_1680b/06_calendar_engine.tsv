@@ -25,35 +25,35 @@ ts/commuted	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supp
 date/plus	*	error	ERR 22007: invalid input syntax for type interval: "1 day 01:00:00"
 date/plusInt	*	agree-value	a:DATE,b:bigint,c:DATE | 2024-03-01,29,2024-02-29
 date/minusDate	*	agree-value	a:bigint,b:bigint | 366,-366
-tz/UTC/day	*	differs	a:TIMESTAMP,b:TIMESTAMP | 2024-03-10 12:00:00,2024-03-10 12:00:00
-tz/UTC/month	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-tz/UTC/fallBack	*	differs	a:TIMESTAMP,b:TIMESTAMP | 2024-11-03 12:00:00,2024-11-03 12:00:00
-tz/UTC/minus	*	refusal	ERR 0A000 {bare-interval-result}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
+tz/UTC/day	*	refusal	ERR 0A000 {timestamptz}: timestamptz + interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+tz/UTC/month	*	refusal	ERR 0A000 {timestamptz}: timestamptz + interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+tz/UTC/fallBack	*	refusal	ERR 0A000 {timestamptz}: timestamptz + interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+tz/UTC/minus	*	refusal	ERR 0A000 {timestamptz}: timestamptz - interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 tz/UTC/roundTrip	*	error	ERR 42883: operator does not exist: timestamp without time zone + double precision
-tz/UTC/age	*	error	ERR 42883: unknown function: age (did you mean abs?)
+tz/UTC/age	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 tz/UTC/addFn	*	error	ERR 42883: function date_add(timestamp, unknown, unknown) does not exist
-tz/America/New_York/day	*	differs	a:TIMESTAMP,b:TIMESTAMP | 2024-03-10 12:00:00,2024-03-10 12:00:00
-tz/America/New_York/month	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
-tz/America/New_York/fallBack	*	differs	a:TIMESTAMP,b:TIMESTAMP | 2024-11-03 12:00:00,2024-11-03 12:00:00
-tz/America/New_York/minus	*	refusal	ERR 0A000 {bare-interval-result}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
+tz/America/New_York/day	*	refusal	ERR 0A000 {timestamptz}: timestamptz + interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+tz/America/New_York/month	*	refusal	ERR 0A000 {timestamptz}: timestamptz + interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+tz/America/New_York/fallBack	*	refusal	ERR 0A000 {timestamptz}: timestamptz + interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
+tz/America/New_York/minus	*	refusal	ERR 0A000 {timestamptz}: timestamptz - interval or a timestamptz difference is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 tz/America/New_York/roundTrip	*	error	ERR 42883: operator does not exist: timestamp without time zone + double precision
-tz/America/New_York/age	*	error	ERR 42883: unknown function: age (did you mean abs?)
+tz/America/New_York/age	*	refusal	ERR 0A000 {timestamptz}: age over a date or a timestamptz is not supported: this engine has no timestamptz arithmetic (the time zone and daylight saving time are not applied); use TIMESTAMP operands
 tz/America/New_York/addFn	*	error	ERR 42883: function date_add(timestamp, unknown, unknown) does not exist
 time/plus	*	error	ERR 22007: invalid input syntax for type interval: "1 day 1 mon 00:00:01"
-time/minusTime	*	differs	a:double precision,b:double precision | -22,22
+time/minusTime	*	refusal	ERR 0A000 {time-type}: TIME arithmetic (-) is not supported: this engine has no TIME type, and a TIME operand is not read as a time of day (ADR-0012 temporal r23)
 time/timetz	*	error	ERR 42601: syntax error at or near "'23:00:00+02'"
 tsdiff/days	*	refusal	ERR 0A000 {bare-interval-result}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
 tsdiff/time	*	refusal	ERR 0A000 {bare-interval-result}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
 tsdiff/over24	*	refusal	ERR 0A000 {bare-interval-result}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
 tsdiff/neg	*	refusal	ERR 0A000 {bare-interval-result}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
 tsdiff/year	*	refusal	ERR 0A000 {bare-interval-result}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
-tsdiff/us	*	refusal	ERR 0A000 {bare-interval-result}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
+tsdiff/us	*	refusal	ERR 0A000 {timestamp-millisecond-carrier}: an interval operation over a sub-millisecond TIMESTAMP literal is not supported: a TIMESTAMP here holds milliseconds, and the literal has finer digits
 tsdiff/mixedNeg	*	refusal	ERR 0A000 {bare-interval-result}: a timestamp difference (timestamp - timestamp) is an interval and cannot yet be used as a query result column: compare the timestamps themselves instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts +…
 tsdiff/huge	*	wrong-sqlstate	ERR 22007: invalid input syntax for type timestamp: "4713-01-01 00:00:00 BC"
 tsdiff/inf	*	error	ERR 22008: `-` between dates or timestamps is not defined for an infinite timestamp
 tsdiff/infInf	*	pg-error	ERR 22008: `-` between dates or timestamps is not defined for an infinite timestamp
 age/basic	*	error	ERR 42883: unknown function: age (did you mean abs?)
-age/time	*	error	ERR 42883: unknown function: age (did you mean abs?)
+age/time	*	refusal	ERR 0A000 {timestamp-millisecond-carrier}: age over a sub-millisecond TIMESTAMP literal is not supported: a TIMESTAMP here holds milliseconds, and the literal has finer digits
 trip/monthEnd	*	refusal	ERR 0A000 {interval-unit}: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 trip/diff	*	error	ERR 42883: operator does not exist: timestamp without time zone + double precision
 trip/age	*	error	ERR 42883: unknown function: age (did you mean abs?)

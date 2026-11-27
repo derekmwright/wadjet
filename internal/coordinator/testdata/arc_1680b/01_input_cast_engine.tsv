@@ -104,13 +104,13 @@ prec/literal3~text	*	error	ERR 42601: syntax error at or near "("
 prec/second3~text	*	error	ERR 42601: syntax error at or near "SECOND"
 prec/ds2~text	*	error	ERR 42601: syntax error at or near "DAY"
 prec/iv6~text	*	error	ERR 22007: invalid input syntax for type interval: "1.1234567 seconds"
-prec/iv7~text	*	error	ERR 42704: type "interval(7)" does not exist
+prec/iv7~text	*	refusal	ERR 0A000 {typmod}: an interval precision or field qualifier (interval(7)) is not supported
 prec/castDay~text	*	error	ERR 22007: invalid input syntax for type interval: "1 day 02:00:00"
 prec/castYear~text	*	error	ERR 22007: invalid input syntax for type interval: "14 months 3 days"
 prec/castMonthTyp~text	*	error	ERR 22007: invalid input syntax for type interval: "14 months 3 days"
 cast/fromText~text	*	refusal	ERR 0A000 {interval-opaque-value}: interval "1 day 02:00:00" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
 cast/colon~text	*	agree	a:text | 1 day
-cast/fromTime~text	*	refusal	ERR 0A000 {interval-opaque-value}: interval "01:02:03.5" cannot be rendered as text: only a single-unit interval (YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND) is supported
+cast/fromTime~text	*	refusal	ERR 0A000 {time-type}: a cast of TIME to interval is not supported: this engine has no TIME type, and a TIME operand is not read as a time of day (ADR-0012 temporal r23)
 make/all~text	*	error	ERR 42883: unknown function: make_interval
 make/days~text	*	error	ERR 42601: syntax error at or near ">"
 make/secs~text	*	error	ERR 42601: syntax error at or near ">"

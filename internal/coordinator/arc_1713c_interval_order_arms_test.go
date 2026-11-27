@@ -710,8 +710,10 @@ func TestArc1713cMeasure(t *testing.T) {
 //     there; value-offset RANGE was never supported (pinned, unchanged).
 //     ddl/intervalArray: the `type[]` column spelling is 42601 here.
 //   - sweep/derivedSum: sum over a derived column whose block publishes an
-//     interval: the binder's own 42883 (sum of a text-declared column) comes
-//     before the interval rule's 0A000; refused either way.
+//     interval. Until #1680c the binder's own 42883 (sum of a text-declared
+//     column) came first; the column is now declared interval by lineage,
+//     so the statement's interval result column is refused 0A000
+//     (bare-interval-result, the manifest's outcome for its class).
 //   - ddl/intervalColumn: a NEW column spelled INTERVAL is refused 0A000 (the
 //     ruling's point 3); PostgreSQL creates it.
 //   - ex/secondTimestamp: a TIMESTAMP's EXTRACT, not an interval's (ADR-0024
@@ -760,7 +762,7 @@ var ivKnown = map[string]string{
 	"obs/dateAdd":                   "a | 2024-02-02 00:00:00",
 	"obs/dateAddLit":                "a | 2024-02-02 00:00:00",
 	"sweep/rowCtor":                 "ERR 42601",
-	"sweep/derivedSum":              "ERR 42883",
+	"sweep/derivedSum":              "ERR 0A000",
 	"fam/opaqueEmpty":               "(0 rows)",
 	"fam/opaqueEmpty@dag":           "ERR 0A000",
 	"fam/opaqueEmpty@dag-shuffled":  "ERR 0A000",

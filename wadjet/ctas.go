@@ -84,7 +84,7 @@ func (db *DB) executeCreateTableAs(ctx context.Context, ct *plansql.CreateTableI
 		// the executed pipeline stamps as its output schema.
 		declared, err := db.declaredOutputFor(ctx, ct.AsSelect)
 		if err != nil {
-			return nil, err
+			return nil, physical.WriteSourceRefusal(err)
 		}
 		schema, err := db.ctasSchema(ct, declared)
 		if err != nil {
@@ -565,6 +565,9 @@ func (db *DB) querySourcedWriteBudget() int64 {
 // how to raise it. Without it the refusal reached the wire as the blanket
 // 42000 — "your SQL is malformed" for a statement that is not.
 func querySourceError(err error, budget int64) error {
+	if w := physical.WriteSourceRefusal(err); w != err {
+		return w
+	}
 	if errors.Is(err, exec.ErrCollectBudget) {
 		return sqlerr.Wrap(physical.QueryLimitSQLState, fmt.Errorf(
 			"the query's result exceeds the %d-byte budget a write whose source is a "+
