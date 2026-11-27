@@ -1,6 +1,6 @@
 # The first-class INTERVAL as an execution type: definition draft
 
-Design draft for epic #1680, item 1680b, round 2. **This is a draft for the
+Design draft for epic #1680, item 1680b, round 3. **This is a draft for the
 architect to turn into an ADR. It decides nothing the maintainer has not
 ruled.** The maintainer's ruling of 2026-11-26 authorizes an execution-only
 first-class interval (separate months, days and microseconds, typed identity
@@ -10,13 +10,16 @@ defined against PostgreSQL 17.11 before any of it is implemented. Persistent
 storage, format migration and wire-protocol changes are not authorized in
 this stage.
 
-Round 2 answers the judge's review of round 1 (verdict NOT READY, eight
-required corrections) and is written to the architect's rulings of
-2026-11-27: rulings 1 to 9 are applied as decided; rulings 10 (type identity
-placement) and 11 (parallel `sum` overflow) are **pending with the
-maintainer** and are presented in [§10](#10-pending-with-the-maintainer) with
-their options and costs. The definition is written to their recommended
-options and says so where it depends on them.
+Round 2 answered the judge's review of round 1 and was written to the
+architect's rulings of 2026-11-27: rulings 1 to 9 are applied as decided;
+rulings 10 (type identity placement) and 11 (parallel `sum` overflow) are
+**pending with the maintainer** ([§10](#10-pending-with-the-maintainer)).
+Round 3 answers the second judge record (verdict NOT READY, six
+corrections): residual evidence claims (§12 lists every sentence changed),
+the manifest's outcome checks and stage ownership (§9), the typed-lineage
+contract (§9.1), the complete boundary inventory (§6), the transport
+lifetime and compatibility account (§10) and the publication and overflow
+policies against the manifest (§7, §10).
 
 Six labels keep the kinds of evidence apart:
 
@@ -44,66 +47,55 @@ variant as `section_cast:name~text`.
 | file | role |
 |---|---|
 | `internal/coordinator/arc_1680b_interval_corpus_cells_test.go` | sections 01 to 09 (round 1) |
-| `internal/coordinator/arc_1680b_interval_corpus_r2_cells_test.go` | sections 10 to 12 and the cast-wrapped variants (round 2) |
+| `internal/coordinator/arc_1680b_interval_corpus_r2_cells_test.go` | sections 10 to 12, the cast-wrapped variants (round 2) and round 3's cells |
 | `internal/coordinator/arc_1680b_interval_corpus_test.go` | the recorders, the baseline, the well-formedness check, the reference model |
-| `internal/coordinator/arc_1680b_interval_manifest_test.go` | the stage manifest and its outcome checks |
+| `internal/coordinator/arc_1680b_interval_manifest_test.go` | the stage manifest |
+| `internal/coordinator/arc_1680b_interval_manifest_rules_test.go` | the named refusals, the internal-failure exclusion, answer comparison, the representative specs, the stage rule (round 3) |
+| `internal/coordinator/arc_1680b_interval_outcome_checks_test.go` | the adversarial outcome checks, the representative proofs, the stage-rule cases (round 3) |
 | `internal/coordinator/testdata/arc_1680b/<stem>.statements.tsv` | the statements as run: `name`, PostgreSQL settings, kind (`sql`, `ddl` fixture, `write`, `pg-only` plan), SQL |
 | `…/<stem>_pg17.tsv` | PostgreSQL's answer: rows under a `column:type(oid)` header, a zero-row answer as `header \| (0 rows)`, `ERR <SQLSTATE>: message`, then any ` !! <severity> <SQLSTATE>: message` notice PostgreSQL raised |
 | `…/<stem>_engine.tsv` | this engine's answer on each of six arms (`single`, `spilled512k`, `dag`, `dag-shuffled`, `dag-morsel4`, `dag-fastpath`; `*` when all agree) and a class |
-| `…/<stem>_manifest.tsv` | the owning stage, the outcome, and whether today's baseline meets it |
-| `internal/server/pgwire/interval_client_evidence_test.go` with `testdata/interval_client_evidence_{pg17,engine}.tsv` | the client transcript (§7) |
+| `…/<stem>_manifest.tsv` | the owning stage, the outcome, whether today's baseline meets it, and its legal alternatives |
+| `internal/server/pgwire/interval_client_evidence_test.go` with `testdata/interval_client_evidence_{pg17,engine}.tsv` | the client transcript (§7) and the IntervalStyle door assertions (§9) |
 
-Sections: `01_input` 156, `02_fields` 57, `03_order` 51, `04_keys` 97,
-`05_arith` 108, `06_calendar` 63, `07_functions` 96, `09_model` 7,
-`10_definitions` 177, `11_relational` 163, `12_writes` 19, and the
-cast-wrapped variants `01_input_cast` 120, `03_order_cast` 6, `04_keys_cast`
-6, `05_arith_cast` 77, `06_calendar_cast` 16, `07_functions_cast` 18,
-`10_definitions_cast` 93, `11_relational_cast` 5: **1,335 statements**, of
-which 1,252 queries and 17 writes are under test, 34 are fixtures and 32 are
-PostgreSQL plan observations.
+**1,397 statements**: 1,307 queries and 23 writes under test, 34 fixtures and
+33 PostgreSQL plan observations. Round 3 added 61 statements under test
+(`10_definitions:age/dateUTC`, `age/dateMonthNY`, `age/dateGapUTC`,
+`age/dateGapHavana` and their cast variants, `setop/*`; 42
+`11_relational:neg/*`; 6 `12_writes:w/neg/*`) and one plan
+(`10_definitions:explain/age/date`). Re-measuring left every earlier
+PostgreSQL answer byte-identical, and every earlier engine answer is as
+recorded (`TestArc1680bEngineBaseline`).
 
 Tests:
 
-- `TestArc1680bMeasure` (`IV80_PG_DSN=…`) re-measures PostgreSQL. Round 2
-  fixed two recorder defects the judge found: pgconn's `ResultReader.Read`
-  copies field descriptions inside its row loop only, so a zero-row result
-  came back untyped (`iv80Read` keeps them; two round-1 answers,
-  `04_keys:setLit/except/*`, now carry `x:interval(1186) | (0 rows)`); and
-  notices were dropped (`01_input:prec/iv7` now carries `WARNING 22023:
-  INTERVAL(7) precision reduced to maximum allowed, 6`). Every other round-1
-  PostgreSQL answer is byte-identical.
+- `TestArc1680bMeasure` (`IV80_PG_DSN=…`) re-measures PostgreSQL; it keeps a
+  zero-row result's types and PostgreSQL's notices (round 2's recorder fixes).
 - `TestArc1680bRecordEngine` / `TestArc1680bEngineBaseline` record and hold
-  the engine's answers. The class keeps apart what a gate must keep apart:
-  `agree`, `agree-value`, `differs`, `answers-pg-error` (answered where
-  PostgreSQL raised an error), `pg-error` (same SQLSTATE), `refusal` (0A000),
-  `wrong-sqlstate`, `error` (a coded non-0A000 error where PostgreSQL
-  answered), `store-guard` (the batch store's #361 guard), `internal` (no
-  SQLSTATE), `panic`. The engine answer now carries the error's sentence, so
-  an intentional refusal is distinguishable from an internal error by what it
-  says. The baseline is a record, not a gate: today 75 agree, 3 agree in
-  value, 22 differ, 56 give PostgreSQL's error, 417 refuse 0A000, 58 give
-  another SQLSTATE than PostgreSQL's error, 638 raise a coded error where
-  PostgreSQL answers (285 of them 42601 and 294 of them 22007: the engine's
-  literal grammar), and **none** is a store-guard error, an internal error or
-  a panic. The 635 round-1 statements answer exactly as recorded at
-  `6ef333fb` (checked line by line against the round-1 files).
+  the engine's answers with a class (`agree`, `agree-value`, `differs`,
+  `answers-pg-error`, `pg-error`, `refusal` (0A000), `wrong-sqlstate`,
+  `error`, `store-guard`, `internal`, `panic`). The baseline is a record, not
+  a gate. Counted as distinct (cell, class) pairs: 75 agree, 3 agree in value,
+  22 differ, 56 give PostgreSQL's error, 430 refuse 0A000, 57 give another
+  SQLSTATE than PostgreSQL's error, 663 raise a coded error where PostgreSQL
+  answers (297 of them 42601 and 294 of them 22007: the engine's literal
+  grammar), and **none** is a store-guard error, an internal error or a panic.
+  The harness names a string column declared with a length channel
+  `character varying`, as PostgreSQL's header does (round 3; it moved no
+  recorded answer).
 - `TestArc1680bCorpusWellFormed`: the statements files are the cells as
-  written; one typed PostgreSQL answer per statement (a zero-row answer
-  without types fails); an engine line per arm; each line's class is the
-  classification of its answer.
+  written; one typed PostgreSQL answer per statement; an engine line per arm;
+  each line's class is the classification of its answer.
 - `TestArc1680bReferenceModel`: the 128-bit comparison model (§2) against
   PostgreSQL's ORDER BY, GROUP BY (hash and sort plans) and `interval_hash`
-  over 108 generated values, now with **every generated id required exactly
-  once** in each of `model/order`, `model/groups`, `model/groupsSort` and
-  `model/hash`.
-- `TestArc1680bStageManifest` and `TestArc1680bOutcomeChecks` (§9).
+  over 108 generated values, every generated id required exactly once.
+- `TestArc1680bStageManifest`, `TestArc1680bOutcomeChecks`,
+  `TestArc1680bRepExpectations`, `TestArc1680bStageRules` (§9).
 
-**What the corpus does and does not show** (the judge's list of unsupported
-claims, corrected):
+**What the corpus does and does not show:**
 
-- Not every statement below rests on a live cell. Where a claim rests on
-  PostgreSQL's source alone it is labelled [pg-source]; the round-1 wire and
-  IntervalStyle claims that rested on deleted probes now rest on the client
+- Where a claim rests on PostgreSQL's source alone it is labelled
+  [pg-source]; the wire and IntervalStyle claims rest on the client
   transcript (§7).
 - The generated model values (`09_model`) are finite and non-NULL; NULL and
   the infinities are covered by the hand-written cells (`03_order:order/*`,
@@ -111,16 +103,15 @@ claims, corrected):
 - Normalized storage would not fail every `02_fields` row: rows for zero,
   NULL and already-normalized values do not discriminate. The discriminating
   rows are named in §1.
-- `ago` is not accepted on every form (§5).
 - The engine arms are named by configuration. A configuration name is not
   proof that a path ran: the spilled arm forces aggregate drains and small
   sort runs, but join spill, window spill, gather replay, skew splitting and
-  bloom engagement are not asserted by this corpus. Asserting them is part of
-  stage B's and D's gates (§9), not something this corpus can claim.
+  bloom engagement are not asserted by this corpus. Asserting them is owned,
+  path by path, by the stages listed in §9's engagement table.
 - PostgreSQL settings are applied on the reference only; the engine runs the
-  statement as written. A cell whose meaning depends on a setting is judged by
-  the manifest's `door` mark (IntervalStyle) or refused (TimeZone with
-  timestamptz).
+  statement as written. A cell whose meaning depends on IntervalStyle is
+  decided by the engine's answer to `SET IntervalStyle` at the door (§9); a
+  cell whose meaning depends on TimeZone is refused (`timestamptz`).
 
 ## 1. Representation
 
@@ -139,9 +130,9 @@ triples**: `INTERVAL_NOBEGIN` = (INT32_MIN, INT32_MIN, INT64_MIN) is
 | path | policy | evidence |
 |---|---|---|
 | text decoding (`interval_in` → `DecodeInterval` / `DecodeISO8601Interval` → `itmin2interval`) | each field range-checked (22015 `interval field value out of range`, 22008 for year arithmetic); `itmin2interval` does **not** test `INTERVAL_NOT_FINITE`, so text spelling a reserved triple IS that infinity | `10_definitions:in/allMaxUnits` and `01_input:lit/79` print `infinity`; `10_definitions:in/allMin` prints `-infinity`; `in/allMinIsNegInf` = `t,f,t` (equal to `-infinity`, not finite; the triple one microsecond above is finite); `in/allMinCastText` the same through a text cast |
-| the signed integer unit path against the signed clock path | `strtoi64` of `-9223372036854775808 microseconds` is INT64_MIN and `AdjustMicroseconds(val, 0, 1)` keeps it: **accepted**. A signed clock `-2562047788:00:54.775808` is `DTK_TZ`: `DecodeTimeForInterval` of the unsigned part overflows (2⁶³), so it is refused 22015 | `10_definitions:in/usMinUnit` = `-2562047788:00:54.775808`; `01_input:lit/77`, `lit/80` refused; `in/usOverUnit`, `in/usUnderUnit` 22015. Round 1's "text cannot spell an INT64_MIN time" was wrong: only the clock syntax cannot. |
+| the signed integer unit path against the signed clock path | `strtoi64` of `-9223372036854775808 microseconds` is INT64_MIN and `AdjustMicroseconds(val, 0, 1)` keeps it: **accepted**. A signed clock `-2562047788:00:54.775808` is `DTK_TZ`: `DecodeTimeForInterval` of the unsigned part overflows (2⁶³), so it is refused 22015 | `10_definitions:in/usMinUnit` = `-2562047788:00:54.775808`; `01_input:lit/77`, `lit/80` refused; `in/usOverUnit`, `in/usUnderUnit` 22015 |
 | `ago` | negates every field; INT_MIN / INT64_MIN fields cannot be negated: 22015 | `10_definitions:ago/-2147483648 days ago`, `ago/-2147483648 months ago` 22015; `in/usMinUnitAgo` |
-| arithmetic (`finite_interval_pl`, `finite_interval_mi`, `interval_um_internal`, `interval_mul`, `interval_div`, `interval_justify_*`) | every field overflow-checked, and a finite result equal to a reserved triple is 22008 `interval out of range` | `05_arith:plus/toInfinityFields`, `10_definitions:sentinel/minusToNegInf`, `sentinel/plusToNegInf`, `sentinel/sumToNegInf` (22008); `05_arith:neg/minTimeBuilt` (negating INT64_MIN time) 22008; negation maps the infinities to each other (`05_arith:neg/inf`, `10_definitions:sentinel/negOfInfinityTriple` = `-infinity`), and a near-sentinel finite value negates to a finite value (`sentinel/negOfNearMax`, `sentinel/negOfNearMin`) |
+| arithmetic (`finite_interval_pl`, `finite_interval_mi`, `interval_um_internal`, `interval_mul`, `interval_div`, `interval_justify_*`) | every field overflow-checked, and a finite result equal to a reserved triple is 22008 `interval out of range` | `05_arith:plus/toInfinityFields`, `10_definitions:sentinel/minusToNegInf`, `sentinel/plusToNegInf`, `sentinel/sumToNegInf` (22008); `05_arith:neg/minTimeBuilt` (negating INT64_MIN time) 22008; negation maps the infinities to each other (`05_arith:neg/inf`, `10_definitions:sentinel/negOfInfinityTriple` = `-infinity`). Near the sentinels: one microsecond below `infinity` negates to a finite value (`sentinel/negOfNearMax` = `-178956970 years -7 mons -2147483647 days -2562047788:00:54.775806`); a value whose months field is INT32_MIN cannot be negated, so `sentinel/negOfNearMin` is **22008** (the months negation overflows int32 before any sentinel test) |
 | numeric construction (`make_interval`) | overflow-checked per field; `secs` infinite or NaN is 22008; a result equal to a reserved triple is 22008 ([pg-source] `make_interval`: `if (INTERVAL_NOT_FINITE(result)) goto out_of_range`) | `01_input:make/secsInf` 22008; `10_definitions:in/allMinMake` (finite: months and days at INT32_MIN, time 0) |
 
 **[measured] Fields are kept as given, not normalized**, in print and in
@@ -155,10 +146,8 @@ stay as written), `fields/7` (`1 mon -30 days` keeps both fields), `fields/18`
 **[proposed] The vector** stores the triple exactly: a fixed-width column of
 `{Months int32; Days int32; Micros int64}` (16 bytes a row), NULL in the
 vector's null bitmap, the infinities as the reserved triples. No flag, no
-normalized copy beside it. Text decoding follows PostgreSQL's text policy
-(the reserved triple spelled as fields IS the infinity); arithmetic and
-`make_interval` follow theirs (a finite result equal to a reserved triple is
-22008).
+normalized copy beside it. Text decoding follows PostgreSQL's text policy;
+arithmetic and `make_interval` follow theirs.
 
 ## 2. Equality, ordering and hashing
 
@@ -175,9 +164,9 @@ so `N = (months × 30 + days) × 86 400 000 000 + micros`. `interval_cmp_interna
 (and through it `=`, `<>`, `<`, `<=`, `>`, `>=`, `interval_cmp`,
 `interval_smaller`, `interval_larger`) and `interval_sign` compare N.
 `interval_hash` hashes the low 64 bits of N with `hashint8`;
-`interval_hash_extended` hashes them with `hashint8extended` (round 1 named
-only `hashint8`). The comment above them says equal-comparing values must hash
-equal: the hash is of N, not of the fields.
+`interval_hash_extended` hashes them with `hashint8extended`. The comment
+above them says equal-comparing values must hash equal: the hash is of N, not
+of the fields.
 
 **Width.** |N| ≤ (2³¹ × 30 + 2³¹) × 8.64 × 10¹⁰ + 2⁶³ ≈ 5.76 × 10²¹, which
 needs about 74 signed bits: 64 are not enough, and 128 is the available carrier
@@ -185,9 +174,11 @@ needs about 74 signed bits: 64 are not enough, and 128 is the available carrier
 uniquely necessary width. **[measured]** the cells where a 64-bit N is wrong:
 `03_order:cmp/106751991 days 04:00:54.775808~0` (N = 2⁶³: `>`, wraps to `<`),
 `cmp/213503982 days 08:01:49.551616~0` (N = 2⁶⁴: `<>`, wraps to `=`),
-`order/wrap`, `filter/gtWrap`, `04_keys:wrap/group` (2 groups, 1 under a wrap),
-`wrap/join` (0 rows, 1 under a wrap), `wrap/hashCollide` (PostgreSQL's own
-hashes collide while `=` is false), `09_model:model/order`.
+`order/wrap`, `filter/gtWrap`, `04_keys:wrap/group` (2 groups; 1 under a
+wrap), `wrap/join` (a count of 0 matches; 1 under a wrap), and
+`wrap/hashCollide` (PostgreSQL's own `interval_hash` of the 2⁶⁴ value equals
+that of `0`, while `cmp/213503982 days 08:01:49.551616~0` shows the two are
+not equal), `09_model:model/order`.
 
 **Equality and order are not field-wise; printing and arithmetic are
 field-preserving, with one exception.** [measured] `1 mon = 30 days =
@@ -200,21 +191,19 @@ never consults N **except through `interval_sign`**: a finite interval times
 = `infinity` for `-1 mon 31 days`); and a RANGE frame's offset is checked by
 `interval_sign` (§4d).
 
-**[measured] The model reproduces PostgreSQL** (`TestArc1680bReferenceModel`,
-§0): 108 values, 47 groups, 41 of them with members of different fields; the
+**[measured] The model reproduces PostgreSQL** (`TestArc1680bReferenceModel`):
+108 values, 47 groups, 41 of them with members of different fields; the
 order is the 128-bit N then id, the groups (hash and sort plans) are equality
-of N, PostgreSQL's hash is equal within each group. Negative controls: a month
-of 31 days fails the order and both groupings; a wrapping int64 N fails the
-order; a missing hash row fails the coverage check.
+of N, PostgreSQL's hash is equal within each group.
 
 **[proposed]** Equality, comparison, sort, top-N, min/max, join, grouping,
 DISTINCT and set-operation keys use N as a signed 128-bit integer. The hash is
-of N only (both halves or the low 64 bits; the engine's hash values need not
-equal PostgreSQL's), so SQL-equal implies hash-equal by construction; the
-generator of `TestArc1680bReferenceModel` becomes a property test over the
-engine's key encoding, extended with NULL and both infinities. A
-byte-comparable sort key is N as **16 bytes, big-endian, two's complement with
-the sign bit flipped**; the fields ride beside it and are never compared.
+of N only (the engine's hash values need not equal PostgreSQL's), so SQL-equal
+implies hash-equal by construction; the generator of
+`TestArc1680bReferenceModel` becomes a property test over the engine's key
+encoding, extended with NULL and both infinities. A byte-comparable sort key
+is N as **16 bytes, big-endian, two's complement with the sign bit flipped**;
+the fields ride beside it and are never compared.
 
 ## 3. The representative of a group, and the SQL-tie rule
 
@@ -227,76 +216,79 @@ input order.**
 | GROUP BY over `1 mon -30 days`, `0`, `00:00:00` | `1 mon -30 days` | `00:00:00` | `00:00:00` | `00:00:00` |
 | GROUP BY over `-1 day`, `-24:00:00` | `-1 days` | `-24:00:00` | `-24:00:00` | `-1 days` |
 
-(`04_keys:group/*`, plans in `04_keys:explain/group/*`.) DISTINCT follows these
-cases; UNION does not necessarily choose what GROUP BY chooses (reversed sorted
-UNION prints `1 day` and `360 days`, `04_keys:union/iv80_kr/sortagg`).
-Whole-tuple selection is PostgreSQL's: `SELECT DISTINCT a, b` over (`1 mon`,
-`24 hours`) and (`30 days`, `1 day`) keeps one whole row, the first met, under
-both plans (`11_relational:tuple/distinct/*`, `tuple/distinctRev/*`,
-`tuple/table/*`); the multi-column key with NUMERIC and float ties keeps the
-first row's `1 mon`, `1.0`, `0` (`11_relational:mixkey/*`).
+(`04_keys:group/*`, plans in `04_keys:explain/group/*`.) UNION does not
+necessarily choose what GROUP BY chooses (the reversed sorted UNION prints
+`1 day` and `360 days`, `04_keys:union/iv80_kr/sortagg`). Whole-tuple
+selection is PostgreSQL's: `SELECT DISTINCT a, b` over (`1 mon`, `24 hours`)
+and (`30 days`, `1 day`) keeps one whole row, the first met, under both plans
+(`11_relational:tuple/distinct/*`, `tuple/distinctRev/*`, `tuple/table/*`);
+the multi-column key with NUMERIC and float ties keeps the first row's
+`1 mon`, `1.0`, `0` (`11_relational:mixkey/*`).
 
-**Set operations** [measured and pg-source]. Round 1 corrected ADR-0024 §12
-item 4 (PostgreSQL's INTERSECT representative is not always a left-arm
-member: under the sorted SetOp either arm's member leads,
-`04_keys:adr0024/intersectNumericSort`). Round 2 measures the hash plan with
-asymmetric cardinality and finds that **HashSetOp's first input is not the
-syntactic left either**: `prepunion.c`, `generate_nonunion_paths`, puts the
-input with fewer estimated groups first for INTERSECT ("we prefer to put the
-smaller input first in order to minimize the size of the hash table"; EXCEPT
-keeps the left first), and the representative comes from the first input.
-`11_relational:set/intersect/bigSmall/default` (left five rows, right one row
-`1 mon`) prints `1 mon`, a right-arm member absent from the left, with plan
-`HashSetOp Intersect -> Append -> "*SELECT* 2" …` (`explain/set/intersect/bigSmall/default`);
-`set/intersectAll/dupRight/*` prints the right's `720:00:00` twice. EXCEPT ALL
-prints the group's representative for **every** surviving copy, replacing the
-text of the left's other members: `set/exceptAll/dupRight1/*` and
-`04_keys:setLit/exceptAll/*` answer `1 mon; 1 mon` for a left of `1 mon`,
-`1 mon`, `30 days` (and `04_keys:exceptAll/iv80_k/default` likewise). Nothing
-here generalizes beyond the measured plans.
+**Set operations** [measured and pg-source]. PostgreSQL's INTERSECT
+representative is not always a left-arm member: under the sorted SetOp either
+arm's member leads (`04_keys:adr0024/intersectNumericSort`), and under
+HashSetOp the first input is the one with fewer estimated groups
+(`prepunion.c`, `generate_nonunion_paths`: "we prefer to put the smaller input
+first"; EXCEPT keeps the left first): `11_relational:set/intersect/bigSmall/default`
+prints the right arm's `1 mon` with plan `HashSetOp Intersect -> Append ->
+"*SELECT* 2" …`; `set/intersectAll/dupRight/*` prints the right's
+`720:00:00` twice. EXCEPT ALL prints the group's representative for every
+surviving copy (`set/exceptAll/dupRight1/*`, `04_keys:setLit/exceptAll/*`:
+`1 mon; 1 mon` for a left of `1 mon`, `1 mon`, `30 days`).
 
 **Ordered aggregates and representation-dependent values** [measured]:
 `min(v ORDER BY id)` / `max(v ORDER BY id DESC)` answer by the stated order
-(`11_relational:ordagg/minMax` = `30 days`, `1 mon`; reversed `ordagg/minMaxRev`
-= `1 mon`, `30 days`); unordered `min` / `max` keep the later argument on a tie
-(`03_order:order/minTieFwd` = `720:00:00`, `minTieRev` = `1 mon`;
-`interval_smaller` / `interval_larger` [pg-source]); `GREATEST` / `LEAST` keep
-the first argument (`03_order:order/greatestTie`). `sum(DISTINCT v)` depends on
-which member represents a group: `1 mon 1 day` or `31 days` by input order
+(`11_relational:ordagg/minMax` = `30 days`, `1 mon`; `ordagg/minMaxRev` =
+`1 mon`, `30 days`); unordered `min` / `max` keep the later argument on a tie
+(`03_order:order/minTieFwd` = `720:00:00`, `minTieRev` = `1 mon`; that it is
+the LATER argument is read in `interval_smaller` / `interval_larger`
+[pg-source]); `GREATEST` / `LEAST` keep the first argument
+(`03_order:order/greatestTie`). `sum(DISTINCT v)` depends on which member
+represents a group: `1 mon 1 day` or `31 days` by input order
 (`11_relational:distagg/sumAvg/*`, `distagg/sumAvgRev/*`). A representative
 changes a later calendar result: `TIMESTAMP '2024-01-31' + v` over `SELECT
 DISTINCT v` of `1 mon` and `30 days` is `2024-02-29` or `2024-03-01` by input
 order (`11_relational:reparith/*`, `reparithRev/*`).
 
-**The engine's rule (architect's ruling 3; [proposed] details).** INTERVAL
-joins ADR-0024 §12 as a type with many representations of one SQL value. Among
-the members of one group, the representative is the **minimum under ascending
-lexicographic order over (months, days, micros)**: `720:00:00` (0, 0, 2.592 ×
-10¹²) beats `30 days` (0, 30, 0) beats `1 mon` (1, 0, 0); `00:00:00` beats
-`1 mon -30 days`; `-1 days` (0, −1, 0) beats `-24:00:00` (0, 0, −8.64 × 10¹⁰).
-It is applied exactly as ADR-0024 §12 applies its rule: over the **whole key
-tuple** with the whole winning tuple kept; eligibility before comparison for
-set operations (a left-arm member for INTERSECT / EXCEPT under the engine's
-own rule); every surviving copy of an EXCEPT ALL / INTERSECT ALL group prints
-the representative; the representative and the multiplicities survive
-precombine, clone merging, spill and the final merge together. Selection never
-normalizes. It never prints a value absent from the input: the minimum of a
-non-empty finite set under a total order is a member, and ADR-0024's
-`batch.TestRepresentativeOrderIsATotalOrder` (antisymmetry, totality,
-transitivity, every fold order and reduction tree) extends to the triple.
+**The engine's rule (architect's ruling 3).** INTERVAL joins ADR-0024 §12 as
+a type with many representations of one SQL value. Among the members of one
+group, the representative is the **minimum under ascending lexicographic
+order over (months, days, micros)**: `720:00:00` (0, 0, 2.592 × 10¹²) beats
+`30 days` (0, 30, 0) beats `1 mon` (1, 0, 0); `00:00:00` beats `1 mon -30
+days`; `-1 days` (0, −1, 0) beats `-24:00:00` (0, 0, −8.64 × 10¹⁰). It is
+applied exactly as ADR-0024 §12 applies its rule: over the **whole key tuple**
+with the whole winning tuple kept; eligibility before comparison (a left-arm
+member for INTERSECT / EXCEPT); every surviving copy of an EXCEPT ALL /
+INTERSECT ALL group prints the representative; the representative and the
+multiplicities survive precombine, clone merging, spill and the final merge
+together. Selection never normalizes. It never prints a value absent from the
+input: the minimum of a non-empty set under a total order is a member.
+
+**Executable form (round 3).** Every representative-divergence cell carries
+its explicit rule-3 answer (`iv80RepSpecs`): which columns are key or MIN /
+MAX units, the eligible input members of each, and the rows.
+`TestArc1680bRepExpectations` proves each against PostgreSQL's answer (same
+rows by count; every other column exactly PostgreSQL's; each unit column
+SQL-equal; each printed tuple an eligible member and the rule-3 minimum of
+its SQL-equal members). The manifest then requires that exact answer, with
+PostgreSQL's types. Examples: `tuple/distinct/*` must print `30 days,1 day`
+(the whole second row), never the fabricated `30 days,24:00:00` nor
+PostgreSQL's `1 mon,24:00:00`; `03_order_cast:order/minTieRev~text` must print
+`720:00:00,720:00:00`; `11_relational:pm/null` keeps `sum` and `avg` at
+PostgreSQL's `1 day` (no latitude outside the units); `set/intersectAll/dupRight/*`
+prints `30 days; 30 days` (a left member, twice).
 
 - Unordered `min` / `max` over SQL-tied extremes print the rule-3
   representative (ruling 4); `min(v ORDER BY …)`, `max(v ORDER BY …)` and
   every ordered or ordered-set aggregate over an interval are refused 0A000
-  (ruling 4; `11_relational:ordagg/*`, `ov/aggAsc`, `07_functions:agg/modeTie`,
-  `agg/stringAgg`).
+  (ruling 4).
 - `sum(DISTINCT iv)` and `avg(DISTINCT iv)` are refused 0A000; `count(DISTINCT
   iv)` is allowed (ruling 5).
 - `GREATEST` / `LEAST` keep PostgreSQL's first-argument rule: the statement
-  decides it, so it is not a legal nondeterminism to replace (their manifest
-  outcome is `supported`, not `rep-divergence`).
+  decides it (their outcome is `supported`).
 - A value computed from a representative is computed from the rule-3 member:
-  `reparith/*` must answer `2024-03-01` (the manifest says so explicitly).
+  `reparith/*` must answer `2024-03-01`.
 
 **The SQL-tie rule (ADR-0013).** The representative order must never become a
 SQL order inside an equal key. [measured] PostgreSQL orders SQL-equal
@@ -315,28 +307,28 @@ BY iv, id`, peers, rank, dense_rank and WITH TIES use N only.
 |---|---|---|
 | `i ± j` | `finite_interval_pl` / `_mi`: field-wise, each field overflow-checked, a result equal to a reserved triple 22008; no carry between fields | `05_arith:plus/*`, `minus/*` (`20:00:00 + 20:00:00 = 40:00:00`) |
 | infinite operands of `±` | ∞ ± finite = ∞; `infinity - infinity`, `infinity + -infinity` 22008; `infinity - -infinity` = `infinity` | `05_arith:plus/inf*`, `10_definitions:infop/ivInfMinusNegInf` |
-| `-i` | `interval_um_internal`: infinities swap; each field negated with overflow check | `05_arith:neg/*` |
-| `i * f` (f float8; integer, numeric, real, unknown cast to float8) | `interval_mul`: NaN 22008. Infinite i: f = 0 is 22008, f < 0 negates, else i. Infinite f: `interval_sign(i)` = 0 is 22008, else ±infinity by sign(f) × sign(N). Finite: (1) `month = (int32) trunc(months × f)` and `day = (int32) trunc(days × f)`, **each truncated separately**, 22008 if out of int32; (2) `month_remainder_days = TSROUND((months × f − month) × 30)` where `TSROUND(x) = rint(x × 10⁶) / 10⁶`; (3) `sec_remainder = TSROUND((days × f − day + month_remainder_days − trunc(month_remainder_days)) × 86400)`; (4) if \|sec_remainder\| ≥ 86400, carry `trunc(sec_remainder / 86400)` whole days into `day` and keep the rest; (5) `day += trunc(month_remainder_days)`; (6) `time = rint(time × f + sec_remainder × 10⁶)`, 22008 if out of int64 or a reserved triple | `1 mon -1 day` × 1.5: month 1, day −1, month_remainder_days 15, sec_remainder −43200 → `1 mon 14 days -12:00:00` (`05_arith:mul/mixedSign`, `10_definitions:ar/mulMixed`); `1 mon 1 day` × 0.75 carries a day: `23 days 06:00:00` (`ar/mulCarry`); 1 µs × 1.5 = 2 µs, × 2.5 = 2 µs, × 0.5 = 0 (rint ties to even, `mul/usHalfEven*`) |
-| `i / f` | `interval_div`: f = 0 is 22012; NaN 22008; infinite i: infinite f 22008, f < 0 negates; finite i: the same six steps with **`months / f`, `days / f`, `time / f`** — each component divided by f, never multiplied by a computed reciprocal | `10_definitions:ar/divRecipMonths`: `49 mons / 49` = `1 mon`, `49 mons × (1/49)` = `30 days` (49 × (1/49.0) = 0.9999999999999999 truncates to 0 months). The judge's proposed pair (`9007199254740993 microseconds` / 3 against × (1/3), `ar/divRecipJudge`) and the days pair (`ar/divRecipDays`) do **not** discriminate: both forms answer alike. `1 mon -1 day / 2` = `15 days -12:00:00` (`ar/divMixed2`); `1 year / 7` = `1 mon 21 days 10:17:08.5344` |
+| `-i` | `interval_um_internal`: infinities swap; each field negated with overflow check | `05_arith:neg/*`, `10_definitions:sentinel/negOfNearMin` (22008) |
+| `i * f` (f float8; integer, numeric, real, unknown cast to float8) | `interval_mul`: NaN 22008. Infinite i: f = 0 is 22008, f < 0 negates, else i. Infinite f: `interval_sign(i)` = 0 is 22008, else ±infinity by sign(f) × sign(N). Finite: (1) `month = (int32) trunc(months × f)` and `day = (int32) trunc(days × f)`, **each truncated separately**, 22008 if out of int32; (2) `month_remainder_days = TSROUND((months × f − month) × 30)` where `TSROUND(x) = rint(x × 10⁶) / 10⁶`; (3) `sec_remainder = TSROUND((days × f − day + month_remainder_days − trunc(month_remainder_days)) × 86400)`; (4) if \|sec_remainder\| ≥ 86400, carry `trunc(sec_remainder / 86400)` whole days into `day` and keep the rest; (5) `day += trunc(month_remainder_days)`; (6) `time = rint(time × f + sec_remainder × 10⁶)`, 22008 if out of int64 or a reserved triple | `1 mon -1 day` × 1.5: month 1, day −1, month_remainder_days 15, sec_remainder −43200 → `1 mon 14 days -12:00:00` (`05_arith:mul/mixedSign`, `10_definitions:ar/mulMixed`); `ar/mulCarry` = `23 days 06:00:00` (a whole day carried); 1 µs × 1.5 = 2 µs, × 2.5 = 2 µs, × 0.5 = 0 (rint ties to even, `05_arith:mul/usHalfEven1…3`) |
+| `i / f` | `interval_div`: f = 0 is 22012; NaN 22008; infinite i: infinite f 22008, f < 0 negates; finite i: the same six steps with **`months / f`, `days / f`, `time / f`** — each component divided by f, never multiplied by a computed reciprocal | `10_definitions:ar/divRecipMonths`: `49 mons / 49` = `1 mon`, `49 mons × (1/49)` = `30 days`. The pairs `ar/divRecipJudge` and `ar/divRecipDays` do **not** discriminate. `1 mon -1 day / 2` = `15 days -12:00:00` (`ar/divMixed2`); `1 year / 7` = `1 mon 21 days 10:17:08.5344` (`05_arith:div/yearBy7`) |
 | `justify_days(i)` | `interval_justify_days`: infinite unchanged; `wholemonth = day / 30` (C truncation) moved into months (overflow 22008); then if months > 0 and days < 0, days += 30, months −= 1, and the mirror | `05_arith:justify/*` |
 | `justify_hours(i)` | `interval_justify_hours`: infinite unchanged; `TMODULO(time, wholeday, 86400 × 10⁶)` into days (overflow 22008); then days and time made the same sign | `05_arith:justify/*` |
-| `justify_interval(i)` | `interval_justify_interval`, its own algorithm: infinite unchanged; **pre-normalize** days into months when days and time have the same sign (so the later day addition cannot overflow); TMODULO time into days; days / 30 into months (overflow 22008); then month/day sign agreement treating `day = 0` by the time's sign; then day/time sign agreement | `10_definitions:justify/bigDays24h`: `justify_interval` = `5965232 years 4 mons 8 days`, while `justify_days(justify_hours(…))` is 22008 (`/daysOfHours`); `justify/monMinus25h`: `justify_interval` = `28 days 23:00:00`, `justify_hours(justify_days(…))` = `1 mon -1 days -01:00:00`, `justify_days(justify_hours(…))` = `29 days -01:00:00`: neither composition is `justify_interval` |
-| `sum` | `do_interval_accum` / `interval_sum`: a field-wise running sum in an `Interval` (int32, int32, int64), each addition checked, so an intermediate overflow is 22008 even when later rows would bring it back; finite and infinite values counted apart (`N` and `pInfcount` / `nInfcount`); both infinity signs 22008; one sign gives that infinity | `05_arith:agg/sumOverflow*`, `agg/sumInf*`; `11_relational:ov/*` (overflow depends on order: `ov/winForward` 22008, `ov/winBackward` answers; `ov/aggUnordered` 22008), `pm/*` (NULL ignored; `pm/bothInf` 22008) |
+| `justify_interval(i)` | `interval_justify_interval`, its own algorithm: infinite unchanged; **pre-normalize** days into months when days and time have the same sign; TMODULO time into days; days / 30 into months (overflow 22008); then month/day sign agreement treating `day = 0` by the time's sign; then day/time sign agreement | `10_definitions:justify/bigDays24h`: `5965232 years 4 mons 8 days`, while `justify_days(justify_hours(…))` is 22008 (`/daysOfHours`); `justify/monMinus25h`: `28 days 23:00:00`, against both compositions |
+| `sum` | `do_interval_accum` / `interval_sum`: a field-wise running sum in an `Interval` (int32, int32, int64), each addition checked, so an intermediate overflow is 22008 even when later rows would bring it back; finite and infinite values counted apart; both infinity signs 22008; one sign gives that infinity | `05_arith:agg/sumOverflow*`, `agg/sumInf*`; `11_relational:ov/*` (`ov/winForward` 22008, `ov/winBackward` answers; `ov/aggUnordered` 22008), `pm/*` (`pm/bothInf` 22008) |
 | `avg` | `interval_avg`: the same accumulator, then `interval_div` by the finite count: `avg(2147483647 days, 2147483647 days)` is 22008 though the mean fits | `05_arith:agg/avg*` |
-| sliding `sum` / `avg` | `interval_avg_accum_inv`: field-wise subtraction, infinity counters decremented; a frame holding both infinities is 22008 | `05_arith:agg/avgWindowSliding`; `11_relational:sw/rows2`, `sw/rows3`, `sw/following` (infinities enter and leave), `sw/all` 22008 |
+| sliding `sum` / `avg` | `interval_avg_accum_inv`: field-wise subtraction, infinity counters decremented; a frame holding both infinities is 22008 | `05_arith:agg/avgWindowSliding`; `11_relational:sw/*` (`sw/all` 22008) |
 
 ### 4b. Calendar arithmetic and age
 
 | operation | algorithm [pg-source] | cells [measured] |
 |---|---|---|
-| `timestamp + interval` | `timestamp_pl_interval`: if the interval is `-infinity`: a `+infinity` timestamp is 22008 `timestamp out of range`, else `-infinity`; if `+infinity`: a `-infinity` timestamp is 22008, else `+infinity`; else an infinite timestamp is kept; else **months** first (calendar month, the day clamped to the target month's length), then **days** (calendar days via Julian), then **time** (exact microseconds) | `06_calendar:ts/*`; opposing infinities 22008: `10_definitions:infop/tsInfPlusNegInf`, `infop/tsNegInfPlusInf`, `infop/tsNegInfMinusNegInf`, `infop/dateInfPlusNegInf`; one infinity wins: `infop/tsNegInfMinusInf` = `-infinity`, `infop/tsInfPlusFinite` = `infinity`, `infop/dateFinitePlusInf` = `infinity` |
+| `timestamp + interval` | `timestamp_pl_interval`: if the interval is `-infinity`: a `+infinity` timestamp is 22008, else `-infinity`; if `+infinity`: a `-infinity` timestamp is 22008, else `+infinity`; else an infinite timestamp is kept; else **months** first (calendar month, the day clamped to the target month's length), then **days** (calendar days via Julian), then **time** (exact microseconds) | `06_calendar:ts/*`; `10_definitions:infop/tsInfPlusNegInf`, `infop/tsNegInfPlusInf`, `infop/tsNegInfMinusNegInf`, `infop/dateInfPlusNegInf` 22008; `infop/tsNegInfMinusInf` = `-infinity`, `infop/tsInfPlusFinite` = `infinity`, `infop/dateFinitePlusInf` = `infinity` |
 | `timestamp - interval` | `timestamp_mi_interval`: `timestamp + (-interval)` | `06_calendar:ts/orderMDNeg` |
-| `timestamp - timestamp` | `timestamp_mi`: microseconds into time, months 0, days 0, then `interval_justify_hours`: days and time, never months; an infinite operand: `infinity - infinity` 22008 | `06_calendar:tsdiff/*` |
-| `timestamp - date`, `date - timestamp` | the date read as a timestamp at midnight; `timestamp_mi` | `10_definitions:types/tsMinusDate` = `1 day 01:00:00`, `types/dateMinusTs`; `11_relational:tsdate/*` over rows |
-| `age(timestamp, timestamp)` | `timestamp_age`: infinities first: `age(-inf, -inf)`, `age(inf, inf)` 22008; `-inf` left gives `-infinity`, `+inf` left `infinity`, `-inf` right `infinity`, `+inf` right `-infinity`. Finite: subtract each broken-down field (µs, s, min, h, mday, mon, year); if dt1 < dt2 negate them all; propagate negatives upward (µs into s, s into min, min into h, h into mday); a negative mday borrows **the length of the earlier timestamp's month** (`day_tab` of tm1's month when dt1 < dt2, else tm2's) and decrements mon; negative months borrow 12 from years; then restore the sign if dt1 < dt2; `itm2interval` (22008 on overflow). NULL in, NULL out | `10_definitions:age/borrow` (`2023-03-01` vs `2023-01-31` = `1 mon 1 day`, reversed `-1 mons -1 days`; `2024-03-01` vs `2024-02-15` = `15 days`, reversed `-15 days`; `2024-03-15` vs `2024-01-31` = `1 mon 15 days`), `age/timeBorrow`, `age/null`, `age/infLeft`, `age/infRight`, `age/infOpposed`, `age/infInf` and `age/negInfNegInf` 22008, `age/bc`; `06_calendar:age/*` |
+| `timestamp - timestamp` | `timestamp_mi`: microseconds into time, months 0, days 0, then `interval_justify_hours`: days and time, never months; one infinite operand gives that infinity, two equal infinities are 22008 | `06_calendar:tsdiff/*` (`tsdiff/inf` = `infinity`, `-infinity`; `tsdiff/infInf` 22008) |
+| `timestamp - date`, `date - timestamp` | the date read as a timestamp at midnight; `timestamp_mi` | `10_definitions:types/tsMinusDate` = `1 day 01:00:00`, `types/dateMinusTs`; `11_relational:tsdate/*` |
+| `age(timestamp, timestamp)` | `timestamp_age`: infinities first: `age(-inf, -inf)`, `age(inf, inf)` 22008; `-inf` left gives `-infinity`, `+inf` left `infinity`, `-inf` right `infinity`, `+inf` right `-infinity`. Finite: subtract each broken-down field; if dt1 < dt2 negate them all; propagate negatives upward; a negative mday borrows **the length of the earlier timestamp's month** and decrements mon; negative months borrow 12 from years; then restore the sign if dt1 < dt2; `itm2interval` (22008 on overflow). NULL in, NULL out | `10_definitions:age/borrow` (`1 mon 1 day`, reversed `-1 mons -1 days`; `15 days`, reversed `-15 days`; `1 mon 15 days`), `age/timeBorrow`, `age/null`, `age/infLeft`, `age/infRight`, `age/infOpposed`, `age/infInf` and `age/negInfNegInf` 22008, `age/bc`; `06_calendar:age/*` |
 | `age(timestamptz, timestamptz)` | `timestamptz_age`: the same on the fields **in the session TimeZone**, ignoring a difference of offsets | `10_definitions:age/tz/UTC/fallBack` = `1 day 01:00:00` against `age/tz/America/New_York/fallBack` = `1 day`; `06_calendar:tz/*/age` (`1 mon 9 days 23:00:00` under UTC against `1 mon 10 days` under New York) |
-| `age(date, date)` | resolves to a timestamp overload of midnight values; the measured answers are the same under UTC and New York | `10_definitions:age/date`, `age/dateNY` |
-| `timestamptz ± interval` | the same order in the session TimeZone: a day keeps the wall clock across DST, 24 hours do not; a target time in a DST gap moves forward (`2024-03-09 02:30` + 1 day = `03:30-04`), a target in a fold takes the later offset (`2024-11-02 01:30` + 1 day = `01:30-05`) | `06_calendar:tz/*`; `10_definitions:dst/*`; `date_add` / `date_subtract` with a zone argument and `generate_series` with a zone (`dst/dateAddZone`, `dst/seriesZone`) |
+| `age(date, date)` | **resolves to the timestamptz overload**: both dates are cast to `timestamptz` at local midnight (`10_definitions:explain/age/date`: `age(('2024-03-01'::date)::timestamp with time zone, …)`), so the answer is the session TimeZone's. For the same pair it is alike under UTC and New York (`age/date` and `age/dateMonthNY` = `1 mon 1 day`; `age/dateNY` and `age/dateUTC` = `2 days`), but not in a zone whose midnight falls in a DST gap: `age(DATE '2024-03-11', DATE '2024-03-10')` is `1 day` under UTC (`age/dateGapUTC`) and `23:00:00` under America/Havana (`age/dateGapHavana`, where 2024-03-10 00:00 does not exist). Ruling 7: refused with the timestamptz age (`refusal timestamptz`) | `10_definitions:age/date*`, `explain/age/date` |
+| `timestamptz ± interval` | the same order in the session TimeZone: a day keeps the wall clock across DST, 24 hours do not; a target time in a DST gap moves forward, a target in a fold takes the later offset | `06_calendar:tz/*`; `10_definitions:dst/*` |
 | `time ± interval` | `time_pl_interval`: the time part modulo 24 h; months and days ignored | `06_calendar:time/plus` |
 
 **Result types** [measured], the header type of each cell:
@@ -364,36 +356,34 @@ days) × (86400 / 4) + time / 10⁶`, in integer arithmetic (numeric on int64
 overflow): **a year is 365.25 days in the epoch and 360 days in N**.
 [measured] `10_definitions:epoch/yearVs360`: `extract(epoch FROM '1 year')` =
 `31557600.000000`, `'360 days'` = `31104000.000000`, while `'1 year' = '360
-days'` is `t`; `'13 mons'` = `34149600` (one year of 365.25 days plus one
-month of 30). `date_part('epoch', …)` is the float8 form
-(`epoch/yearVs360Float`). The other fields are the broken-down fields of
+days'` is `t`; `'13 mons'` = `34149600`. `date_part('epoch', …)` is the float8
+form (`epoch/yearVs360Float`). The other fields are the broken-down fields of
 `interval2itm` (`07_functions:extract/*`, numeric for EXTRACT, float8 for
 date_part; `week`, `dow`, `doy`, `isoyear`, `julian`, `timezone` are 0A000 on
-PostgreSQL itself). For an infinite interval `NonFiniteIntervalPart` answers
-±Infinity for year, day, hour, epoch and similar fields and NULL for month,
-minute, second, microsecond (`07_functions:extract/inf`, `02_fields:fields/20`).
-A large **finite** epoch: `10_definitions:epoch/bigFinite` =
-`5842218453753654.775806` one microsecond below the positive sentinel,
-`epoch/bigFiniteNeg` (round 1's `extract/bigEpoch` was the sentinel itself,
-not a finite value).
+PostgreSQL itself, `07_functions:extract/week` … `extract/timezone`). For an
+infinite interval `NonFiniteIntervalPart` answers ±Infinity for year, day,
+hour, epoch and similar fields and NULL for month, minute, second,
+microsecond (`07_functions:extract/inf`, `02_fields:fields/20/infinity`). A
+large **finite** epoch: `10_definitions:epoch/bigFinite` =
+`5842218453753654.775806`, `epoch/bigFiniteNeg`.
 
 **Ruling 6:** an EXTRACT whose numeric result PostgreSQL gives as ±Infinity is
-refused 0A000 (the finite DECIMAL carrier cannot hold it); `date_part`'s
-float8 ±Infinity is supported.
+refused 0A000; `date_part`'s float8 ±Infinity is supported.
 
 ### 4d. Functions and frames: implement or refuse
 
 | function | assignment [proposed, within rulings 6 and 7] | definition / cells |
 |---|---|---|
 | `make_interval`, `justify_*`, `isfinite`, `age(timestamp, timestamp)`, `date_part`, `EXTRACT` (finite results) | implement, stage C | §1, §4a, §4b, §4c |
+| `age(date, date)`, `age(timestamptz, timestamptz)` | refuse 0A000 (`timestamptz`, ruling 7): both are the timestamptz age | §4b |
 | `date_bin(stride, timestamp, origin)` | implement, stage C: [pg-source] `timestamp_bin`: an infinite timestamp is kept (`fn/binInfSource`); an infinite origin 22008; an infinite stride 22008 (`fn/binInfStride`); a stride with months 0A000 (`07_functions:bin/month`); a stride ≤ 0 22008 (`bin/zero`, `bin/neg`); else floor((ts − origin) / stride) × stride + origin with the days counted as 24 h (`fn/binDaysStride`, `fn/binBeforeOrigin`); a sub-millisecond result is refused (`bin/us`, E36) | `07_functions:bin/*`, `10_definitions:fn/bin*` |
-| `date_trunc(unit, interval)` | refuse 0A000 (`function-date_trunc`), own item | measured `07_functions:trunc/*`, `10_definitions:fn/truncMixedSign` |
-| `generate_series(ts, ts, interval)` | refuse 0A000 (`function-generate_series`), own item: each step is applied to the previous value, so a month step drifts at month ends (`fn/seriesTsMonthEnd`: `01-31, 02-29, 03-29, 04-29`), and the timestamptz form drifts across a DST gap (`dst/seriesNoZone`) | `07_functions:series/*` |
+| `date_trunc(unit, interval)` | refuse 0A000 (`function-date_trunc`), own item | `07_functions:trunc/*` (PostgreSQL's own 0A000 for `week`: the named refusal is still met, §9), `10_definitions:fn/truncMixedSign` |
+| `generate_series(ts, ts, interval)` | refuse 0A000 (`function-generate_series`), own item: each step is applied to the previous value, so a month step drifts at month ends (`fn/seriesTsMonthEnd`: `01-31, 02-29, 03-29, 04-29`) | `07_functions:series/*` |
 | `to_char(interval, fmt)` | refuse 0A000 (`function-to_char`), own item | `07_functions:tochar/*`, `fn/tocharNeg` |
 | `OVERLAPS` with an interval end | refuse 0A000 (`function-overlaps`), own item | `07_functions:overlaps/*`, `fn/overlaps*` |
 | `width_bucket(interval, …)` | PostgreSQL's own 42883 for the four-argument form; the array form is a container (refused) | `07_functions:widthBucket`, `widthBucketArray` |
 | ordered-set and ordered aggregates over an interval | refuse 0A000 (ruling 4) | §3 |
-| RANGE frames with an interval offset | refuse 0A000 (`range-offset-frame`) while offset RANGE frames are refused for every type (42601 here today); when implemented: [pg-source] `in_range_timestamp_interval` / `in_range_interval_interval`: a negative offset by `interval_sign` is 22013 (`frame/negOffset`, `frame/negInfOffset`); a NULL offset is 22004 (`frame/nullOffset`); `infinity PRECEDING` includes every earlier row, and against an infinite base the special case answers true rather than computing infinity − infinity (`frame/infOffset`, `frame/infFollowing`); the bound is base ∓ offset by calendar arithmetic, so an offset SQL-equal to zero is not a zero offset: `1 mon -30 days PRECEDING` leaves 2024-03-01's own row outside its frame (`frame/zeroNormalized` row 3 counts 0) | `07_functions:frame/*`, `11_relational:frame/*` |
+| RANGE frames with an interval offset | refuse 0A000 (`range-offset-frame`) while offset RANGE frames are refused for every type (42601 here today); when implemented: [pg-source] `in_range_timestamp_interval` / `in_range_interval_interval`: a negative offset by `interval_sign` is 22013 (`frame/negOffset`, `frame/negInfOffset`); a NULL offset is 22004 (`frame/nullOffset`); `infinity PRECEDING` includes every earlier row (`frame/infOffset`, `frame/infFollowing`); an offset SQL-equal to zero is not a zero offset: `1 mon -30 days PRECEDING` leaves 2024-03-01's own row outside its frame (`frame/zeroNormalized` row 3 counts 0) | `07_functions:frame/*`, `11_relational:frame/*` |
 
 ## 5. Input and output text
 
@@ -406,19 +396,15 @@ float8 ±Infinity is supported.
   `ParseFractionalSecond`: `rint(frac × 10⁶)`, **half to even**.
 
 `10_definitions:frac/1.5us`: clock `00:00:00.000002`, unit `00:00:00.000001`;
-`frac/3.5us`: clock 4 µs, unit 3 µs; `frac/2.5us`: both 2 µs (ties to even and
-toward zero agree); `frac/clockNearSecond`: clock `00:00:01.5`, unit
-`00:00:01.499999`. Round 1's "input rounds half toward zero" held only for the
-unit path.
+`frac/3.5us`: clock 4 µs, unit 3 µs; `frac/2.5us`: both 2 µs;
+`frac/clockNearSecond`: clock `00:00:01.5`, unit `00:00:01.499999`.
 
 - A **year, decade, century or millennium fraction** becomes whole months by
-  `rint` (`AdjustFractYears`): `0.125 years` = `2 mons` (1.5 to even),
-  `0.375 years` = `4 mons` (4.5 to even), `-0.125 years` = `-2 mons`
-  (`frac/years1`, `frac/years2`). Round 1 cited `1.5 years`, which does not
-  discriminate.
+  `rint` (`AdjustFractYears`): `0.125 years` = `2 mons`, `0.375 years` =
+  `4 mons`, `-0.125 years` = `-2 mons` (`frac/years1`, `frac/years2`).
 - A **month fraction** becomes days at 30 (`AdjustFractDays(frac, 30)`), the day
   fraction then microseconds by the unit path: `0.5 months` = `15 days`,
-  `-0.0333333 months` = `-23:59:59.9136`.
+  `-0.0333333 months` = `-23:59:59.9136` (`05_arith:frac/months`).
 - A **week fraction** becomes days first (`AdjustFractDays(frac, 7)`), then
   microseconds: `0.5 weeks` = `3 days 12:00:00` (`01_input:lit/34`), `1.5
   weeks` = `10 days 12:00:00`, `0.1 weeks` = `16:48:00` (`frac/weeks1`).
@@ -428,34 +414,33 @@ unit path.
 **`ago`** [measured]: accepted only as the last token of the postgres grammar
 (`1 day 02:00:00 ago`, `1-2 ago`, `3 4:05:06 ago`, `-1 day +02:00:00 ago`, `@ 1
 mon ago`); **refused 22007** after an ISO 8601 form (`P1D ago`, `P1Y2M ago`),
-after `infinity` or `-infinity` (`infinity ago`), twice (`1 day ago ago`) or
-alone (`ago`) (`10_definitions:ago/*`). [pg-source] `DecodeInterval`: `AGO`
-only at `i == nf - 1`; `RESERV` (infinity) must be the last field; ISO input is
-tried only after the postgres grammar fails on the whole string.
+after `infinity` or `-infinity`, twice (`1 day ago ago`) or alone (`ago`)
+(`10_definitions:ago/*`). [pg-source] `DecodeInterval`: `AGO` only at
+`i == nf - 1`; `RESERV` (infinity) must be the last field; ISO input is tried
+only after the postgres grammar fails on the whole string.
 
 **Typmods change interpretation, not only truncation** [measured]: the
-qualifier decides which field a bare number or a two-part clock fills
-(`DecodeInterval`'s `range` switch): `'1:30'` is `01:30:00` bare and `HOUR TO
-MINUTE`, `00:01:30` as `MINUTE TO SECOND`; `'90'` is 90 seconds bare and 90
-minutes as `MINUTE`; `'2' DAY TO HOUR` is `02:00:00`; `'1.5' HOUR TO MINUTE`
-is `00:01:00` (a minute and a half, then truncated to the minute)
+qualifier decides which field a bare number or a two-part clock fills:
+`'1:30'` is `01:30:00` bare and `HOUR TO MINUTE`, `00:01:30` as `MINUTE TO
+SECOND`; `'90'` is 90 seconds bare and 90 minutes as `MINUTE`; `'2' DAY TO
+HOUR` is `02:00:00`; `'1.5' HOUR TO MINUTE` is `00:01:00`
 (`10_definitions:typmod/*`, `01_input:std/*`). Then `AdjustIntervalForTypmod`
 zeroes the fields right of the last one named and rounds the time to the
-precision **half away from zero** (`IntervalOffsets`: `01_input:prec/iv0` =
-`00:00:02`, `00:00:03`, `-00:00:02`). A precision above 6 is clamped to 6 with
-`WARNING 22023: INTERVAL(7) precision reduced to maximum allowed, 6`
-(`typmod/prec7`, `typmod/prec7Literal`, `typmod/prec7Half`, `01_input:prec/iv7`).
+precision **half away from zero** (`01_input:prec/iv0` = `00:00:02`,
+`00:00:03`, `-00:00:02`). A precision above 6 is clamped to 6 with `WARNING
+22023: INTERVAL(7) precision reduced to maximum allowed, 6` (`typmod/prec7*`,
+`01_input:prec/iv7`).
 
 **`IntervalStyle` changes input too:** under `sql_standard`, `-1 2:03:04`
 applies the leading sign to every field (`02_fields:input/sqlstd/mixed`).
 
 **Casts** [measured], exactly the directions measured: `text → interval`
-(`cast/fromText`, `cast/colon`), `interval → text`, `interval → varchar`
-(`cast/toText`, `cast/toVarchar`, NULL `cast/toTextNull`), `time → interval`
-(`cast/fromTime`), `interval → time` (modulo 24 h, `cast/toTime`); `integer →
-interval`, `numeric → interval`, `interval → bigint`, `interval → boolean` are
-42846 (`cast/fromInt`, `cast/fromNumeric`, `cast/toBigint`,
-`07_functions:operand/castBool`). No other direction is claimed.
+(`cast/fromText`, `cast/colon`), `interval → text` (`cast/toText`, NULL
+`cast/toTextNull`), `interval → varchar` (`cast/toVarchar`, typed `character
+varying`, OID 1043), `time → interval` (`cast/fromTime`), `interval → time`
+(modulo 24 h, `cast/toTime`); `integer → interval`, `numeric → interval`,
+`interval → bigint`, `interval → boolean` are 42846 (`cast/fromInt`,
+`cast/fromNumeric`, `cast/toBigint`, `07_functions:operand/castBool`).
 
 **Output** [measured] (`02_fields:print/*`): four styles, field-preserving;
 `postgres` prints `1 year 2 mons 3 days 04:05:06.789`, `-1 days +02:03:04.5`.
@@ -463,116 +448,152 @@ DateStyle does not change it (`02_fields:print/dateStyleSQL`).
 
 **First stage (ruling 7):** input is PostgreSQL's interval grammar under
 `IntervalStyle = postgres` with both rounding paths as above; output is the
-`postgres` style only; every typmod-qualified declaration is refused 0A000
-(the record does not yet implement `AdjustIntervalForTypmod` and the
-qualifier-dependent decoding exactly); `SET IntervalStyle` to anything but
-`postgres` is refused at the door (today it is silently accepted and ignored:
-§7, §11).
+`postgres` style only; every typmod-qualified declaration is refused 0A000;
+`SET IntervalStyle` to anything but `postgres` is refused at the door (today
+it is accepted and ignored: §7, §11).
 
-## 6. Boundaries in the engine
+## 6. Boundaries in the engine: the complete inventory
 
-Every place a value of the new type must be handled [wadjet-source, at
-`6ef333fb`]. Round 1's table stands with the refinements below; the judge's
-omissions follow, each re-verified in the source (file and function), with
-what goes wrong if it is forgotten [inferred].
+Every place a value of the new type must be handled, enumerated from the
+source at `6ef333fb` [wadjet-source]; every file and function below was
+re-verified in round 3 (a script checked each function's definition exists
+in the named file). This is round 1's inventory, its refinements and round
+2's omissions table merged into one list. Columns: **site** (file and
+function), **today**, **change** (what the stage must do), **owner** (the
+stage, §9), **if forgotten** [inferred].
 
-**Refinements of round 1's entries.**
+### 6.1 The type, the vector, selection and copy
 
-- `engine/expr/expr_leaf.go` `ColRef.Eval` already falls back to
-  `Vector.GetValue`; no dedicated arm is needed once `boxVectorValue` /
-  `GetValue` box the triple.
-- `engine/exec/packed_hash.go` `packedKeyWidth` can exclude INTERVAL and leave
-  it to the generic key path.
-- `engine/batch/pool.go` `BatchPool.Get` / `GetForSize` have no type switch;
-  the obligations are allocation, reset, ownership and accounting (below).
-- `engine/exec/agg_group_key.go` `genericKeyBoxingDeferrable`: N cannot
-  reconstruct the triple, so an interval key must not be "boxing deferrable"
-  merely because N is fixed-width: the key carries N **and** the triple.
+| site | today | change | owner | if forgotten |
+|---|---|---|---|---|
+| `storage/parquet/schema.go` `TypeID` enum, `TypeID.String`, `ParseTypeID` | no INTERVAL id; `ParseTypeID("INTERVAL")` answers `TypeDuration` for the CAST machinery; `DeclaredColumn` refuses a new INTERVAL column (#1713d) | append one execution-only id (ruling 10, pending); `ParseTypeID("INTERVAL")` keeps answering DURATION for DDL refusal and casts | A (declares), B (carrier) | DDL starts accepting INTERVAL, or existing DURATION data is reinterpreted |
+| `engine/batch/vector.go` `NewVectorWithScale`, `EnsureLen`, `ResetForWrite`, `GetValue`, `SetValue`, `CopyValueFrom`, `AppendFrom`, `growForAppend`, `memBytes`, `IntStorageType`, `WriteNullAt` | no storage; `SetValue` refuses an `IntervalBox` into anything but DURATION | a 16-byte triple column; every accessor, growth, copy, typed NULL, memory size | B | guard errors, or a DURATION-shaped copy that loses fields silently |
+| `engine/batch/batch.go` `newVectorFromColumn`, `(*RecordBatch).Reset`, `resetVectorForReuse`; `bitmap.go` `NewBitmapAllNull`; `pool.go` `BatchPool.Get`, `GetForSize` | allocation by type id; the pool has no type switch | allocation, reset, pool reuse, empty and all-NULL batches (the pool's obligations are allocation, reset, ownership, accounting) | B | a wrong declaration hidden while every value is NULL (`11_relational:null/*`, `empty/*`, `oj/*`); stale triples on reuse |
+| `engine/batch/view.go` `Flatten`; `engine/exec/late_mat.go` `FlattenForConsumer` | type switches without INTERVAL | flatten selections and late-materialized views | B (carrier), D (late materialization engaged) | a bad copy silently corrupts output |
+| `engine/exec/sort.go` `copyVectorValue`, `gatherVector`, `gatherSortVector`; `exec/join.go` `gatherBuildVector`, `gatherCrossBuildVector`; `exec/window.go` `windowCopyVectorRange`, `windowGatherVector`; `exec/project.go` `projectCopyColumn`, `projectGatherColumn`; `worker/partitioned_shuffle_sink.go` `appendBatchRowsBulk`, `growBatchTo` | type switches without INTERVAL | a case each (both the typed fast path and the generic fallback) | B | guard error, NULL loss, or a field dropped in a copy |
+| `engine/batch/type_mismatch.go` `IntervalBox`, `DurationNanoser` | the guard that keeps an interval out of every vector | relaxed for the INTERVAL vector only | B | an interval written into a DURATION or STRING vector |
+| `engine/batch/pgtext.go` `FormatPGText` | no interval | postgres-style text (`EncodeInterval`) | C | wrong text for the explicit cast |
+| `engine/batch/representative.go` `RepCompareBox`, `RepEligibleType` (ADR-0024 §12) | INTERVAL listed as "not here" | INTERVAL eligible with the §3 order | D | a first-met or plan-dependent representative |
+| memory accounting (ADR-0006): the 16-byte triple per row; the canonical key (N, 16 bytes) and representative triple in group, distinct, join and set-operation tables; the aggregate state (triple sum, finite count, two infinity counts); spill and WSHF codec scratch | none | charged to the owning operator, released by it, spillable where its breaker spills | B (carrier), D (keys), E (states) | unbounded memory, or a budget refusal at the wrong place |
 
-**Omitted sites** (the judge's finding 4):
+### 6.2 Expressions
 
-| site | what it does today | if forgotten |
-|---|---|---|
-| `engine/expr/temporal_producer.go` `producesInterval`; `planner/physical/declared_output.go` `nodeIsInterval`; `engine/expr/interval_node.go` (`IsIntervalNode`) | interval recognition by expression **syntax** | a column reference to an interval-typed derived column is not seen as an interval: silent wrong or a guard error once derived columns are admitted |
-| `engine/expr/rettype.go` `CommonDeclType`; `planner/physical/declared_output.go` `caseDeclaredType`; `engine/expr/expr_special.go` `(*Case).boxMode` | CASE / COALESCE common-type resolution | a fallback declaration or a wrong coercion: guard error, mistyped NULL (`10_definitions:closure/*`) |
-| `engine/expr/interval_constant.go` `ConstantEvalError`; `planner/logical/table_func_args.go` `FoldTableFuncArg`; `engine/expr/outer_literal.go` `unrenderableOuterValue` | constant diagnostics, table-function string folding, correlated typed-NULL stand-ins | the type or the representation erased: wrong declaration, diagnostic or refusal |
-| `planner/physical/set_op_arm_decls.go` `setOpArmDecls`; `set_op_result_column.go` `setOpResultColumn`; `set_op_plan.go` `setOpNullLayout` | arm alignment and NULL layout (beside `setOpWiden`) | mistyped vectors, codec refusal, guard error |
-| `engine/exec/project.go` `projectCopyColumn`, `projectGatherColumn` | bulk projection and selected-row gathering | NULL loss or guard error; test both the typed fast path and the generic fallback |
-| `engine/batch/batch.go` `newVectorFromColumn`, `(*RecordBatch).Reset`, `resetVectorForReuse`; `vector.go` `WriteNullAt`; `bitmap.go` `NewBitmapAllNull` | allocation, pool reuse, typed NULLs, outer padding, empty batches | a wrong declaration hidden while every value is NULL (`11_relational:null/*`, `empty/*`, `oj/*`) |
-| `engine/exec/agg_accumulator_merge.go` `mergeFlatAccumRow`; `agg_partial_merge.go` `(*HashAggregate).mergeSinkState` | clone merging of SoA accumulators | wrong merged aggregates; the interval state (triple sum, count, infinity counts), overflow, NULL and representative must merge |
-| `engine/exec/aggregate_partial_spill.go` `emitAcc`, `readAcc`, `setPartialKeyFromAny` (its default arm turns an unknown boxed key into a string tag), `(*kWayMerger).Next` | the partial-state codec and the k-way merge | guard error, or a wrong state or representative after spill |
-| `worker/shuffle_partial_agg.go` `(*cappedPartialAgg).resolveAgainst`; `shuffle_local_accum.go` `(*partitionedShuffleSink).consumeLocalAccum` | sender precombine and local accumulation | wrong aggregates or lost eligibility despite a correct final merge |
-| `engine/exec/sort.go` `(*Sort).compactTopKLocked`, `(*topNHeap).Less`; `late_mat.go` `FlattenForConsumer`; `planner/physical/topn_late_mat.go` | top-N compaction, late-materialized selections | a missing comparator refuses; a bad copy silently corrupts output |
-| `engine/exec/sort_merge_join.go` `resolveCompareKernels`, `compareLR`, `keysEqual` | kernel admission and equal-key runs | a missing kernel is a guard error; a field-wise comparator silently misses SQL-equal matches |
-| `worker/shuffle_format.go` `(*shuffleWriter).writeHeader`; `wshf/decode.go` `ParseHeader`; `wshf/schema_guard.go` `(*SchemaGuard).check` | the WSHF header's type byte per column | decode or schema refusal, or mistyping; existing type ids must stay as they are (§10) |
-| `engine/exec/bloom_filter_op.go` `appendBloomKeyAt`; `dynamic_filter_emit.go` `dynamicFilterIntKey`, `(*DynamicFilterEmitOp).Execute` | bloom keys; dynamic filters decline non-integer keys | a bloom key not built from the canonical join encoding gives **false negatives**; keep the dynamic-filter exclusion unless implemented |
-| `coordinator/skew_split.go` `planSkewSplitTasks` | skew sub-tasks split probe files, replicate build files | lost or duplicated matches or broken memory bounds if partitions are not by N |
-| `worker/gather_reply_sink.go` `(*gatherReplySink).Consume`; `coordinator/gather_receiver.go` `admitLocked`; `gather_replay.go` `(*gatherReplayStream).Next`; `dag_merge.go` `(*batchRenamer).apply` | gather's WSHF payload, replay, renaming, task / execution / sequence identity | an explicit gather refusal, or duplicate / incomplete results if bypassed |
-| `server/pgwire/server.go` `handleDescribe`, `describeSQL`, `TypeMod` | Describe and typmods | false metadata on empty and prepared statements (§7 records two cases today) |
-| `internal/oracle/typematrix/typematrix.go` `Columns` | the type matrix's catalog | the oracle stays green because INTERVAL is absent: add an execution-derived interval fixture, not a stored column |
+| site | today | change | owner | if forgotten |
+|---|---|---|---|---|
+| `engine/expr/expr_interval.go` `IntervalValue` (opaque `text`), `compareIntervals`, `intervalOrder`, `cmpSeconds`, `cmpSecondsBig`, `addInterval`, `castToIntervalText`, `pgIntervalInput`, `CheckIntervalLiteralText`, `DurationNanos`, `raiseIntervalNot*` | single-unit, whole seconds; multi-field input is opaque and refused when applied, compared or rendered | replaced by the triple; N in 128 bits; every producer and consumer migrated together | C | two interval representations alive at once |
+| `engine/expr/compile.go` `intervalValueOf`, `isIntervalLit`, `compileBinOp` | literal of one unit; sub-second refused 0A000 | the full grammar (§5) | C | 42601 / 22007 where PostgreSQL answers |
+| `engine/expr/interval_arith.go` `intervalArith`, `intervalAdd`, `intervalNeg`, `intervalScale`, `intervalOfParts`, `pgParts`, `IsIntervalInputText`, `isIntervalBox` | arithmetic in whole seconds; a sub-second or infinite result refused (r29) | §4a exactly | C | wrong cascade, rounding or overflow |
+| `engine/expr/interval_part.go` `intervalExtract`, `intervalPart`; `expr_cast.go` `castToInterval`, `castStringRender`; `cast_container.go` `leafTypeName`; `cmp_container.go` `boxShape`; `expr_helpers.go` `compare` | date_part float8; EXTRACT refused | EXTRACT numeric per field, date_part float8; casts in the measured directions | C | wrong field or type |
+| `engine/expr/expr_session_fns.go` `dateShift`, `intervalShift`; `time_bucket.go` `fnTimeBucket`, `timeBucketStrideMillis`; `expr_math_fns.go` `fnMod` | date_add / time_bucket over the single-unit box | §4b temporal application (months, days, time order); sub-millisecond results refused | C | a calendar result applied in the wrong order or as 24 h days |
+| `engine/expr/timestamp_difference_guard.go` and the timestamp difference (temporal r16: a double of milliseconds) | refused as an interval producer (#1713d) | `timestamp - timestamp` and `timestamp - date` produce the interval (`timestamp_mi` then `justify_hours`); the guard is not removed wholesale | C | a timestamp difference reaching the numeric fallback |
+| `engine/exec/kernel/compare.go` `ResolveFilterKernel`, `ResolveColColFilterKernel`, `ResolveInFilterKernelArity` | no INTERVAL kernel | comparison by N | C | a field-wise comparison: silent wrong |
+| `engine/expr/expr_leaf.go` `ColRef.Eval`, `boxVectorValue` | no INTERVAL column; `ColRef.Eval` falls back to `Vector.GetValue` | box the triple (no dedicated arm needed once `GetValue` boxes it) | B | a column reference reading a wrong box |
+| `engine/expr/temporal_producer.go` `producesInterval`; `planner/physical/declared_output.go` `nodeIsInterval` (ignores its `decls` argument today); `engine/expr/interval_node.go` `IsIntervalNode` | interval recognition by expression **syntax** | recognition by the declared type of the bound slot (§9.1) | A (declares), D (relies on it) | a column reference to an interval-typed derived column not seen as an interval |
+| `engine/expr/rettype.go` `CommonDeclType`; `declared_output.go` `caseDeclaredType`; `engine/expr/expr_special.go` `(*Case).boxMode` | CASE / COALESCE common-type resolution | INTERVAL as its own common type (PostgreSQL's category T) | A (declares), C (evaluates) | a fallback declaration or a wrong coercion (`10_definitions:closure/*`) |
+| `engine/expr/interval_constant.go` `ConstantEvalError`; `planner/logical/table_func_args.go` `FoldTableFuncArg`; `engine/expr/outer_literal.go` `unrenderableOuterValue` | constant diagnostics, table-function string folding, correlated re-runs substituting typed literals | an interval outer value renders as `CAST('<postgres text>' AS INTERVAL)` (or is refused) | C (constants), D (correlated subqueries) | the type or the representation erased in a correlated re-run |
 
-**Memory accounting (ADR-0006).** Single-owner accounting and spillable
-breakers apply to every new allocation: the 16-byte triple per row; the
-canonical key (N, 16 bytes) and the representative triple carried beside it
-in group, distinct, join and set-operation tables; the aggregate state (a
-triple sum of 16 bytes, a finite count, two infinity counts); and the codec
-scratch of the spill and WSHF writers. Each is charged to the operator that
-owns it, released by that owner, and spillable where its breaker spills; a
-16-byte vector entry alone does not discharge that obligation.
+### 6.3 Keys, hashing, comparison and sort
 
-**Existing state, corrected** (the judge's finding 7) [wadjet-source]:
+| site | today | change | owner | if forgotten |
+|---|---|---|---|---|
+| `engine/exec/agg_key_encoding.go` `appendColumnValue`; `agg_group_key.go` `buildKeySerCols`, `decodeSerializedKey`, `decodeSerializedKeyIntoColumns`, `genericKeyBoxingDeferrable` | no INTERVAL; an unknown partial key falls back to a string | canonical key = N; the triple rides beside it as the representative; an interval key is never "boxing deferrable" (N cannot reconstruct the triple) | D | SQL-equal values in two groups, or a lost representative |
+| `engine/exec/packed_hash.go` `packedKeyWidth` | no INTERVAL | exclude INTERVAL (the generic key path handles it) | D | a 16-byte value truncated into a packed key |
+| `engine/exec/partitioned_agg.go` `PartitionSelectors`, `buildRoutePlan`, `legacyCompositeHash`; `exec/distinct_set.go` `newDistinctSetFor` | no INTERVAL | hash of N | D | SQL-equal values routed to different partitions: duplicate groups |
+| `engine/exec/join.go` `isIntKeyColumn`, `intKeyFromVector`, `consolidateBuild`, `updateKeyMinMax`; `exec/join_key_width.go` `keyEncodingClass`, `widenKeyFloat64` | no INTERVAL | join key of N; no float widening | D | missed or wrong join matches |
+| `engine/exec/sort_merge_join.go` `resolveCompareKernels`, `compareLR`, `keysEqual` | a missing kernel fails loudly | N comparator; equal-key runs by N | D | a field-wise comparator silently misses SQL-equal matches |
+| `engine/exec/kernel/sort.go` `ResolveSortCompare`, `ResolveSortCompareNoNulls`, `ResolveSortCompareNullsLast`; `exec/sort_external.go` `resolveSortCompareForKey`, `sortEntriesLessFunc`; `exec/window.go` `compareVectorValues`; `coordinator/coordinator.go` `compareBatchRows` | no INTERVAL | compare N only (the SQL-tie rule) | D | the representative order leaking into SQL order |
+| `engine/exec/sort.go` `(*Sort).compactTopKLocked`, `(*topNHeap).Less`; `planner/physical/topn_late_mat.go` | no INTERVAL | top-N by N; late-materialized selections | D | a missing comparator refuses; a bad copy corrupts output |
+| `engine/exec/bloom_filter_op.go` `appendBloomKeyAt`; `dynamic_filter_emit.go` `dynamicFilterIntKey`, `(*DynamicFilterEmitOp).Execute` | bloom keys; dynamic filters decline non-integer keys | the bloom key from the canonical N encoding; keep the dynamic-filter exclusion unless implemented | D | **false negatives**: rows dropped silently |
+| `planner/physical/set_op_types.go` `setOpTypeCategory`, `setOpWiden`; `set_op_arm_decls.go` `setOpArmDecls`; `set_op_result_column.go` `setOpResultColumn`; `set_op_plan.go` `setOpNullLayout` | no INTERVAL; DURATION sits in the numeric category | INTERVAL its own category (no widening with any other type); unknown and NULL arms take the interval (§9.1) | D | an interval arm widened with a number or text, or mistyped NULL arms |
 
-- **DURATION aliasing.** `storage/parquet/schema.go` `ParseTypeID` still maps
-  the spelling `INTERVAL` to `TypeDuration` (the CAST machinery's alias,
-  `ResolveColumn`), while `DeclaredColumn` refuses a **new** column spelled
-  INTERVAL at any depth (0A000, #1713d) and leaves DURATION columns untouched;
-  `parquet.TestDeclaredColumnRefusesANewIntervalColumn` pins both. Adding the
-  type must keep execution casts apart from DDL and never reinterpret existing
-  DURATION data.
-- **Containers are already refused.** The interval rule refuses an interval
-  array or row element (`planner/physical/validate_interval_use.go`;
-  `04_keys:array/group` 0A000 today), though `declared_output.go`
-  `arrayLitDeclaredType` would declare an ARRAY of INTERVAL as DURATION if it
-  were reached. The refusal stays for typed column elements, nested casts, MAP
-  keys and values and `array_agg`.
-- **Parquet and Iceberg guards exist.** `refuseIntervalAnnotation`
-  (`storage/parquet/schema_tree.go`) is called at every reader open
-  (`file_reader.go`, four sites, and `footer_cache.go`), pinned by
-  `parquet.TestReaderRefusesTheIntervalAnnotation`; Iceberg refuses an interval
-  field, pinned by `iceberg.TestTableReaderRefusesAnIntervalField`. A test that
-  reads a whole encoded Parquet file with an INTERVAL column is still absent.
-- **Parameter tests exist.** `pgwire.TestIntervalRuleOverTheWire`
-  (`internal/server/pgwire/interval_rule_wire_test.go`) pins text comparison
-  and shift, publication refusal, invalid text (22007), NULL, binary refusal
-  (0A000) and Describe; `bindparams.go` `renderTextParam` keeps `CAST(… AS
-  INTERVAL)` for a text parameter typed 1186 and `renderBinaryParam` refuses a
-  binary one. Round 1 said there were none; that was wrong.
-- **`timestamp - date`** is refused today with 42883 `operator does not exist`
-  by the planner (`10_definitions:types/tsMinusDate`, `11_relational:tsdate/*`);
-  PostgreSQL answers an interval. `expr/timestamp_difference_guard.go` also
-  covers it at run time. Disposition: refused until stage C implements it as
-  `timestamp_mi` over a midnight timestamp; the guard is not removed wholesale
-  when `timestamp - timestamp` lands.
-- **`lag(NULL, 1, ts)`**: PostgreSQL types the window result by the default,
-  so `lag(NULL, 1, ts) OVER (…) - ts` is an interval (`11_relational:lag/*`).
-  The interval rule recognizes it (`withTimestampLeaves`); the window output
-  must carry the default's type to the subtraction. Disposition: stage E.
-- **The opaque `IntervalValue`** (`engine/expr/expr_interval.go`): a runtime
-  `CAST(s AS INTERVAL)` of text the single-unit fields cannot hold is boxed
-  opaque and refused 0A000 where it is applied, compared or rendered
-  (`11_relational:opaque/*`, `rt/*`). Its replacement by the triple migrates
-  every producer and consumer together (AST recognition `IsIntervalNode` and
-  `producesInterval` are separate mechanisms; both change); unsupported row
-  text keeps raising a SQL error. Disposition: stage C.
+### 6.4 Aggregates and windows
+
+| site | today | change | owner | if forgotten |
+|---|---|---|---|---|
+| `engine/exec/kernel/agg.go` `ResolveBatchMin`, `ResolveBatchMax`, `ResolveBatchSum` (and the row forms); `exec/agg_accumulators.go` `initFlatAccums`, `isFlatSumType`; `exec/agg_scatter.go` `scatterFlatAggUpdate*` | refused at plan time (r30, `validate_interval_use.go`) | min / max by N with the rule-3 representative; sum / avg with PostgreSQL's field-wise accumulator and overflow | E | wrong aggregates or lost overflow |
+| `engine/exec/agg_accumulator_merge.go` `mergeFlatAccumRow`; `agg_partial_merge.go` `(*HashAggregate).mergeSinkState` | clone merging of SoA accumulators | the interval state (triple sum, count, infinity counts), overflow, NULL and representative merge | E | wrong merged aggregates |
+| `engine/exec/aggregate_partial_spill.go` `mapBatchTypeToParquet`, `writePartialKeyToColumn`, `writeIntKeyToColumn`, `emitAcc`, `readAcc`, `setPartialKeyFromAny` (its default arm turns an unknown boxed key into a string tag), `(*kWayMerger).Next`; `exec/agg_spill.go` | no INTERVAL | key (N and triple), representative, accumulator state | D (keys), E (states) | a guard error, or a wrong state or representative after spill |
+| `worker/avg_fold.go` `writeAvgColumn`; `coordinator/coordinator.go` `reAggregatePartials`; the DAG partial / final merge | no interval partials | the partial is (sum triple, count, +∞ count, −∞ count); the final applies `interval_div` once | E | a re-aggregated average or sum differing from the single path |
+| `worker/shuffle_partial_agg.go` `(*cappedPartialAgg).resolveAgainst`; `shuffle_local_accum.go` `(*partitionedShuffleSink).consumeLocalAccum` | sender precombine and local accumulation | key-only precombine (D), aggregate precombine (E), eligibility kept | D, E | wrong aggregates or lost eligibility despite a correct final merge |
+| `engine/exec/window.go` `WindowMinMaxType`, `resolveWindowNumeric`; `exec/window_external.go` `windowDiskPass` | refused | window aggregates, the sliding inverse (`do_interval_discard`), window keys by N | E | wrong frames; inverse transitions out of step |
+
+### 6.5 Spill, shuffle, gather and the caches
+
+| site | today | change | owner | if forgotten |
+|---|---|---|---|---|
+| `engine/exec/join_spill.go` `writeColumnData`, `readColumnData`, `newSpillBatchWriter` — the columnar run codec under sort runs (`sort_external.go` `writeSortedRun`), the CTE spool (`shared_spool.go` `drainLocked`, `readRunLocked`), window passes (`window_external.go` `windowDiskPass`) and join partitions | no INTERVAL | 16 bytes a row; the run header's type id validated on read (§9.1) | B | a guard error, or a mistyped read-back |
+| `engine/batch/container_codec.go` `encodeVectorBody`, `decodeVectorBody` | an ARRAY of INTERVAL would be a DURATION array (`physical.arrayLitDeclaredType`) | stays refused: no interval element in a container | A | fields collapsed into nanoseconds |
+| `worker/shuffle_format.go` `writeColumnData`, `(*shuffleWriter).writeHeader`; `wshf/wshf.go` `FixedTypeLen`; `wshf/decode.go` `ParseHeader`, `ReadColumn`, `DecodeBatches`; `wshf/schema_guard.go` `(*SchemaGuard).check` | no INTERVAL; `ParseHeader` accepts any type byte; an unknown type fails at `FixedTypeLen` on a NON-EMPTY chunk only (an empty chunk is skipped before decoding) | the 16-byte column; `ParseHeader` refuses an unknown id itself; the guard holds the declared id (§9.1, §10) | B (codec), D (admission) | decode or schema refusal, or mistyping; an older binary accepting an empty stream |
+| `worker/partitioned_shuffle_sink.go` `hashRowsIntoPartitions`, `hashVectorValue` | no INTERVAL | partition hash of N, so SQL-equal intervals land in one partition | D | duplicate groups and missed joins across partitions |
+| `coordinator/skew_split.go` `planSkewSplitTasks` | skew sub-tasks split probe files, replicate build files | partitions by N, the split engaged and asserted | D | lost or duplicated matches |
+| `worker/gather_reply_sink.go` `(*gatherReplySink).Consume`; `coordinator/gather_receiver.go` `admitLocked`; `gather_replay.go` `(*gatherReplayStream).Next`; `dag_merge.go` `(*batchRenamer).apply`; `exec/batch_collector.go`; `coordinator/coordinator.go` `copyVectorValue`, `extractValue`, `setValueFromAny` | gather's WSHF payload, replay, renaming, identity; no INTERVAL | a case each; replay engaged and asserted | B (codec), D (admission) | an explicit gather refusal, or duplicate / incomplete results |
+| `worker/executor.go` `getFileData` with `worker/cache.go` `(*LRUCache).Put` / `Get` | shuffle input read through tiers (local stage cache, NATS KV, the LRU, S3); the LRU caches bytes by `bucket/path`, evicts by capacity, has **no per-query cleanup** | nothing to change for the type; the lifetime account must include it (§10) | — (§10) | a claim that no cached byte outlives its query |
+| `worker/resultstore.go` `ResultStore` (TTL 30 min, `CleanupQuery`); the `wadjet_results_data` NATS KV bucket (`coordinator.go`: TTL 5 min, purged at query end by `cleanupQuery`, best effort); `worker/local_stage_cache.go` `LocalStageCache` (`CleanupQuery`, wiped at construction); `worker/upload_manager.go` `Flush`, `releasePending`; `coordinator/cleanup.go` `CleanStale`, `StartPeriodicCleanup` | per-query transient copies with best-effort cleanup | nothing for the type; the lifetime account (§10) | — (§10) | as above |
+
+### 6.6 Doors, writes, containers and the planner
+
+| site | today | change / stays refused | owner | if forgotten |
+|---|---|---|---|---|
+| `server/pgwire/server.go` `sendTypedRowDescription`, `pgColumnOID`, `pgTypeOID`, `pgTypeSize`, `sendColumnTypes`, `sendDataRow`, `appendBinaryCell`, `handleDescribe`, `describeSQL`, `TypeMod` | a bare interval result refused 0A000 (r20); Describe of two interval forms answers NoData (§7) | stays refused: a bare interval result at Describe, execution and zero rows | A (enforced), F (audit) | OID 1186 or a text-typed interval leaking onto the wire |
+| `server/server.go` (HTTP) `(*Server).handleQuery`, `handleDescribe`, `writeJSON`; `server/grpc.go` `anyToProtoValue`, `streamResultBatches`; `server/mcp/server.go` `(*Server).toolQuery`; `wadjet/` `QueryResult`, `ColumnMeta`, `(*QueryResult).Cells` | the same r20 refusal applies before any door encodes | stays refused at every door (`server.TestIntervalRuleOnEveryDoor`) | A (enforced), F (audit) | an interval published through a door the pgwire test does not cover |
+| `server/pgwire/bindparams.go` `renderTextParam`, `renderBinaryParam`; `paramtypes.go` | a text interval parameter typed 1186 is rendered as `CAST(… AS INTERVAL)`; binary refused | unchanged (ruling 2) | A | a new parameter capability by accident |
+| `server/pgwire/server.go` `handleSet`, `showDefaults` | `SET IntervalStyle` stored and ignored | refuse a non-`postgres` IntervalStyle 0A000 naming it | A | answers in the wrong style silently (§11) |
+| `wadjet/dml.go` `assignEvaluatedValue`, `assignSourceOf`, `dmlSourceDeclaredType`, over `physical.RefuseIntervalWrite` / `IsIntervalValuedWith`; CTAS | an interval value written is refused | stays refused: INSERT, UPDATE, MERGE, CTAS through every boundary (`12_writes:w/*`, `w/neg/*`) | A | an interval stored as text or DURATION |
+| containers: `physical.arrayLitDeclaredType`, `batch/vector.go` `SetValue`'s `DurationNanoser` arm, ROW and MAP elements, `array_agg` | an interval element is refused by the interval rule | stays refused (`11_relational:neg/*/arrayAgg`, `arrayCtor`) | A | fields collapsed into a DURATION element |
+| DURATION (`TypeDuration`, `parquet.ParseDurationNanos`) | a separate nanosecond type | unchanged; no implicit conversion | A | DURATION data reinterpreted |
+| `planner/physical/validate_interval_use.go` (the interval rule) and `declared_output.go` (`colDecl`, `boundPos` in `declared_output_positions.go`, `logical/output_ids.go` `OutputColumnsWith`) | the A+ interim; declarations by bound position where the output list is enumerable | relaxed stage by stage over typed lineage (§9.1) | A, then each stage | an unsupported consumer reached by a column the rule cannot see |
+| `storage/parquet/schema_tree.go` `refuseIntervalAnnotation`; Iceberg's interval refusal | readers refuse an interval annotation | unchanged; plus a whole encoded-Parquet refusal integration test | B (before the new id can reach storage) | a file with an interval column read as something else |
+| `server/pgwire/server.go` `handleDescribe`, `describeSQL`, `TypeMod` | Describe and typmods | false metadata on empty and prepared statements (§7) | A | NoData where a client expects a refusal |
+| `internal/oracle/typematrix/typematrix.go` `Columns` | the type matrix's catalog | an execution-derived interval fixture, not a stored column | D | the oracle stays green because INTERVAL is absent |
+
+**Existing state** [wadjet-source]:
+
+- **DURATION aliasing.** `ParseTypeID` maps `INTERVAL` to `TypeDuration` (the
+  CAST machinery's alias), while `DeclaredColumn` refuses a **new** column
+  spelled INTERVAL at any depth (0A000, #1713d);
+  `parquet.TestDeclaredColumnRefusesANewIntervalColumn` pins both.
+- **Containers are already refused** by the interval rule
+  (`04_keys:array/group` 0A000 today, where PostgreSQL answers 1 group).
+- **Parquet and Iceberg guards exist** (`refuseIntervalAnnotation` at every
+  reader open, `parquet.TestReaderRefusesTheIntervalAnnotation`;
+  `iceberg.TestTableReaderRefusesAnIntervalField`). A test that reads a whole
+  encoded Parquet file with an INTERVAL column is still absent (owned by B).
+- **Parameter tests exist** (`pgwire.TestIntervalRuleOverTheWire`).
+- **`timestamp - date`** is refused today with 42883 by the planner;
+  PostgreSQL answers an interval. Stage C implements it.
+- **`lag(NULL, 1, ts)`**: PostgreSQL types the window result by the default.
+  The inline form (`11_relational:lag/tsDiff`) needs C (the window over a
+  timestamp exists today); the derived form (`lag/tsDiffCompare`) needs D.
+- **The opaque `IntervalValue`**: replaced by the triple in C, every producer
+  and consumer together.
+- **Today's derived interval column is declared TEXT.** [measured on the
+  engine] `11_relational:neg/derived/distinctSum` (and the CTE, set-operation
+  and join forms) fail 42883 `function sum(text) does not exist`: the column
+  `v` of `(SELECT CAST(s AS INTERVAL) AS v …)` reaches the outer block typed
+  by the STRING fallback. Loud today; the lineage contract (§9.1) forbids that
+  fallback for an interval producer.
 
 ## 7. What crosses a door
 
-**Ruling 1 (decided): a bare interval result stays refused.** An explicit
-scalar `CAST(<interval> AS TEXT)` is the only display path in this stage;
-Describe, execution, every door and zero-row results obey the same contract.
+**Ruling 1 (decided): a bare interval result stays refused.** Describe,
+execution, every door and zero-row results obey the same contract.
+**Display path.** Ruling 1 names an explicit scalar `CAST(<interval> AS
+TEXT)` as the only display path. The manifest holds `01_input:cast/toVarchar`
+(`CAST(INTERVAL '1 mon' AS VARCHAR)`) as `supported` in C with PostgreSQL's
+type `character varying` (OID 1043): this record reads the display path as an
+**explicit scalar cast to a character type** (TEXT, typed text; VARCHAR,
+typed character varying as PostgreSQL declares it), which is what the
+architect's character-type clarification asks the record to reconcile
+[proposed reading: the clarification's text was not in this round's inputs,
+so the architect confirms or replaces it]. The engine's VARCHAR is a TEXT
+carrier with a length channel the wire sends as 1043 (`pgColumnOID`); the
+corpus harness now names it `character varying`, so the cell's type is
+checked on every arm. Under the narrower reading (TEXT only) the cell becomes
+a named refusal and nothing else changes.
+
 **Ruling 2 (decided): parameters are preserved as they are**: text and NULL
-interval parameters keep their behaviour and restrictions; binary interval
-parameters stay refused; no new parameter capability.
+interval parameters keep their behaviour; binary interval parameters stay
+refused; no new parameter capability.
 
 **The client transcript** (`pgwire.TestIntervalClientEvidence`; PostgreSQL's
 side recorded with `IV80_PG_DSN`) [measured], PostgreSQL against this engine
@@ -583,7 +604,7 @@ today:
 | Describe of a bare interval result | RowDescription `oid=1186 typmod=-1 len=16` | 0A000 |
 | Describe / execute of `CAST(… AS TEXT)` | `oid=25`, rows `1 day; NULL; 30 days` | the same |
 | the text cast with a binary result requested | `fmt=1`, the text bytes | the same |
-| a bare interval, text or binary format | text rows; binary `0x…0000000100000000` (time int64, day int32, month int32, big-endian) | 0A000 |
+| a bare interval, text or binary format | text rows; binary `0x…0000000100000000` | 0A000 |
 | NULL through the text cast | `NULL`, oid 25 | the same |
 | an empty result: Describe and execute of the text cast | `oid=25`, zero rows | the same |
 | an empty result of a bare interval | `oid=1186`, zero rows | 0A000 at Describe and at execution |
@@ -594,140 +615,345 @@ today:
 | Describe of `CAST(… AS INTERVAL(3))` / `INTERVAL DAY` | typmod `2147418115` / `589823` | **no fields (NoData)** |
 | ParameterStatus `IntervalStyle` at connect | `postgres` | `postgres` |
 | `SET IntervalStyle = 'iso_8601'`; the text cast of `1 day` | `P1D` | **`1 day`** (accepted and ignored) |
+| `SET IntervalStyle` to `postgres_verbose`, `sql_standard`, `iso_8601`, `postgres` (`door/IntervalStyle/*`, round 3) | `ok` each | `ok` each (stage A must refuse the first three, naming IntervalStyle) |
 
-Three rows are pre-existing defects outside this stage's contract (§11): the
-NoData Describe answers (a client told "no result columns" for a statement
-that returns one), the untyped parameter's text inference, and the ignored
-IntervalStyle. The judge cited pgJDBC 42.7.5's `PgResultSet` source for
-`getObject` on a character type calling `getString`; that is the judge's
-reading, not re-verified here [unresolved for this record; no JDBC client was
-run]. A client or query builder can also adapt explicitly and visibly: cast to
-text, or select total months, days and the whole time field as separate
-numeric columns (not `extract(month)` alone, which is the month within the
-year).
+Three rows are pre-existing defects outside this stage's contract (§11). The
+judge cited pgJDBC 42.7.5's `PgResultSet` source for `getObject` on a
+character type; that is the judge's reading, not re-verified here
+[unresolved for this record; no JDBC client was run].
 
 ## 8. What stays out
 
 | out of this stage | pinned by |
 |---|---|
-| a column spelled INTERVAL in DDL, CTAS of an interval, INSERT / UPDATE / MERGE of an interval value, including through derived columns, a subquery, zero rows and `WITH NO DATA` | `parquet.TestDeclaredColumnRefusesANewIntervalColumn`; `coordinator.TestArc1713cIntervalOrderEveryArm` (`ddl/intervalColumn`); `server.TestIntervalRuleOnEveryDoor`; `12_writes:w/*` (all refused 0A000 today, manifest `refusal interval-write` met; `w/ctasText`, a CTAS of a text cast, is `supported` and refused today only because the multi-field text is opaque) |
+| a column spelled INTERVAL in DDL, CTAS of an interval, INSERT / UPDATE / MERGE of an interval value, including through derived columns, a CTE, a subquery, a set-operation arm, a join, zero rows and `WITH NO DATA` | `parquet.TestDeclaredColumnRefusesANewIntervalColumn`; `coordinator.TestArc1713cIntervalOrderEveryArm` (`ddl/intervalColumn`); `server.TestIntervalRuleOnEveryDoor`; `12_writes:w/*`, `w/neg/*` (manifest `refusal interval-write`, owned by A; `w/ctasText`, a CTAS of a text cast, is `supported` in C) |
 | Parquet and Iceberg interval columns | `parquet.TestReaderRefusesTheIntervalAnnotation`, `iceberg.TestTableReaderRefusesAnIntervalField` |
 | the wire OID 1186 and the binary format | §7; `pgwire.TestIntervalClientEvidence`, `server.TestIntervalRuleOnEveryDoor` |
-| new parameter capability (binary interval parameters) | `pgwire.TestIntervalRuleOverTheWire` (`binary` 0A000), `pgwire.TestIntervalClientEvidence` (`param/binary`) |
-| IntervalStyle other than postgres, typmods, timestamptz, TIME | the manifest's refusals (§9); the SET refusal is to be added by stage A (today silently ignored, §11) |
+| new parameter capability (binary interval parameters) | `pgwire.TestIntervalRuleOverTheWire`, `pgwire.TestIntervalClientEvidence` (`param/binary`) |
+| IntervalStyle other than postgres, typmods, timestamptz (including `age(date, date)`), TIME | the manifest's refusals, owned by A; the SET refusal by the door assertions (§9) |
 
 ## 9. Staging and the stage manifest
 
 **[proposed throughout.]** Every intermediate state answers PostgreSQL's value
-or refuses; none answers differently in silence. Each stage owns manifest
-cells; a stage that lands adds its letter to `iv80LandedStages` in
-`arc_1680b_interval_manifest_test.go`, and from then on every cell it owns must
-be met on all six arms.
+or refuses; none answers differently in silence. A stage that lands adds its
+letter to `iv80LandedStages`; from then on every cell it owns must be met on
+all six arms.
 
-**The manifest** (`<stem>_manifest.tsv`, `TestArc1680bStageManifest`): every
-statement under test has one owning stage and exactly one of four outcomes:
-`supported` (value and declared types equal PostgreSQL's), `pg-error
-<SQLSTATE>` (PostgreSQL's own error, same SQLSTATE), `refusal <reason>` (0A000,
-the reason one of the named list in the test), `rep-divergence` (the same rows
-and types, every printed interval SQL-equal to PostgreSQL's; where a value is
-computed from the representative, the explicit rule-3 answer). The rules that
-derive it are in `iv80ManifestOutcome`: an error PostgreSQL decides while
-parsing or typing (42601, 42725, 42804, 42846, 42883) is `pg-error` first; then the named capability refusals
-(writes, IntervalStyle, timestamptz, TIME, typmods, containers, PostgreSQL's
-internal hash functions, ordered and DISTINCT aggregates, the refused
-functions, offset RANGE frames, sub-millisecond timestamps, numeric
-infinities); then a bare interval result (`bare-interval-result`, stage F);
-then PostgreSQL's other errors; then the representative families; else
-`supported`. A capability refusal takes precedence over a PostgreSQL error
-that the refused capability would have raised (a RANGE frame's 22013 is
-refused 0A000 while offset frames are refused). The original statements and
-transcripts stay as recorded; the cast-wrapped variants are separate cells.
-The outcome checks (`TestArc1680bOutcomeChecks`) reject a store-guard error, a
-panic, an `XX000`, a 42601 or a 22003 where 0A000 or PostgreSQL's SQLSTATE is
-required, and a representative that is not SQL-equal.
+**The four outcomes** (`<stem>_manifest.tsv`, `TestArc1680bStageManifest`),
+checked by `iv80Meets` (round 3):
 
-Today (1,269 statements): stage A owns 242 (234 refusals, 7 of them `door`,
-54 met; 1 supported), C 530 (64 supported met, 359 unmet; 54 PostgreSQL
-errors met, 53 unmet), D 93 (45 rep-divergence, 48 supported, 3 met), E 91,
-F 313 (135 met: refused 0A000 already; 178 unmet: refused today with another
-SQLSTATE, mostly the literal grammar's 22007 / 42601).
+- **The internal-failure exclusion comes first.** A panic, an error without a
+  SQLSTATE or with XX000, the batch store's two guards, or an error whose
+  sentence is a runtime failure meets **no** outcome, PostgreSQL's own error
+  included (`ERR 22008: … (#361 silent-write guard)` does not meet `pg-error
+  22008`).
+- `supported`: the column names, the declared types and the rows equal
+  PostgreSQL's, **in order when the statement's top level orders, as a
+  multiset otherwise** (one ROLLUP whose ORDER BY ties is listed and compared
+  as a multiset).
+- `pg-error <SQLSTATE>`: PostgreSQL's own error, the same SQLSTATE.
+- `refusal <reason>`: 0A000 **with the named reason's sentence**
+  (`iv80Reasons`: one pattern per reason, matching the sentences the interim
+  guards already use where they name the reason exactly). An unrelated 0A000
+  earns nothing (today's `interval values cannot yet be used as a query
+  result column` meets only `bare-interval-result`). Where PostgreSQL itself
+  answers 0A000 (`07_functions:trunc/week`), the named refusal is still met.
+- `rep-divergence`: the cell's explicit rule-3 answer (§3), PostgreSQL's
+  types, and every column outside the spec's units exactly PostgreSQL's. A
+  GROUP BY beside SUM / AVG with no interval key is `supported`
+  (`05_arith_cast:agg/sumGroup~text`, round 2's `rep-divergence`, corrected).
+- **Legal alternatives** (fifth manifest column): a plan-dependent outcome
+  PostgreSQL's semantics permit (ADR-0013), written to ruling 11's
+  recommended option, pending: `11_relational:ov/aggUnordered` meets
+  PostgreSQL's 22008 **or** the exact sum `2147483647 days` another
+  combination order of the unordered sum gives (`ov/aggDesc` measures that
+  order); `05_arith:agg/sumOverflowThenBack` (the same values, a bare result)
+  meets 22008 or `refusal bare-interval-result`. A window's prescribed order
+  (`ov/winForward`, `sw/all`) has no alternative. A wrong finite sum meets
+  nothing.
+
+`TestArc1680bOutcomeChecks` holds each of these with adversarial cases (an
+unrelated 0A000, the wrong capability refusal, a runtime error presented as
+0A000, a store guard coded like PostgreSQL's error, trunc/week, a tuple
+fabricated from two rows, PostgreSQL's non-winning representative, the wrong
+direction, SUM / AVG changed beside MIN / MAX, the rule-3 value under the
+wrong type, unordered and ordered permutations, a doubled row, the ruling-11
+alternative and a wrong finite sum).
+
+**Ownership: the earliest stage that admits what the cell needs**
+(`iv80EarliestStage`, `TestArc1680bStageRules`). Every refusal is owned by
+**A**: a named refusal holds at every stage from the first, so the
+bare-result, write, container, ordered- and DISTINCT-aggregate and
+offset-frame refusals are enforced from A onward (the bare-result refusal
+was F's and the aggregate and frame refusals E's in round 2). Every other
+cell is owned by the latest of what it needs, read from its SQL: **E** if an
+aggregate or window function takes an interval argument, or a window's
+PARTITION BY / ORDER BY is an interval; else **D** if an interval crosses a
+block boundary (a derived table's, CTE's, subquery's, set-operation arm's or
+VALUES list's interval column), or is a GROUP BY / DISTINCT / ORDER BY /
+join key, or a correlated interval equality (a join key once decorrelated);
+else **C**. The judge's five cells move: `12_writes:w/ctasText` A → C,
+`10_definitions:closure/unionNull` and `closure/whereFalseText` C → D,
+`11_relational:sub/scalarMax` and `sub/correlatedMin` D → E. The rule's sweep
+moved 16 more: `02_fields:print/text/postgres` C → D (a VALUES list's
+interval column), `11_relational:lag/tsDiffCompare` E → D; `04_keys:withTies/*`
+and `withTiesCount/*` E → D (a top-N key); to C (inline only):
+`03_order_cast:order/greatestTie~text`, `04_keys:adr0024/intersectNumeric*`
+(no interval), `07_functions:widthBucket` (PostgreSQL's 42883),
+`11_relational:lag/tsDiff`, `lag/tsDiffBare~text`, `empty/text`,
+`empty/bare~text`, `oj/leftText` (the interval is computed after the join
+from text), `frame/tsInfRowsShift`.
+
+**F owns no cell.** It audits the publication policy that A enforces, with
+the client transcript.
+
+**IntervalStyle cells are reachable.** The corpus applies a cell's
+IntervalStyle on the reference only; such a cell (`02_fields:print/<style>`,
+`input/sqlstd/mixed`) is now decided by the engine's answer to `SET
+IntervalStyle = '<style>'` at the door (`pgwire.TestIntervalClientEvidence`,
+`door/IntervalStyle/<style>`): met when that answer is 0A000 naming
+IntervalStyle. Today it is `ok` (unmet). (Negative control: a door answer of
+`ERR 0A000: SET IntervalStyle = 'sql_standard' is not supported` met the
+three sql_standard cells; a door answer of 0A000 with the bare-result
+sentence did not meet the iso_8601 cells.)
+
+**Today** (1,330 statements under test): A owns 644 (all refusals; 102 met:
+the bare-result refusal 92, writes 3, generate_series 4, container 1,
+date_trunc 1, interval_hash 1; 542 unmet, most of them refused today with
+another reason's sentence or another SQLSTATE); C owns 536 (supported 67 met,
+361 unmet; PostgreSQL errors 54 met, 54 unmet); D owns 98 (52 supported, 44
+rep-divergence, 2 PostgreSQL errors; none met); E owns 52 (29 supported, 13
+rep-divergence, 10 PostgreSQL errors, one met through its legal alternative).
 
 **The interim validator's assumption.** `validate_interval_use.go` states
 that "a column is never [interval-valued]: a block that would publish an
 interval is refused, so no derived table, CTE, set-operation arm, VALUES row
-or subquery can hand one on — which is why no lineage needs to be carried past
-a block's output". Admitting internal interval columns (stage D) breaks that
-premise. **What replaces it:** typed lineage on declared columns. Every
-column the planner declares (`ColDecls`, the physical plan's output schema,
-stage schemas) carries the INTERVAL type id, so an interval column is known by
-its declaration, never by the expression that once produced it; the
-validator's walk resolves a column reference to its declaration and applies
-the operator allowlist to it exactly as to an inline interval expression.
+or subquery can hand one on". Admitting internal interval columns (stage D)
+breaks that premise; §9.1 replaces it.
 
 | stage | admits | interim refusal it lifts | invariant test it carries | why no consumer sees an interval column it does not handle |
 |---|---|---|---|---|
-| **A** declarations and guards | nothing | none | every interval producer and typed slot is recognized (literal, cast, arithmetic, timestamp difference, `timestamp - date`, `lag` with a timestamp default, CASE / COALESCE / NULLIF / GREATEST / LEAST); every named refusal of the manifest is 0A000 with its reason, decided before rewrites and again at run time; `SET IntervalStyle` other than postgres refused; manifest stage A cells met | no interval column exists yet: the interim rule still refuses every block that would publish one |
-| **B** carrier and transport | nothing | none | the triple and NULL round-trip through selection, views, `Flatten`, pool reuse, project copy and gather, the columnar run codec (sort runs, CTE spool, window passes, join partitions), the partial-aggregate codec, WSHF and gather replay; an unknown type id fails loudly; memory charged to its owner (ADR-0006); asserted engagement of join spill, window spill, gather replay, skew split and bloom on the carrier tests | the type exists only in the carrier's own tests; the planner never declares it |
-| **C** inline expressions | one proven scalar operation at a time over values that never become a column: input grammar, comparison by N, §4a, §4b for `timestamp` / `date` (sub-millisecond results refused), `timestamp - timestamp` and `timestamp - date` as intervals, EXTRACT (finite) / date_part, `justify_*`, `make_interval`, `age(timestamp, timestamp)`, `date_bin`, each displayed through the explicit text cast | the opaque-interval refusals and r29 for each operation it proves; the timestamp-difference producer refusal (r16 / #1713d) operation by operation | every emitted result has the declared type; a timestamp difference never reaches the numeric fallback; manifest stage C cells (including their runtime-column forms `11_relational:rt/*`, `opaque/*`) met | the result of a stage-C operation is consumed inline by an allowlisted parent or by the explicit text cast; a block that would publish it is still refused |
-| **D** internal columns and keys | interval columns between operators on an **explicit operator allowlist**: filter, project, sort and top-N keys, derived tables, CTEs, set-operation arms, subqueries, outer-join padding, GROUP BY / DISTINCT / set-operation keys with the rule-3 representative, hash and sort-merge join keys, their spill, the DAG shuffle and partitioner | r28 (interval keys); the internal-publication parts of r20 (derived table, CTE, set-operation arm, subquery column) | **no interval-typed vector reaches an operator outside the allowlist**, checked on the optimized plan, on every stage plan, and at runtime batch entry of each operator; a negative control removes one allowlist check and shows each of the three checks catch it; manifest stage D cells met, `rep-divergence` cells by rule 3 | typed lineage: the validator sees a column by its declared type, so a downstream function, aggregate, container, cast or write that is not on the allowlist refuses it; the root, write and container guards are kept |
-| **E** aggregates and windows, one family at a time | `count`, unordered `min` / `max` (rule-3 representative), `sum` / `avg` with PostgreSQL's accumulator, window aggregates with the inverse transition, `lag` / `lead` defaults, window ORDER BY and PARTITION BY over intervals | r30 for exactly the family admitted (never wholesale: `array_agg`, ordered and ordered-set aggregates, DISTINCT `sum` / `avg`, value windows each keep their refusal until admitted) | transition, combine, inverse and final states agree across local, clone, spill, precombine and distributed paths, including NULL, both infinities and overflow; manifest stage E cells met | an aggregate not yet admitted refuses its interval argument by the declared type |
-| **F** publication policy | nothing new: continued refusal of a bare interval result (ruling 1) | none | Describe, execution, every door and zero-row results refuse a bare interval result (`pgwire.TestIntervalClientEvidence`); manifest stage F cells met | it is the policy itself |
+| **A** declarations and guards | nothing | none | every interval producer and typed slot is recognized and declared (§9.1); every named refusal of the manifest is 0A000 with its reason, decided before rewrites and again at run time; the bare-result and write refusals at every door and zero rows; `SET IntervalStyle` other than postgres refused; manifest stage A cells met | no interval column exists yet: the interim rule still refuses every block that would publish one |
+| **B** carrier and transport | nothing | none | the carrier work of the engagement table below | the type exists only in the carrier's own tests; the planner never declares it |
+| **C** inline expressions | one proven scalar operation at a time over values that never become a column: input grammar, comparison by N, §4a, §4b for `timestamp` / `date`, `timestamp - timestamp` and `timestamp - date`, EXTRACT (finite) / date_part, `justify_*`, `make_interval`, `age(timestamp, timestamp)`, `date_bin`, each displayed through the explicit character-type cast | the opaque-interval refusals and r29 for each operation it proves; the timestamp-difference producer refusal operation by operation | every emitted result has the declared type; manifest stage C cells met | the result is consumed inline by an allowlisted parent or by the explicit cast; a block that would publish it is still refused |
+| **D** internal columns and keys | interval columns on the CARRY allowlist (§9.1), interval keys on the EVALUATE allowlist: filter, project, sort and top-N keys, derived tables, CTEs, set-operation arms, subqueries, outer-join padding, GROUP BY / DISTINCT / set-operation keys with the rule-3 representative, hash and sort-merge join keys, their spill, the DAG shuffle and partitioner | r28 (interval keys); the internal-publication parts of r20 | **no interval-typed vector reaches an operator outside the allowlist**, checked on the optimized plan, on every stage plan, and at runtime batch entry of each operator; a negative control removes one allowlist check and shows each of the three checks catch it; manifest stage D cells met (`11_relational:neg/*` stay refused) | typed lineage (§9.1) |
+| **E** aggregates and windows, one family at a time | `count`, unordered `min` / `max`, `sum` / `avg` with PostgreSQL's accumulator, window aggregates with the inverse transition, `lag` / `lead` defaults, window ORDER BY and PARTITION BY over intervals | r30 for exactly the family admitted | the engagement table's E work; manifest stage E cells met | an aggregate not yet admitted refuses its interval argument by the declared type |
+| **F** publication audit | nothing | none | `pgwire.TestIntervalClientEvidence` and `server.TestIntervalRuleOnEveryDoor` re-run against the final policy | it audits; A enforces |
 
-The order is the judge's safer order: nothing is admitted until the
-declarations, guards and the carrier are in place; inline expressions before
-columns; columns before aggregates; and no aggregate family before the keys it
-groups by hash by N.
+**Execution-path engagement: which stage owns it.** None of this is done in
+this item; each line is a gate of the stage named, and a carrier test in B
+cannot discharge a relational line of D or an aggregate line of E.
+
+| stage | engagement work it owns |
+|---|---|
+| **B** | the triple and NULL carrier through selection, views, `Flatten` and pool reuse; spill round trips (sort runs, CTE spool, window passes, join partitions, the partial-aggregate codec); WSHF and gather round trips, empty streams included; an unknown type id refused loudly (§10); memory charged to its owner (ADR-0006); the encoded-Parquet refusal integration test (before the new id can reach storage) |
+| **C** | `make_interval`'s numeric-constructor sentinel handling (a result equal to a reserved triple is 22008, [pg-source] only today), with focused implementation checks; every scalar operation on both rounding paths |
+| **D** | asserted hash and sort-merge joins over interval keys; bloom on and off; key partitioning by N; top-N and late materialization; join spill; skew split; gather replay; key-only grouping / distinct precombine; representative provenance and eligibility through precombine, clone merging, spill and the final merge |
+| **E** | SUM / AVG states; clone merging of accumulators; aggregate precombine; partial-state spill; the distributed partial / final combine; window passes (frames, the inverse transition, window spill), family by family |
+
+### 9.1 Typed lineage: the contract
+
+[wadjet-source] for what exists, [proposed] for the rest.
+
+**1. The authoritative slot.** A column's type is the declaration of its
+**bound output slot**: `declPos` in
+`planner/physical/declared_output_positions.go`, one per output position of a
+logical node, carrying the binding it is (`plansql.Binding{Rel, Ord}`) and its
+declaration (`parquet.Column`). A bound column reference
+(`plansql.ColRef.Bound`) is declared by the slot whose binding it holds
+(`ColDecls.boundPos`; `ColDecls.colDecl` consults it before any name rule;
+ADR-0047 stage 2). The positional lists come from
+`logical.OutputColumnsWith` (`logical/output_ids.go`):
+
+- a scan's columns, a derived table's root or a CTE reference answer for
+  their instance (`n.Rel`, `RelCols`): each position is that instance's
+  column, so a CTE reference and a derived table forward their body's
+  declaration by position;
+- a projection's items are its own positions; an item that IS a bound column
+  reference (an alias, a pass-through) carries that column's binding, so an
+  alias forwards the declaration unchanged;
+- Filter, Sort, Limit and Distinct pass their input's positions through; a
+  join concatenates its arms' (a semi or anti join the left's only); a window
+  is its input's plus its own slots; an aggregate's GROUP BY keys carry the
+  key's binding, its aggregates are its own.
+- **What it does not cover today:** a set operation, an unexpanded star and
+  any node kind the list does not describe answer `nil`, and a reference into
+  them falls back to the **name** rules, whose last resort is the STRING
+  fallback (`colRefDeclaredType`; measured above: today a derived interval
+  column reaches the outer block as TEXT). `nodeIsInterval` ignores its
+  `decls` argument and is syntactic (`expr.IsIntervalNode`).
+
+**The contract** [proposed]: (a) the INTERVAL type id is the declaration of
+every slot an interval producer fills (literal, cast, arithmetic, timestamp
+difference, `timestamp - date`, `lag` / `lead` with a timestamp default, CASE
+/ COALESCE / NULLIF / GREATEST / LEAST over an interval, MIN / MAX over one);
+(b) `nodeIsInterval` and `producesInterval` answer from the bound slot's
+declaration for a column reference, from the syntax only for an expression
+that is not one; (c) a set operation gets a positional list (its result
+positions are the reconciled declarations below) before stage D admits an
+interval through one; (d) **the STRING fallback never applies to a slot an
+interval producer could fill**: a reference whose slot is unresolved, where
+any producer of the column could be interval, is refused 0A000 (a named
+reason `interval-lineage-unresolved` [proposed; no corpus cell, since no
+statement reaches it today]); (e) scalar and correlated subqueries: the
+subquery's single output slot carries the declaration to the outer
+expression; a correlated re-run substitutes the outer value as a
+column-typed literal (`engine/expr/outer_literal.go`), so an interval outer
+value renders as `CAST('<postgres text>' AS INTERVAL)` or is refused there,
+never as a DURATION or bare text.
+
+**2. Set operations.** [measured] An interval arm reconciles with an unknown
+literal arm and a NULL arm to interval (`10_definitions:setop/unknownArm` =
+`1 day; 2 days`, `setop/nullFirstArm` = `NULL; 1 day`, `closure/unionNull`),
+with a timestamp-difference arm to interval (`setop/tsDiffArm`), and with an
+integer or a text arm not at all: 42804 (`setop/intArm`, `setop/textArm`).
+[proposed] INTERVAL is its own category in `setOpTypeCategory` (PostgreSQL's
+category T): `setOpWiden` widens it with nothing; a NULL or unknown arm takes
+the interval declaration (`setOpNullLayout` allocates an interval NULL
+vector); any other pairing is PostgreSQL's 42804 at plan time.
+
+**3. Transport carries and validates the identity.** [wadjet-source] The
+stage DAG's schemas are `[]parquet.Column` (`dagplan/stage_types.go`:
+`ScanSchema`, `JoinProbeSchema`, `JoinBuildSchema`, `OutputSchema`), the task
+wire's column type is an integer id (`distributed/messages.go` `ColumnSpec`,
+`AggFieldSpec`), the WSHF header carries one type byte per column
+(`shuffleWriter.writeHeader` / `wshf.ParseHeader`), the columnar spill run
+carries its schema (`newSpillBatchWriter`), and decoded vectors are built
+from the decoded schema (`batch.NewRecordBatch`). Today `wshf.SchemaGuard`
+holds every file of one stage input to the **first** file's schema, not to
+the planner's declaration. [proposed] (a) every codec writes the interval id
+and every reader validates it against the slot's declaration: the WSHF and
+spill readers refuse an unknown id at the header, before any chunk (so an
+empty stream is refused too); (b) `SchemaGuard` is seeded with the stage
+input's declared schema, so a decoded column whose id disagrees with its
+declaration is refused by name; (c) a runtime batch whose column type
+disagrees with the operator's declared input (checked at each allowlisted
+operator's batch entry in D) is a **loud internal error, XX000**, never a
+coercion: it is a planner or executor defect, and the manifest's exclusion
+already gives it no credit; (d) an unresolved declaration is the 0A000 of 1(d)
+above.
+
+**4. Carrying is not evaluating.** An operator that CARRIES an interval
+payload moves its 16 bytes without looking at them; one that EVALUATES an
+interval key or expression compares, hashes or computes with N or the fields.
+D admits carrying broadly and evaluation narrowly:
+
+| operator | carries an interval payload | evaluates an interval key / expression |
+|---|---|---|
+| scan | never (no stored interval) | never |
+| project | D (copy, gather) | C: the admitted scalar operations only |
+| filter | D | C: comparison predicates by N |
+| sort, top-N, late materialization | D | D: sort key by N (SQL-tie rule) |
+| limit, offset | D | — |
+| hash aggregate / distinct | D: as the key's representative | D: grouping / distinct key by N; E: as an aggregate argument, family by family |
+| hash join, sort-merge join | D: both sides' payload columns | D: join key by N |
+| cross / nested-loop join | D | C: admitted predicate expressions only |
+| set operation | D: arm columns | D: UNION / INTERSECT / EXCEPT key by N with left-arm eligibility |
+| window | D: pass-through columns | E: PARTITION BY / ORDER BY and aggregate arguments |
+| bloom / dynamic filter | — | D: bloom key from N only; dynamic filters keep declining |
+| spill (sort, join, aggregate, window, CTE spool) | B (codec), admitted with its operator | — |
+| shuffle, gather, partitioner | B (codec), D (admission) | D: partition hash by N |
+| UDFs, table functions | never | never (refused) |
+| containers (ARRAY / ROW / MAP, array_agg) | never | never (refused) |
+| writes (INSERT / UPDATE / MERGE / CTAS) | never | never (refused) |
+| doors (bare results) | never | never (refused) |
+
+**Negative cells** (round 3, `11_relational:neg/<boundary>/<consumer>` and
+`12_writes:w/neg/<boundary>`): an interval COLUMN reaching, through a
+projection, a derived table, a CTE, a scalar subquery, a set-operation arm
+and a join output (each on all six arms, so through spill and shuffle too),
+`to_char` (`function-to_char`), `date_trunc` (`function-date_trunc`), a cast
+to TIME (`time-type`), `mode() WITHIN GROUP` (`ordered-aggregate`),
+`sum(DISTINCT …)` (`distinct-aggregate`), `array_agg` and an ARRAY
+constructor (`container`), and an INSERT (`interval-write`). Each is a named
+refusal owned by A, so every stage must keep it. Today each is refused, but
+with the bare-result sentence, a 42601 or the 42883 above: unmet.
+
+**Bare-result and write protection are enforced from stage A onward**; F only
+audits them.
 
 ## 10. Pending with the maintainer
 
 ### Ruling 10: where the type identity lives
 
-| option | what it costs | |
-|---|---|---|
-| **append one execution-only type id to the shared enum** (`storage/parquet/schema.go` `TypeID`), existing ids and DURATION's meaning unchanged, guarded so it can never be written to Parquet, Iceberg, the catalog or the wire as a column type | every codec that keys on the shared id (vectors, hashing, sort, spill, WSHF, gather) gains one case; the storage writers, the catalog and the doors must each refuse it, and `ParseTypeID("INTERVAL")` must keep answering DURATION for the CAST machinery and DDL refusal | **recommended (architect)** |
-| a separate execution type layer | a parallel type identity through every codec: each of the above duplicated, and every boundary between the layers a place to lose the type | |
+| option | what it costs |
+|---|---|
+| **append one execution-only type id to the shared enum** (`storage/parquet/schema.go` `TypeID`), existing ids and DURATION's meaning unchanged, guarded so it can never be written to Parquet, Iceberg, the catalog or the wire as a column type (**recommended, architect**) | every codec keyed on the shared id (vectors, hashing, sort, spill, WSHF, gather) gains one case, and the transient codecs (WSHF, spill) gain a type byte value; the storage writers, the catalog and the doors each refuse it; `ParseTypeID("INTERVAL")` keeps answering DURATION |
+| a separate execution-type layer | a second identity beside the shared id. It need not duplicate every codec: adapters could translate at the boundary and share the physical codecs (a 16-byte fixed-width column is a shape several codecs already handle). The cost is the translation itself: every boundary between the layers (planner declarations, task wire, WSHF header, spill header, decoded vectors, doors) is a place where the identity must be mapped and could be lost |
+
+**The architect's two conditions on the recommended option** [as this
+record understands them from the second judge record's recommendation; the
+architect confirms]: (1) the transient codec extension (a new WSHF and spill
+type byte value) is explicitly authorized as part of the ruling, since it is
+a format change even if not a persistent one; (2) before any distributed
+interval admission (stage D's shuffle and gather), header validation
+refuses an unknown id including on an empty stream, and a homogeneous-version
+or capability contract is **enforced**, because changing the new reader
+cannot protect an already-deployed old one.
 
 **Can a file carrying the new type byte outlive the query or be read by
-another binary?** [wadjet-source]
+another binary?** [wadjet-source, corrected in round 3]
 
 - **Spill files** (join partitions, sort runs, CTE spool, window passes,
   aggregate partial state) are written under the task's spill directory and
-  read back by the same process during the same query; they do not outlive
-  it except as garbage, and no other binary reads them.
-- **WSHF shuffle and stage outputs** are written to the object store under
-  `queries/<id>/…` (`coordinator/dag_shuffle.go`, `dag_compute.go`,
-  `aggregate_shuffle.go`, `build_cache.go`'s pre-scanned build caches) and to
-  the worker's `LocalStageCache` per-query directory. They are removed when
-  the query ends (`Coordinator.cleanupQuery`, `LocalStageCache.CleanupQuery`
-  with a tombstone for late adopters, `broadcastJoinCache.CleanupQuery`,
-  `ResultStore.CleanupQuery`); an object a failed cleanup leaves behind is
-  removed by `ResultCleaner.CleanStale` after its TTL (one hour by default),
-  skipping in-flight queries. Under `--shuffle-durability=lazy` an upload is
-  queued until demanded and elided at query end, so a lazy file is never
-  written at all unless a consumer asks for it within the query. So a file can
-  outlive its query by up to the cleaner's TTL, but no reader opens it after
-  the query: every key is under that query's id, and nothing reuses another
-  query's stage output.
-- **A different binary** can read one within a query when the coordinator and
-  workers run different builds (a rolling upgrade). WSHF has **no format
-  version** (`wshf.ParseHeader` checks the four-byte magic and reads each
-  column's type byte without validating it); an older binary meets the new
-  type byte at chunk decode, where `wshf.FixedTypeLen` answers `unsupported
-  shuffle type` — loud, but an error with no SQLSTATE, after the header was
-  accepted. [proposed] With option 1 the new id must be one no older binary
-  assigns (appended), `ParseHeader` should refuse an unknown type id itself,
-  and the error should carry a SQLSTATE; a mixed-version cluster is otherwise
-  outside any guarantee this record can make [unresolved: whether the cluster
-  is required to be single-version is not stated in the source].
-- **Result caches**: none survives a query (the ones above are query-scoped).
+  read back by the same process during the same query.
+- **Stage outputs and WSHF shuffle files** are written to the object store
+  under `queries/<id>/…` and may also sit in the worker's `LocalStageCache`,
+  the worker's in-memory `ResultStore` and the `wadjet_results_data` NATS KV
+  bucket. Cleanup is **best effort**, not a guarantee of deletion within one
+  TTL: at query end `Coordinator.cleanupQuery` deletes the query's objects,
+  purges its KV keys asynchronously (errors ignored) and broadcasts
+  completion so workers drop `LocalStageCache` and `ResultStore` entries
+  (`coordinator.go`: "workers that miss the message will eventually leak
+  entries until process exit"). What survives is removed by
+  `ResultCleaner.CleanStale` (`coordinator/cleanup.go`), which runs
+  periodically (`StartPeriodicCleanup`, every 10 minutes by default),
+  selects objects by **object age** past its TTL (one hour by default),
+  skips in-flight queries, and leaves an object whose delete fails for a
+  later run: retention is extended by the period and by every failed delete.
+  The KV bucket has its own TTL (5 minutes) and `ResultStore` its own (30
+  minutes); `LocalStageCache` is wiped when a worker process starts.
+- **Lazy uploads** under `--shuffle-durability=lazy` are queued until
+  demanded and elided at query end, but they are also **released by a
+  graceful worker drain** (`uploadManager.Flush`, called by `Worker.Drain`,
+  releases every queued lazy upload so consumers keep a durable copy): a lazy
+  file can be written without a consumer asking.
+- **The worker's LRU** (`worker/cache.go`, filled by
+  `Executor.getFileData`, through which shuffle input is read) caches the
+  bytes of KV and S3 reads by `bucket/path`, evicts by capacity only, and has
+  **no per-query cleanup**. Round 2's "result caches: none survives a query"
+  was **false**. What it does not imply: every key carries the query's id
+  (`queries/<id>/…`), so no other query addresses those bytes [inferred from
+  the path layout]; the cache is in-process memory, so no other binary reads
+  it. Retained bytes are a memory cost and a lifetime fact, not cross-query
+  reuse.
+- **A different binary** reads these files only within one query, when the
+  coordinator and workers run different builds. ADR-0010 states that a
+  cluster's coordinator and workers are **deployed wholesale, never
+  rolling** (round 2 called the cluster policy unstated; it is stated, as a
+  deploy rule, but nothing enforces it). WSHF has no format version;
+  `wshf.ParseHeader` reads each column's type byte without validating it, and
+  an older reader rejects an unknown type only when it decodes a **non-empty**
+  chunk (`decodeChunkAt` → `minChunkBytes` → `FixedTypeLen`: `unsupported
+  shuffle type`, an error with no SQLSTATE); an empty chunk is skipped before
+  any decode (`decode.go`), so an older reader can accept an empty interval
+  stream without complaint. Hence condition (2) above.
 
 ### Ruling 11: interval `sum` / `avg` overflow under parallel execution
 
 | option | what it costs | |
 |---|---|---|
-| **keep PostgreSQL's finite-width checked accumulator and refuse on overflow** | which inputs overflow can depend on combination order under parallel and distributed execution: a loud, plan-dependent 22008, never a wrong value; recorded as a class of legal nondeterminism under ADR-0013. [measured] PostgreSQL's own answer already depends on order: `11_relational:ov/winForward` 22008, `ov/winBackward` answers; `ov/aggUnordered` 22008 | **recommended (architect)** |
-| a wider accumulator state (e.g. Int128 per field) that never overflows where PostgreSQL would | answers where PostgreSQL refuses: a deliberate divergence from the reference, and a final narrowing step that can still refuse | not taken |
+| **keep PostgreSQL's finite-width checked accumulator and refuse on overflow** | which inputs overflow can depend on combination order under parallel and distributed execution: a loud, plan-dependent 22008, never a wrong value; recorded as a class of legal nondeterminism under ADR-0013, with the window's prescribed order kept. [measured] PostgreSQL's own answer already depends on order: `11_relational:ov/winForward` 22008, `ov/winBackward` answers; `ov/aggDesc` = `2147483647 days`, `ov/aggUnordered` 22008 | **recommended (architect)** |
+| a wider accumulator state that never overflows where PostgreSQL would | answers where PostgreSQL refuses: a deliberate divergence, and a final narrowing step that can still refuse | not taken |
 | constrain execution order (no parallel combine for interval `sum`) | loses parallel aggregation for the type; still refuses where PostgreSQL's serial order refuses | |
+
+**Reconciled with the manifest** (§9): under the recommended option the
+unordered cells carry their legal alternative (`ov/aggUnordered`: 22008 or the
+exact `2147483647 days`; `05_arith:agg/sumOverflowThenBack`: 22008 or the
+bare-result refusal). Under the second option those cells' 22008 would no
+longer be an expected outcome; under the third, only 22008 would. The
+alternatives are written as data (`iv80Alternatives`) so the ruling changes
+two lines.
 
 ## 11. Existing temporal wrong answers that meet interval paths (epic #1680)
 
@@ -735,9 +961,7 @@ Ruling 8: these pre-existing wrong answers are not this program's to fix; they
 are listed as lines for epic #1680, and **wherever an interval operation would
 produce or consume a value through one of these paths, the interval program
 refuses the statement** (the manifest's `refusal time-type` and `refusal
-timestamptz`, stage A: every statement with a TIME, TIMETZ or TIMESTAMPTZ
-operand, and `date_add` / `date_subtract` with a zone). Every answer below is
-the same on all six arms.
+timestamptz`, owned by A). Every answer below is the same on all six arms.
 
 | statement | PostgreSQL 17.11 | this engine |
 |---|---|---|
@@ -758,10 +982,30 @@ before Bind of `SELECT CAST($1 AS INTERVAL)` and Describe of a typmod-qualified
 interval answer NoData (§7); an untyped parameter compared with an interval is
 inferred text, PostgreSQL infers interval (§7); `timestamp - date` is 42883
 `operator does not exist` where PostgreSQL answers (§6); `age` is 42883
-`unknown function` (`10_definitions:age/*`).
+`unknown function` (`10_definitions:age/*`); a derived interval column is
+typed TEXT (`11_relational:neg/*/distinctSum` 42883, §6).
 
 **ADR-0024 §12 item 4's statement about PostgreSQL** is not general: the
 INTERSECT representative is the first input's member under HashSetOp, and the
 first input is the one with fewer estimated groups (§3); under the sorted
 SetOp either arm's member leads. The ADR's factual sentence needs the
 architect's correction; this item does not edit it.
+
+## 12. Round 3: sentences whose cited cell did not establish them
+
+Each was re-read against its cell; the corrected text is above.
+
+| where | round 2 said | the cell shows | now |
+|---|---|---|---|
+| §1, arithmetic row | a near-sentinel finite value negates to a finite value (`sentinel/negOfNearMax`, `sentinel/negOfNearMin`) | `negOfNearMin` is **22008** (its months field is INT32_MIN) | only `negOfNearMax` negates; `negOfNearMin` is 22008 |
+| §4b, `age(date, date)` | "resolves to a timestamp overload of midnight values; the measured answers are the same under UTC and New York" (`age/date`, `age/dateNY`) | the two cells use **different date pairs**; the plan (`explain/age/date`, round 3) shows the **timestamptz** overload; the same pair differs between UTC and America/Havana (`age/dateGapUTC` `1 day`, `age/dateGapHavana` `23:00:00`) | the timestamptz overload, alike for the same pairs under UTC and New York (`age/dateUTC`, `age/dateMonthNY`), zone-dependent in general; refused `timestamptz` (ruling 7) |
+| §4b, `timestamp - timestamp` | "an infinite operand: `infinity - infinity` 22008", citing `tsdiff/*` | `tsdiff/inf` answers `infinity`, `-infinity`; the 22008 is `tsdiff/infInf` | one infinite operand gives that infinity; two equal infinities 22008, each cell named |
+| §2, width | `wrap/join` "(0 rows, …)" | the cell is a count: one row, `0` | a count of 0 matches |
+| §2, width | `wrap/hashCollide` "(PostgreSQL's own hashes collide while `=` is false)" | the cell measures only the hashes; `=` is in `cmp/213503982 days 08:01:49.551616~0` | both cells cited |
+| §4c | `02_fields:fields/20` | the cell is `fields/20/infinity` | name corrected |
+| §4a | `mul/usHalfEven*`; `1 year / 7` uncited | `05_arith:mul/usHalfEven1…3`; `05_arith:div/yearBy7` | cells cited |
+| §5, casts | `interval → varchar` beside `interval → text` | `cast/toVarchar` is typed `character varying` (1043) | the type stated (§7) |
+| §6 | "Round 1's table stands" (it had been removed) | — | the complete inventory restored and merged |
+| §10 | "Result caches: none survives a query"; cleanup "removed … after its TTL"; "a lazy file is never written at all unless a consumer asks"; "an older binary meets the new type byte at chunk decode"; the cluster policy "not stated in the source" | `getFileData`'s LRU has no per-query cleanup; cleanup is periodic and best effort; `Worker.Drain` releases lazy uploads; an empty chunk is never decoded; ADR-0010 states the wholesale-deploy rule | corrected (§10) |
+| §9 | the outcome checks reject "a representative that is not SQL-equal" (round 2's whole representative check) | SQL-equality admitted fabricated tuples, PostgreSQL's non-winning member and the wrong direction | the explicit rule-3 answer (§3, §9) |
+| §9 | "the bare-result refusal … stage F" | the policy must hold from A | owned by A; F audits |
