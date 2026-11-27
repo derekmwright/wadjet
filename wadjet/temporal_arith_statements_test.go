@@ -73,7 +73,7 @@ func TestTemporalArithmeticRefusedInEveryStatement(t *testing.T) {
 	refused := []string{
 		"ts + 0", "ts - 1", "0 + ts", "ts + i", "ts - i", "ts + 1.5", "ts + f",
 		"d + 1.5", "d - 1.5", "d + f", "d + dec", "1 - d", "i - d",
-		"d + ts", "ts + d", "d - ts", "ts - d",
+		"d + ts", "ts + d",
 		"now() + 1", "CURRENT_TIMESTAMP - 1", "CURRENT_DATE + 1.0",
 		"(d + 1) + 1.5", "CAST(d AS TIMESTAMP) + 1",
 	}
@@ -126,6 +126,31 @@ func TestTemporalArithmeticRefusedInEveryStatement(t *testing.T) {
 			err := run(st[1])
 			if got := sqlerr.StateOf(err); got != "42883" {
 				t.Errorf("%s / %s: got %q (%v), PostgreSQL 17.11 42883\n  %s", e, st[0], got, err, st[1])
+			}
+			if now := snapshot(); now != start {
+				t.Fatalf("%s / %s wrote: %s (was %s)", e, st[0], now, start)
+			}
+			if st[0] == "ctas" && err == nil {
+				_, _ = db.Execute(ctx, "DROP TABLE ar_c")
+			}
+		}
+	}
+	// date - timestamp and timestamp - date are NOT among the refused pairs
+	// (measured on PostgreSQL 17.11 for 1680c r4, correcting this test's
+	// earlier claim): PostgreSQL answers an interval in the SELECT list,
+	// WHERE, GROUP BY, HAVING, ORDER BY, a window's ORDER BY, UPDATE / DELETE
+	// WHERE, MERGE's WHEN and CTAS (`-10:20:30`, `10:20:30`), and raises 42804
+	// ("column "f" is of type double precision but expression is of type
+	// interval") writing it into the double column. This engine computes
+	// neither, so the binder refuses the pair 0A000 timestamp-date-difference
+	// in every statement (the rulings on 1680c r3: its 42883 was untrue), and
+	// nothing is written.
+	for _, e := range []string{"d - ts", "ts - d"} {
+		for _, st := range statements(e, "f") {
+			cells++
+			err := run(st[1])
+			if got, why := sqlerr.StateOf(err), sqlerr.ReasonOf(err); got != "0A000" || why != "timestamp-date-difference" {
+				t.Errorf("%s / %s: got %q {%s} (%v), want 0A000 {timestamp-date-difference}\n  %s", e, st[0], got, why, err, st[1])
 			}
 			if now := snapshot(); now != start {
 				t.Fatalf("%s / %s wrote: %s (was %s)", e, st[0], now, start)
