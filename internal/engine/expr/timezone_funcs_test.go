@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // TestPgPostmasterStartTime checks that the function reports this process's
@@ -114,12 +116,28 @@ func TestTimezoneUTCIsInstantPreserving(t *testing.T) {
 
 // TestTimezoneRejectsNonUTC covers the runtime backstop. A literal zone is
 // rejected at parse time with a message; a zone that is only knowable at run
-// time returns NULL rather than a conversion with the wrong sign.
+// time (a column, an expression, the timezone(zone, ts) spelling) is the
+// named 0A000 refusal `timezone`. It answered NULL until #1680 line d, where
+// PostgreSQL 17.11 answers the converted value (TIMESTAMP '2024-07-01
+// 12:00:00' AT TIME ZONE z, z = 'America/New_York', is 16:00+00 under
+// TimeZone=UTC): a silent wrong answer.
 func TestTimezoneRejectsNonUTC(t *testing.T) {
 	fn := DefaultRegistry.Lookup("timezone")
 	for _, zone := range []string{"America/New_York", "Europe/London", "EST", "+05:00", "", "Not/AZone"} {
-		if got := fn([]any{zone, "2026-01-02T03:04:05Z"}); got != nil {
-			t.Errorf("timezone(%q, ts) = %v, want nil", zone, got)
+		var reason string
+		state, msg := recoverFatalEvalForTest(t, func() {
+			defer func() {
+				if r := recover(); r != nil {
+					if fe, ok := r.(fatalEval); ok {
+						reason = sqlerr.ReasonOf(fe.err)
+					}
+					panic(r)
+				}
+			}()
+			fn([]any{zone, "2026-01-02T03:04:05Z"})
+		})
+		if state != "0A000" || reason != "timezone" || !strings.Contains(msg, "AT TIME ZONE") {
+			t.Errorf("timezone(%q, ts): %s %q [%s], want the 0A000 timezone refusal", zone, state, msg, reason)
 		}
 	}
 	// Nulls and short argument lists stay null rather than panicking.

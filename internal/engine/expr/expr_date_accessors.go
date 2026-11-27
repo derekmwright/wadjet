@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/derekmwright/wadjet/internal/sqlerr"
 )
 
 // --- Date: additional accessors ---
@@ -138,16 +140,24 @@ func epochSeconds(t time.Time) float64 {
 // fnTimezone implements the parser's AT TIME ZONE rewrite for UTC only.
 // The engine represents absolute instants and has no naive timestamp type;
 // UTC is where wall-clock and instant epoch readings coincide.
-// Reject non-UTC literal zones at compile time; dynamic non-UTC zones return
-// NULL here. NULL/invalid input returns NULL.
+// A non-UTC literal zone is rejected by the parser; a zone known only at run
+// time (a column, an expression, the function-call spelling
+// `timezone(zone, ts)`) is refused here, per row, with the named 0A000
+// refusal `timezone` (#1680 line d). It used to answer NULL, where
+// PostgreSQL 17.11 answers the converted value (`TIMESTAMP '2024-07-01
+// 12:00:00' AT TIME ZONE z` with z = 'America/New_York' is 16:00+00 under
+// TimeZone=UTC): a silent wrong answer. A NULL zone or value is NULL, as in
+// PostgreSQL; an unparseable value returns NULL.
 // Supporting other zones requires a naive timestamp type first.
 // See docs/internals/timezone-utc-only-boundary.md for the design.
 func fnTimezone(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
 	}
-	if !isUTCZone(toString(args[0])) {
-		return nil
+	if zone := toString(args[0]); !isUTCZone(zone) {
+		panic(fatalEval{sqlerr.Refuse("timezone", "AT TIME ZONE %s is not supported: only UTC is supported "+
+			"(every session runs at UTC and there is no timestamp-with-time-zone type to convert into)",
+			sqlerr.Quote(zone))})
 	}
 	if x, inf := args[1].(infiniteInstant); inf {
 		// PostgreSQL: an infinite timestamp at any zone is itself.

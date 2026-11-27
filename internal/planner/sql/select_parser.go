@@ -2645,7 +2645,7 @@ func (p *selectParser) parseAtTimeZone() (Node, error) {
 // because a planner-stage expression-compile error is not user-visible: both
 // the projection and the filter builder fall back to a column reference when
 // compilation fails. A zone that is not a literal (a column, a parameter) is
-// only knowable at run time and comes back NULL instead.
+// only knowable at run time and is refused there, per row, by the function.
 //
 // Kept in step with isUTCZone in internal/engine/expr, which backs the
 // timezone() call this rewrites to and carries the reasoning for the
