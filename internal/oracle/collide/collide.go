@@ -627,25 +627,19 @@ func Corpus() []Case {
 		{Name: "delimited_alias_with_a_non_equi_where",
 			SQL: `SELECT t.c1 AS x, "T".c1 AS y FROM ` + T1 + ` t, ` + T2 +
 				` "T" WHERE t.c1 < "T".c1 ORDER BY x, y`,
-			Ordered:      true,
-			Want:         []string{"x=7 y=1737580880", "x=9 y=1737580880"},
-			KnownBug:     "the DAG binds a qualified projection to the WRONG arm when the two arms' aliases differ only by case and no join key orders them",
-			KnownBugArms: []string{"dag"},
-			Issue:        "#740-dag-arm"},
-		// The pinned shape with NOTHING else in it: a bare cross product of
-		// two relations aliased `t` and `"T"`. The single path answers
-		// `x=t.c1 y="T".c1` and the DAG answers them SWAPPED, at `fd679ae9`
-		// exactly as here — measured by reverting this branch's three
-		// touched files to the base commit — so it is not this arc's, and no
-		// hunk of this arc can move it. Distinct aliases (`t`, `u`), aliases
-		// differing by more than case (`t`, `tt`) and the same shape under an
-		// ORDER BY all agree on both paths, which is the boundary.
+			Ordered: true,
+			Want:    []string{"x=7 y=1737580880", "x=9 y=1737580880"}},
+		// The same pair with NOTHING else in it: a bare cross product of two
+		// relations aliased `t` and `"T"`. The DAG answered the two columns
+		// SWAPPED (#740's dag arm) until #1678 line m: the gather compared
+		// the rename source `"t".c1` — the item's text lowercased — with the
+		// stream's `T.c1` case-insensitively and took the first arm that
+		// answered. It now compares the parsed identifiers, the quoted one
+		// exactly. Distinct aliases (`t`, `u`) and aliases differing by more
+		// than case (`t`, `tt`) are the controls.
 		{Name: "delimited_alias_bare_cross_product_no_order",
-			SQL:          `SELECT t.c1 AS x, "T".c1 AS y FROM ` + T1 + ` t, ` + T2 + ` "T"`,
-			Want:         []string{"x=7 y=-1968219095", "x=7 y=1737580880", "x=9 y=-1968219095", "x=9 y=1737580880"},
-			KnownBug:     "the DAG binds a qualified projection to the WRONG arm when the two arms' aliases differ only by case",
-			KnownBugArms: []string{"dag", "dag-shuffled"},
-			Issue:        "#740-dag-arm"},
+			SQL:  `SELECT t.c1 AS x, "T".c1 AS y FROM ` + T1 + ` t, ` + T2 + ` "T"`,
+			Want: []string{"x=7 y=-1968219095", "x=7 y=1737580880", "x=9 y=-1968219095", "x=9 y=1737580880"}},
 		{Name: "ctl_distinct_aliases_bare_cross_product_no_order",
 			SQL:  `SELECT t.c1 AS x, u.c1 AS y FROM ` + T1 + ` t, ` + T2 + ` u`,
 			Want: []string{"x=7 y=-1968219095", "x=7 y=1737580880", "x=9 y=-1968219095", "x=9 y=1737580880"}},

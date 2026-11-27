@@ -118,7 +118,10 @@ func qiPins(rows []struct {
 // same at the base and not this line's (#1678 line m): the asynchronous
 // door's plan-time gather check splits a name at its first dot and keeps a
 // computed item's lowercased text, so `"a.b"`, `"x.y".id` and `"Bq".id + 0`
-// find no emitted column ('computed no SELECT list'); the stage DAG refuses a
+// find no emitted column ('computed no SELECT list'), and a reference to a
+// derived table's quoted column keeps its delimited text (derived tables are
+// outside this line: their references keep the source and the route they
+// had); the stage DAG refuses a
 // WHERE over a quoted column name (42703); two SELECT aliases differing only
 // by case under ORDER BY are refused by the unpartitioned DAG arms (0A000);
 // and a derived table publishing "X" beside "x" is refused on every arm as
@@ -133,6 +136,7 @@ var qiKnownRefused = qiPins([]struct {
 	{"ra/selDot", qiAsyncArms, "computed no SELECT list"},
 	{"cn/plain", qiAsyncArms, "computed no SELECT list"},
 	{"cn/joinDot", qiAsyncArms, "computed no SELECT list"},
+	{"cal/space", qiAsyncArms, "computed no SELECT list"},
 	{"cn/where", qiDAGArms, "42703"},
 	{"cn/caseColsWhere", qiDAGArms, "42703"},
 	{"cal/orderBy", []string{"dag", "dag-morsel4"}, "0A000"},
@@ -150,7 +154,9 @@ var qiKnownRefused = qiPins([]struct {
 //     `m."Val"` against the column val, `VAL` against "Val") where PostgreSQL
 //     refuses it (42P01 / 42703) — every arm, single-process included; the
 //     catalog's identity rule (a schema cannot hold two columns differing
-//     only by case) is the column half of it.
+//     only by case) is the column half of it. ra/foldMismatch's DAG arms keep
+//     the answer they gave at the base: a qualifier that matches no base
+//     relation exactly is not an identifier source and stays text.
 //   - ra/window, ra/windowKey, cn/windowJoin: a window over a join whose
 //     argument or PARTITION BY names a quoted build-side reference reads the
 //     probe's column of that name — every arm, single-process included.
@@ -165,7 +171,8 @@ var qiKnownWrong = qiPins([]struct {
 	pin  string
 }{
 	{"ra/selDot", qiNotAsync, "rows=0 "},
-	{"ra/foldMismatch", qiAllArms, "rows=4 1,1 | 2,2 | 3,3 | 7,7"},
+	{"ra/foldMismatch", []string{"single", "spilled512k", "fastpath", "async", "async-probesplit"}, "rows=4 1,1 | 2,2 | 3,3 | 7,7"},
+	{"ra/foldMismatch", qiDAGArms, "rows=4 1,6 | 2,1 | 3,2 | 7,6"},
 	{"ra/window", qiAllArms, "rows=4 1,8 | 2,2 | 3,3 | 7,8"},
 	{"ra/windowKey", qiAllArms, "rows=4 1,1 | 2,1 | 3,1 | 7,1"},
 	{"ra/setop", qiDAGArms, "rows=5 1 | 2 | 3 | 7 | 8"},
