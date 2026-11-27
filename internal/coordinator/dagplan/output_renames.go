@@ -160,13 +160,13 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 			if p.Expr != "" {
 				src = strings.ToLower(p.Expr)
 			}
-			if q, c, ok := colRefRenameSource(p.ASTExpr); ok {
+			if q, c, ok := colRefRenameSource(p.ASTExpr, renameScope); ok {
 				src, srcQual, srcCol = joinIdentRef(q, c), q, c
 			}
 			target = p.Alias
 		case p.Expr != "":
 			src = strings.ToLower(p.Expr)
-			if q, c, ok := colRefRenameSource(p.ASTExpr); ok {
+			if q, c, ok := colRefRenameSource(p.ASTExpr, renameScope); ok {
 				src, srcQual, srcCol = joinIdentRef(q, c), q, c
 			}
 			target = p.Alias
@@ -214,22 +214,106 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 }
 
 // colRefRenameSource returns the parsed IDENTIFIERS of a SELECT item that is
-// a plain column reference — qualifier and column, each with its exact case
-// and without SQL delimiters. They are the gather's source, not the item's
-// rendered text lowercased: `"Bq".id` lowercased is `"bq".id`, which names no
-// column of any stream, and the gather's qualified-to-bare fallback then took
-// the bare `id` — the PROBE's column — for the build's (#1678 line m). A
-// quoted identifier is case-significant (PostgreSQL), so `"Bq"` and `"bq"`
-// stay two names; an unquoted one was folded to lower case by the lexer.
+// a plain column reference to a BASE TABLE of this block — qualifier and
+// column, each with its exact case and without SQL delimiters. They are the
+// gather's source, not the item's rendered text lowercased: `"Bq".id`
+// lowercased is `"bq".id`, which names no column of any stream, and the
+// gather's qualified-to-bare fallback then took the bare `id` — the PROBE's
+// column — for the build's (#1678 line m). A quoted identifier is
+// case-significant (PostgreSQL), so `"Bq"` and `"bq"` stay two names; an
+// unquoted one was folded to lower case by the lexer.
 //
-// ok is false for anything else (an expression, a planner slot), whose
-// source stays its lowercased text, the spelling a computing stage emits.
-func colRefRenameSource(n plansql.Node) (qualifier, column string, ok bool) {
+// ok is false for anything else — an expression, a planner slot, and a
+// reference into a derived table or a CTE, whose columns reach the gather by
+// the derived-table renames (out of this line's scope: those keep the text
+// they had, and with it the route they took) — and the source stays its
+// lowercased text, the spelling a computing stage emits.
+func colRefRenameSource(n plansql.Node, scope *logical.Node) (qualifier, column string, ok bool) {
 	c, isRef := n.(*plansql.ColRef)
 	if !isRef || c.Slot || c.Column == "" {
 		return "", "", false
 	}
+	if scope == nil || len(scope.Children) != 1 || !refReadsBaseTable(scope.Children[0], c.Table) {
+		return "", "", false
+	}
 	return c.Table, c.Column, true
+}
+
+// refReadsBaseTable reports whether a column reference qualified by qual —
+// compared EXACTLY, the parsed identifier — or unqualified (qual == "") reads
+// a base table of the block whose FROM is n, and not a derived table or CTE.
+// The walk stays inside the block: joins, filters, the aggregate, windows,
+// sorts and limits; a Project, a set operation, a CTE root or a scan stamped
+// with a derived table's alias is a derived relation. An unqualified
+// reference qualifies only when the block reads no derived relation at all.
+func refReadsBaseTable(n *logical.Node, qual string) bool {
+	base, derived := false, false
+	var walk func(*logical.Node)
+	walk = func(n *logical.Node) {
+		if n == nil || derived {
+			return
+		}
+		if n.CTEName != "" || n.CTERefAlias != "" {
+			if qual == "" || derivedNamesRelation(n, qual) {
+				derived = true
+			}
+			return
+		}
+		switch n.Type {
+		case logical.NodeScan:
+			if len(n.DerivedAliases) > 0 {
+				if qual == "" || derivedNamesRelation(n, qual) {
+					derived = true
+				}
+				return
+			}
+			name := n.TableAlias
+			if name == "" {
+				name = n.TableName
+			}
+			if qual == "" || name == qual {
+				base = true
+			}
+		case logical.NodeJoin, logical.NodeFilter, logical.NodeAggregate, logical.NodeWindow,
+			logical.NodeSort, logical.NodeLimit, logical.NodeDistinct:
+			for _, ch := range n.Children {
+				walk(ch)
+			}
+		default:
+			if qual == "" || derivedNamesRelation(n, qual) {
+				derived = true
+			}
+		}
+	}
+	walk(n)
+	return base && !derived
+}
+
+// derivedNamesRelation reports whether a derived relation's subtree answers
+// to name in any spelling (its CTE name, a reference alias, or a derived
+// alias stamped on its scans) — case-insensitively, so a doubt keeps the
+// reference on its old path.
+func derivedNamesRelation(n *logical.Node, name string) bool {
+	if n == nil {
+		return false
+	}
+	if strings.EqualFold(n.CTEName, name) || strings.EqualFold(n.CTERefAlias, name) {
+		return true
+	}
+	for _, d := range n.DerivedAliases {
+		if strings.EqualFold(d, name) {
+			return true
+		}
+	}
+	if n.Type == logical.NodeScan && strings.EqualFold(n.TableAlias, name) {
+		return true
+	}
+	for _, ch := range n.Children {
+		if derivedNamesRelation(ch, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // joinIdentRef spells an identifier reference the way a join stream names a
@@ -285,4 +369,19 @@ func firstColRefName(n plansql.Node) string {
 		return firstColRefName(x.Inner)
 	}
 	return ""
+}
+
+// sortRefReadsBaseTable is refReadsBaseTable for an ORDER BY term: the sort's
+// child is the block's own SELECT list (a Project, possibly under DISTINCT or
+// a LIMIT), and the FROM below it is what the qualifier must name.
+func sortRefReadsBaseTable(child *logical.Node, qual string) bool {
+	n := child
+	for n != nil && len(n.Children) == 1 &&
+		(n.Type == logical.NodeDistinct || n.Type == logical.NodeLimit || n.Type == logical.NodeFilter) {
+		n = n.Children[0]
+	}
+	if n != nil && n.Type == logical.NodeProject && len(n.Children) == 1 {
+		n = n.Children[0]
+	}
+	return refReadsBaseTable(n, qual)
 }

@@ -629,7 +629,7 @@ func (p *StagePlanner) walkStages(node *logical.Node, stages *[]Stage, parentID 
 			// no stage today — left as text, that shape keeps the refusal it
 			// had instead of reaching a silently wrong order.
 			if key.Column == strings.TrimSpace(ob.Column) {
-				if q, c, ok := plansql.SplitIdentRef(key.Column); ok && q != "" {
+				if q, c, ok := plansql.SplitIdentRef(key.Column); ok && q != "" && sortRefReadsBaseTable(sortChild, q) {
 					key.Column = q + "." + c
 				}
 			}
