@@ -3,6 +3,7 @@
 package physical
 
 import (
+	"strings"
 	"testing"
 
 	plansql "github.com/derekmwright/wadjet/internal/planner/sql"
@@ -191,6 +192,19 @@ func TestTimestampDifferenceIsAnIntervalValuedProducer(t *testing.T) {
 		{"SELECT (SELECT max(c_ts) FROM tm) - (SELECT min(c_ts) FROM tm) AS d", "0A000", why + "a query result column"},
 		{"SELECT id, c_ts - (SELECT max(c_ts) FROM tm UNION SELECT NULL) AS d FROM tm", "0A000", why + "a query result column"},
 		{"SELECT id, c_ts - (SELECT lag(c_ts) OVER (ORDER BY id) FROM tm LIMIT 1) AS d FROM tm", "0A000", why + "a query result column"},
+		// Round 8 (the round-7 review): an outer column a body with its own
+		// FROM publishes, a star body, and lag / lead whose TIMESTAMP is the
+		// default argument. Each was left to execution through round 7.
+		{"SELECT id, (SELECT x.c_ts FROM tm y LIMIT 1) - c_ts AS d FROM tm x", "0A000", why + "a query result column"},
+		{"SELECT id, CAST((SELECT x.c_ts FROM tm y LIMIT 1) - c_ts AS TEXT) AS d FROM tm x", "0A000", why + "the operand of a cast to text"},
+		{"SELECT id, c_ts - (SELECT * FROM (SELECT max(c_ts) FROM tm) z) AS d FROM tm", "0A000", why + "a query result column"},
+		{"SELECT id, c_ts - (SELECT * FROM (SELECT c_ts FROM tm LIMIT 1) z) AS d FROM tm", "0A000", why + "a query result column"},
+		{"SELECT id, lag(NULL, 1, c_ts) OVER (ORDER BY id) - c_ts AS d FROM tm", "0A000", why + "a query result column"},
+		{"SELECT id, c_ts - lead(NULL, 1, c_ts) OVER (ORDER BY id) > 1000 AS b FROM tm", "42883", "operator does not exist: interval > integer"},
+		// Their controls: no TIMESTAMP minus a TIMESTAMP.
+		{"SELECT id, lag(NULL, 1, c_date) OVER (ORDER BY id) - c_date AS d FROM tm", "", ""},
+		{"SELECT id, (SELECT x.id FROM tm y LIMIT 1) - id AS d FROM tm x", "", ""},
+		{"SELECT id, c_ts > (SELECT * FROM (SELECT max(c_ts) FROM tm) z) AS b FROM tm", "", ""},
 		// Their neighbours are unchanged: only the producer reads the new
 		// TIMESTAMP typing (PostgreSQL: 42846 and 42883; both refused here).
 		{"SELECT CAST(max(c_ts) AS INTERVAL) AS v FROM tm", "0A000", "interval values cannot yet be used as a query result column"},
@@ -245,6 +259,32 @@ func TestIntervalRuleOnTheWriteDoors(t *testing.T) {
 			t.Errorf("%s: refused %v", c.sql, RefuseIntervalWrite(node, "", schema))
 		} else if got != c.state {
 			t.Errorf("%s: SQLSTATE %q, want %q", c.sql, got, c.state)
+		}
+	}
+	// A scalar subquery answering a TIMESTAMP, typed for the producer by
+	// the door's resolver (RefuseIntervalWriteWith, #1713d round 8): the
+	// DML WHERE / MERGE condition gets PostgreSQL's 42883 at plan time.
+	tsSub := func(sql string) bool { return strings.Contains(sql, "max(ts)") }
+	for _, c := range []struct{ sql, state string }{
+		{"ts - (SELECT max(ts) FROM t) > 1000", "42883"},
+		{"(SELECT max(ts) FROM t) - ts > INTERVAL '1 day'", "0A000"},
+		{"CAST((SELECT max(ts) FROM t) - ts AS TEXT) = s", "0A000"},
+		{"ts > (SELECT max(ts) FROM t)", ""},
+		{"ts - (SELECT max(n) FROM t) > 1000", ""},
+	} {
+		node, err := plansql.ParseExpressionComplete(c.sql)
+		if err != nil {
+			t.Fatalf("%s: %v", c.sql, err)
+		}
+		if got := sqlerr.StateOf(RefuseIntervalWriteWith(node, "", schema, tsSub)); got != c.state {
+			t.Errorf("%s: SQLSTATE %q, want %q", c.sql, got, c.state)
+		}
+		if c.state == "42883" {
+			// Without the resolver the rule cannot type the subquery and the
+			// statement is left to the expression guard (as through round 7).
+			if got := sqlerr.StateOf(RefuseIntervalWrite(node, "", schema)); got != "" {
+				t.Errorf("%s without the resolver: SQLSTATE %q, want none", c.sql, got)
+			}
 		}
 	}
 }

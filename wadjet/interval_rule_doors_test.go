@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/derekmwright/wadjet/internal/planner/physical"
 	"github.com/derekmwright/wadjet/internal/sqlerr"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -149,6 +150,18 @@ func TestTimestampDifferenceOnTheWriteDoors(t *testing.T) {
 		{"CREATE TABLE tdc3 AS SELECT max(ts2) - min(ts) AS d FROM tdw", "0A000", sentence + " a query result column"},
 		{"CREATE TABLE tdc4 AS SELECT id, ts2 - lag(ts2) OVER (ORDER BY id) AS d FROM tdw WITH NO DATA", "0A000", sentence + " a query result column"},
 		{"CREATE TABLE tdc5 AS SELECT id, (SELECT max(ts2) FROM tdw) - ts AS d FROM tdw", "0A000", sentence + " a query result column"},
+		// Round 8 (the round-7 review's write doors): a scalar subquery
+		// operand on the MERGE SET, DML WHERE and MERGE WHEN routes. Each
+		// stored or acted on the millisecond number at b0a3e59d and at
+		// 26a4ed70 (MERGE 3 storing '97200000'; UPDATE 1; DELETE 1; MERGE
+		// 2). PostgreSQL 17.11 stores '1 day 03:00:00' for the first two and
+		// raises 42883 on the other four.
+		{"MERGE INTO tdw t USING tdw src ON t.id = src.id WHEN MATCHED THEN UPDATE SET s = CAST((SELECT max(ts2) FROM tdw) - src.ts AS TEXT)", "0A000", sentence + " the operand of a cast to text"},
+		{"MERGE INTO tdw t USING tdw src ON t.id = src.id WHEN MATCHED THEN UPDATE SET s = CAST((SELECT ts FROM tdw WHERE id = 1) - src.ts AS TEXT)", "0A000", sentence + " the operand of a cast to text"},
+		{"UPDATE tdw SET n = 2 WHERE ts2 - (SELECT min(ts) FROM tdw) > 1000", "42883", "operator does not exist: interval > integer"},
+		{"UPDATE tdw SET n = 2 WHERE ts2 - (SELECT ts FROM tdw WHERE id = 1) > 1000", "42883", "operator does not exist: interval > integer"},
+		{"DELETE FROM tdw WHERE id = 1 AND (SELECT max(ts2) FROM tdw) - (SELECT min(ts) FROM tdw) > 1000", "42883", "operator does not exist: interval > integer"},
+		{"MERGE INTO tdw t USING tdw src ON t.id = src.id WHEN MATCHED AND (SELECT max(ts2) FROM tdw) - src.ts > 1000 THEN UPDATE SET s = 'x'", "42883", "operator does not exist: interval > integer"},
 		// Controls: the epoch workaround written, a timestamp shifted.
 		{"UPDATE tdw SET n = CAST(extract(epoch FROM ts2) - extract(epoch FROM ts) AS BIGINT)", "", ""},
 		{"UPDATE tdw SET ts = ts + INTERVAL '1 hour'", "", ""},
@@ -178,5 +191,90 @@ func TestTimestampDifferenceOnTheWriteDoors(t *testing.T) {
 		if _, err := db.Query(ctx, "SELECT 1 FROM "+tbl); err == nil {
 			t.Errorf("a refused CTAS created its table %s", tbl)
 		}
+	}
+}
+
+// tdwGuardStatements are the write-door statements that use a timestamp
+// difference (TestTimestampDifferenceOnTheWriteDoors' refused list).
+var tdwGuardStatements = []string{
+	"INSERT INTO tdw (id, s) SELECT 2, ts2 - ts FROM tdw",
+	"INSERT INTO tdw (id, n) SELECT 3, ts2 - ts FROM tdw",
+	"INSERT INTO tdw (id, n) VALUES (4, TIMESTAMP '2024-01-02 00:00:00' - TIMESTAMP '2024-01-01 00:00:00')",
+	"INSERT INTO tdw (id, s) VALUES (5, TIMESTAMP '2024-01-02 00:00:00' - TIMESTAMP '2024-01-01 00:00:00')",
+	"UPDATE tdw SET n = ts2 - ts",
+	"UPDATE tdw SET s = ts2 - ts",
+	"UPDATE tdw SET s = CAST(ts2 - ts AS TEXT)",
+	"UPDATE tdw SET n = 1 WHERE ts2 - ts > 1000",
+	"DELETE FROM tdw WHERE ts2 - ts > 1000",
+	"MERGE INTO tdw t USING tdw src ON t.id = src.id WHEN MATCHED THEN UPDATE SET s = src.ts2 - src.ts",
+	"CREATE TABLE tdc1 AS SELECT ts2 - ts AS d FROM tdw",
+	"INSERT INTO tdw (id, s) SELECT 6, max(ts2) - min(ts) FROM tdw",
+	"INSERT INTO tdw (id, s) SELECT 7, CAST(max(ts2) - min(ts) AS TEXT) FROM tdw",
+	"INSERT INTO tdw (id, s) SELECT id + 10, CAST(ts2 - lag(ts2) OVER (ORDER BY id) AS TEXT) FROM tdw",
+	"INSERT INTO tdw (id, s) SELECT id + 20, CAST((SELECT max(ts2) FROM tdw) - ts AS TEXT) FROM tdw",
+	"MERGE INTO tdw t USING tdw src ON t.id = src.id WHEN MATCHED THEN UPDATE SET s = (SELECT max(ts2) FROM tdw) - src.ts",
+	"CREATE TABLE tdc3 AS SELECT max(ts2) - min(ts) AS d FROM tdw",
+	"CREATE TABLE tdc4 AS SELECT id, ts2 - lag(ts2) OVER (ORDER BY id) AS d FROM tdw",
+	"CREATE TABLE tdc5 AS SELECT id, (SELECT max(ts2) FROM tdw) - ts AS d FROM tdw",
+	"MERGE INTO tdw t USING tdw src ON t.id = src.id WHEN MATCHED THEN UPDATE SET s = CAST((SELECT max(ts2) FROM tdw) - src.ts AS TEXT)",
+	"MERGE INTO tdw t USING tdw src ON t.id = src.id WHEN MATCHED THEN UPDATE SET s = CAST((SELECT ts FROM tdw WHERE id = 1) - src.ts AS TEXT)",
+	"UPDATE tdw SET n = 2 WHERE ts2 - (SELECT min(ts) FROM tdw) > 1000",
+	"UPDATE tdw SET n = 2 WHERE ts2 - (SELECT ts FROM tdw WHERE id = 1) > 1000",
+	"DELETE FROM tdw WHERE id = 1 AND (SELECT max(ts2) FROM tdw) - (SELECT min(ts) FROM tdw) > 1000",
+	"MERGE INTO tdw t USING tdw src ON t.id = src.id WHEN MATCHED AND (SELECT max(ts2) FROM tdw) - src.ts > 1000 THEN UPDATE SET s = 'x'",
+}
+
+// TestTimestampDifferenceGuardOnTheWriteDoors is the guard-alone proof on
+// the write doors (#1713d round 8): with the statement rule's
+// timestamp-difference refusals turned off, every write that uses a
+// difference must still fail — with the expression guard's 0A000 — and
+// nothing may be stored, updated, deleted or created.
+func TestTimestampDifferenceGuardOnTheWriteDoors(t *testing.T) {
+	defer physical.DisableTimestampDifferenceRuleForTest()()
+	ctx := context.Background()
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, s := range []string{"CREATE TABLE tdw (id BIGINT, ts TIMESTAMP, ts2 TIMESTAMP, n BIGINT, s TEXT)",
+		"INSERT INTO tdw VALUES (1, TIMESTAMP '2024-01-01 00:00:00', TIMESTAMP '2024-01-02 03:00:00', NULL, NULL)"} {
+		if _, err := db.Query(ctx, s); err != nil {
+			t.Fatalf("%s: %v", s, err)
+		}
+	}
+	const guard = "a timestamp difference (timestamp - timestamp) cannot yet be computed"
+	for _, sql := range tdwGuardStatements {
+		_, err := db.Query(ctx, sql)
+		if sqlerr.StateOf(err) != "0A000" || !strings.Contains(fmt.Sprint(err), guard) {
+			t.Errorf("%s\n  %q %v, want the guard's 0A000", sql, sqlerr.StateOf(err), err)
+		}
+	}
+	res, err := db.Query(ctx, "SELECT id, n, s, CAST(ts AS TEXT) AS t FROM tdw ORDER BY id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []string
+	for i := range res.Rows {
+		rows = append(rows, fmt.Sprint(res.Cells(i)))
+	}
+	if got, want := strings.Join(rows, "; "), "[1 <nil> <nil> 2024-01-01 00:00:00]"; got != want {
+		t.Errorf("a refused write changed the table\n  got  %s\n  want %s", got, want)
+	}
+	for _, tbl := range []string{"tdc1", "tdc3", "tdc4", "tdc5"} {
+		if _, err := db.Query(ctx, "SELECT 1 FROM "+tbl); err == nil {
+			t.Errorf("a refused CTAS created its table %s", tbl)
+		}
+	}
+	// The guard's limit, pinned: it is decided when the minus meets a row's
+	// batch, so a statement that evaluates no row — CTAS WITH NO DATA, a
+	// SELECT over no rows — is not refused by it. Nothing numeric is stored
+	// or returned (zero rows), but the column is declared double (r16's
+	// declaration); with the statement rule enabled it is refused 0A000
+	// (TestTimestampDifferenceOnTheWriteDoors, tdc2).
+	if _, err := db.Query(ctx, "CREATE TABLE tdc2 AS SELECT ts2 - ts AS d FROM tdw WITH NO DATA"); err != nil {
+		t.Errorf("CTAS WITH NO DATA: %v (the pinned limit moved: update this pin)", err)
+	} else if res, err := db.Query(ctx, "SELECT count(*) AS n FROM tdc2"); err != nil || fmt.Sprint(res.Cells(0)) != "[0]" {
+		t.Errorf("CTAS WITH NO DATA stored rows: %v %v", err, res)
 	}
 }
