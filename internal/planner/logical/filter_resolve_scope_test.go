@@ -257,7 +257,13 @@ func TestResolveFilterThroughProjectsQualifiesBuildArmDefinitions(t *testing.T) 
 				sharedDefs(t, filter.Children[0])
 			}
 			before := defs(filter.Children[0])
-			ast, _, ok := ResolveFilterThroughProjects(filter.Predicates[0], filter.Children[0], c.qualify)
+			var qualifyFor func(*Node) func(table, column string) string
+			if c.qualify != nil {
+				// One join below each of these filters: every join qualifies
+				// by the same answer.
+				qualifyFor = func(*Node) func(table, column string) string { return c.qualify }
+			}
+			ast, _, ok := ResolveFilterThroughProjects(filter.Predicates[0], filter.Children[0], qualifyFor)
 			if !ok {
 				t.Fatalf("unchanged, want %q", c.want)
 			}
@@ -266,6 +272,115 @@ func TestResolveFilterThroughProjectsQualifiesBuildArmDefinitions(t *testing.T) 
 			}
 			if after := defs(filter.Children[0]); after != before {
 				t.Fatalf("the logical plan's definitions were written to:\n  before %s\n  after  %s", before, after)
+			}
+		})
+	}
+}
+
+// EVERY JOIN THE WALK CROSSES QUALIFIES WHAT ITS OWN BUILD ARM BROUGHT IN, BY
+// THE NAME THAT JOIN'S STREAM GIVES IT (#1678 line j, round 3). Round 2 handed
+// the qualifier only to the FIRST join: a derived table that is a LOWER
+// join's build, read by a filter an upper join carries, arrived with its
+// definition bare, and the bare name bound the probe on the upper stream —
+// `upper(a.s) <> b.k OR …` over `a JOIN b … JOIN w` became
+// `upper(a.s) != (upper(s)) or …`, the probe compared with itself.
+//
+// qualifyFor answers each join by its build arm's name plus "_s", so the
+// expected spelling says WHICH join qualified each reference: in a three-join
+// tree every derived build is qualified by its own join, a derived PROBE stays
+// bare, and a join inside a build arm qualifies first and keeps its answer —
+// the enclosing join's qualifier, which knows its build's scans only by bare
+// name, never re-qualifies it, nor the query's own references beside it.
+func TestResolveFilterThroughProjectsQualifiesEveryJoinsBuildArm(t *testing.T) {
+	armName := func(n *Node) string {
+		for ; n != nil; n = n.Children[0] {
+			if n.DerivedAlias != "" {
+				return n.DerivedAlias
+			}
+			if n.Type == NodeScan && n.TableAlias != "" {
+				return n.TableAlias
+			}
+			if len(n.Children) == 0 {
+				return ""
+			}
+		}
+		return ""
+	}
+	qualifyFor := func(j *Node) func(table, column string) string {
+		name := armName(j.Children[1])
+		if name == "" {
+			return nil
+		}
+		stream := name + "_s"
+		return func(table, _ string) string {
+			if strings.EqualFold(table, stream) {
+				return table
+			}
+			return stream
+		}
+	}
+	const (
+		b = `(SELECT id, upper(s) AS k FROM t) b`
+		c = `(SELECT id, lower(s) AS k FROM t) c`
+		d = `(SELECT id, s || 'x' AS k FROM t) d`
+	)
+	for _, tc := range []struct{ name, sql, want string }{
+		{"ThreeJoinsDerivedBuildAtEveryLevel",
+			`SELECT a.id FROM t a JOIN ` + b + ` ON a.id = b.id JOIN ` + c + ` ON a.id = c.id JOIN ` + d + ` ON a.id = d.id
+			WHERE a.s = b.k OR a.s = c.k OR a.s = d.k`,
+			"a.s = (upper(b_s.s)) or a.s = (lower(c_s.s)) or a.s = (d_s.s || 'x')"},
+		{"ThreeJoinsLowestBuildReadAlone",
+			`SELECT a.id FROM t a JOIN ` + b + ` ON a.id = b.id JOIN t w ON a.id = w.id JOIN t v ON a.id = v.id
+			WHERE upper(a.s) <> b.k OR lower(v.s) = lower(b.k)`,
+			"upper(a.s) != (upper(b_s.s)) or lower(v.s) = lower((upper(b_s.s)))"},
+		{"ThreeJoinsDerivedProbeAtTheBottom",
+			`SELECT a.id FROM ` + b + ` JOIN t a ON b.id = a.id JOIN ` + c + ` ON a.id = c.id JOIN ` + d + ` ON a.id = d.id
+			WHERE a.s = b.k OR a.s = c.k OR a.s = d.k`,
+			"a.s = (upper(s)) or a.s = (lower(c_s.s)) or a.s = (d_s.s || 'x')"},
+		// LEFT, so the optimizer keeps b as the BUILD (an inner join here is
+		// reordered to make b the probe).
+		{"JoinInsideTheBuildArmKeepsItsAnswer",
+			`SELECT a.id FROM t a LEFT JOIN (SELECT x.id, y.k FROM t x JOIN (SELECT id, upper(s) AS k FROM t) y ON x.id = y.id) b
+			ON a.id = b.id JOIN t w ON a.id = w.id WHERE upper(a.s) = b.k OR w.id > 5`,
+			"upper(a.s) = (upper(y_s.s)) or w.id > 5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed, err := plansql.Parse(tc.sql)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			info, err := plansql.ExtractSelect(parsed)
+			if err != nil {
+				t.Fatalf("extract: %v", err)
+			}
+			plan, err := BuildFromSelect(info)
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			filter := findTopFilter(Optimize(plan))
+			if filter == nil {
+				t.Fatalf("no Filter node in the optimized plan for %q", tc.sql)
+			}
+			joins := 0
+			var count func(*Node)
+			count = func(n *Node) {
+				if n.Type == NodeJoin {
+					joins++
+				}
+				for _, ch := range n.Children {
+					count(ch)
+				}
+			}
+			count(filter.Children[0])
+			if joins < 3 {
+				t.Fatalf("%d joins below the filter, want at least 3", joins)
+			}
+			ast, _, ok := ResolveFilterThroughProjects(filter.Predicates[0], filter.Children[0], qualifyFor)
+			if !ok {
+				t.Fatalf("unchanged, want %q", tc.want)
+			}
+			if got := ast.String(); !strings.EqualFold(got, tc.want) {
+				t.Fatalf("resolved to %q, want %q\n  SQL: %s", got, tc.want, tc.sql)
 			}
 		})
 	}

@@ -5,6 +5,7 @@ package coordinator
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/wadjet/internal/coordinator/dagplan"
+	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/storage/ingest"
 	"github.com/derekmwright/wadjet/internal/storage/objstore"
 	"github.com/derekmwright/wadjet/internal/storage/parquet"
@@ -70,8 +72,8 @@ func ejCells(t *testing.T) []ejCell {
 		}
 		out = append(out, ejCell{p[0], p[1], p[2]})
 	}
-	if len(out) != 89 {
-		t.Fatalf("read %d cells, want 89", len(out))
+	if len(out) != 179 {
+		t.Fatalf("read %d cells, want 179", len(out))
 	}
 	return out
 }
@@ -264,6 +266,58 @@ var ejKnown = func() map[string]map[string]string {
 	}
 }()
 
+// ejKnownWrong pins the cells whose arms still answer WRONG, the same at the
+// base, for a defect that is not this line's filter rule (#1678 line j,
+// round 3; each is a line for the architect to file, with its mechanism in
+// the round-3 note). A pin is the arm's exact answer, so it fails when the
+// answer moves at all — to PostgreSQL's (unpin it) or to another wrong one.
+//   - sl/*: the stage DAG's SELECT list or aggregate input reads a build-side
+//     column of a derived table (or a quoted alias) by a name its join's
+//     stream does not carry — the gather's OutputRename asks for
+//     `n2.n_nationkey` where the stream carries `x.n_nationkey` — and the
+//     qualifier strip hands it the PROBE's column of that name.
+//   - cx/cteJoinTwice: a CTE over a join read on both sides; the probe arm's
+//     definitions are qualified by the CTE body's inner alias, which the
+//     build's columns also carry on the stream.
+//   - open/*: every arm, single-process included: logical filter pushdown
+//     moves an outer predicate under a derived table's Project onto its inner
+//     scan when a name matches the table's INNER scope (an inner alias equal
+//     to an outer relation's name; a bare column the table does not publish).
+var ejKnownWrong = func() map[string]map[string]string {
+	allArms := []string{"single", "spilled512k", "dag", "dag-shuffled", "dag-morsel4", "dag-skew",
+		"fastpath", "async", "async-probesplit"}
+	dagArms := []string{"dag", "dag-shuffled", "dag-morsel4", "dag-skew"}
+	out := map[string]map[string]string{}
+	for _, p := range []struct {
+		cell   string
+		arms   []string
+		answer string
+	}{
+		{"cx/cteJoinTwice", dagArms, "rows=0 "},
+		{"open/aliasIsProbe", []string{"single", "spilled512k", "fastpath", "async", "async-probesplit"}, "rows=40 1,1 | 1,2 | 1,3 | 1,5 | 1,6 | 2,1 | 2,2 | 2,3 | 2,5 | 2,6 | 3,1 | 3,2 | 3,3 | 3,5 | 3,6 | 4,1 | 4,2 | 4,3 | 4,5 | 4,6 | 5,1 | 5,2 | 5,3 | 5,5 | 5,6 | 6,1 | 6,2 | 6,3 | 6,5 | 6,6 | 7,1 | 7,2 | 7,3 | 7,5 | 7,6 | 8,1 | 8,2 | 8,3 | 8,5 | 8,6"},
+		{"open/aliasIsProbe", dagArms, "rows=40 1,1 | 1,2 | 1,3 | 1,4 | 1,5 | 1,6 | 1,7 | 1,8 | 2,1 | 2,2 | 2,3 | 2,4 | 2,5 | 2,6 | 2,7 | 2,8 | 3,1 | 3,2 | 3,3 | 3,4 | 3,5 | 3,6 | 3,7 | 3,8 | 5,1 | 5,2 | 5,3 | 5,4 | 5,5 | 5,6 | 5,7 | 5,8 | 6,1 | 6,2 | 6,3 | 6,4 | 6,5 | 6,6 | 6,7 | 6,8"},
+		{"open/aliasIsProbeSelect", dagArms, "rows=6 1,A,1,A | 2,b,2,B | 3,x,3,X | 4,NULL,4,NULL | 5,C,5,C | 6,a,6,A"},
+		{"open/tableUnaliasedProbe", allArms, "rows=0 "},
+		{"open/unqualifiedOuterN", allArms, "rows=6 1,1 | 1,6 | 2,1 | 2,6 | 7,1 | 7,6"},
+		{"open/unqualifiedOuterNPlain", allArms, "rows=4 1,1 | 3,3 | 4,4 | 6,6"},
+		{"open/unqualifiedOuterNWhere", allArms, "rows=6 1,1 | 1,6 | 2,1 | 2,6 | 7,1 | 7,6"},
+		{"sl/cteJoinDefIds", dagArms, "rows=0 "},
+		{"sl/inlNestedIds", dagArms, "rows=4 1,1 | 2,2 | 3,3 | 7,7"},
+		{"sl/inlNestedIdsExpr", dagArms, "rows=9 1,1 | 1,1 | 2,2 | 2,2 | 3,3 | 5,5 | 6,6 | 7,7 | 7,7"},
+		{"sl/innerAliasIds", dagArms, "rows=4 1,1 | 2,2 | 3,3 | 7,7"},
+		{"sl/quotedAlias", dagArms, "rows=4 1,1 | 2,2 | 3,3 | 7,7"},
+		{"sl/r0Shape", dagArms, "rows=1 8"},
+	} {
+		if out[p.cell] == nil {
+			out[p.cell] = map[string]string{}
+		}
+		for _, a := range p.arms {
+			out[p.cell][a] = p.answer
+		}
+	}
+	return out
+}()
+
 // A JOIN'S ON CONDITION THAT COMPARES AN EXPRESSION WITH A DERIVED TABLE'S
 // COLUMN IS APPLIED ON EVERY ARM (#1678 line j). The ON's left side {bare
 // column, upper(), arithmetic, CAST, CASE, constant} × the right side {base
@@ -294,6 +348,23 @@ var ejKnown = func() map[string]map[string]string {
 // above the join, a three-way join with two expression conjuncts, a column
 // list on the table, a definition's bare column also selected, a self-join
 // with both sides derived.
+//
+// Round 3's cells: the derived table (or CTE) is the build — or the probe —
+// of a LOWER join and the filter rides an upper join, two and three joins
+// deep, with the derived table at the bottom and in the middle, inner and
+// outer joins at each level (d2*, d3*: wrong on the four DAG arms at the base
+// and at round 2, whose qualifier reached only the first join); the
+// counterexamples the every-depth rule was tried on (cx/*: a join inside the
+// build arm, with and without a probe column of the same name, a filter
+// above a LIMIT, DISTINCT or window over the join, an aggregate above, a
+// semi-join beside, RIGHT and FULL lower joins, a rename, an inner alias and
+// a table-qualified definition below, a comma join); computed definitions —
+// non-strict and strict — of a derived table an outer join PADS, read by the
+// filter of that join or of an inner join above it (ns/*: those run
+// single-process now, the route widened from the carrier join to every outer
+// join the filter's resolution crosses); and, pinned as still wrong
+// (ejKnownWrong), the SELECT-list build-column defect (sl/*) and the binder
+// defect (open/*).
 func TestArc1678jExprOnDerivedEveryArm(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short: nine arms over the expression-against-derived-column ON table")
@@ -306,6 +377,13 @@ func TestArc1678jExprOnDerivedEveryArm(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			for _, a := range arms {
 				got := a.run(c.sql)
+				if pin, ok := ejKnownWrong[c.name][a.name]; ok {
+					if got != pin {
+						t.Errorf("%s\n  arm  %s\n  got  %s\n  pin  %s (a known wrong answer moved: re-measure against PostgreSQL 17.11's %s)",
+							c.sql, a.name, got, pin, c.want)
+					}
+					continue
+				}
 				if frag, ok := ejKnown[c.name][a.name]; ok {
 					if !strings.HasPrefix(got, "ERR") || !strings.Contains(got, frag) {
 						t.Errorf("%s\n  arm  %s\n  got  %s\n  pin  ERR containing %q (moved: re-measure against PostgreSQL 17.11's %s)",
@@ -318,5 +396,66 @@ func TestArc1678jExprOnDerivedEveryArm(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A ROUTED STATEMENT PAST THE LOCAL BUDGET REFUSES WITH THE BUDGET ERROR AND
+// DOES NOT FALL BACK TO THE DAG (#1678 line j, round 3). The outer-join route
+// (dagplan.ErrOuterJoinDerivedFilterDistributed) runs on the coordinator-local
+// pipeline under the refused-plan contract: the pipeline's memory pool lets
+// its breakers spill, and the collected result is capped (8 × the fast-path
+// threshold, or localResultBudgetOverride). PlanDistributed produced no stage
+// DAG for the statement, so there is nothing to fall back to, and a fallback
+// to a re-planned DAG would answer the very rows the route exists to keep
+// off it: the statement must FAIL with the budget error, naming the remedy,
+// and count one route. With the budget restored the same coordinator answers
+// PostgreSQL's rows by the same route.
+func TestArc1678jOuterJoinRouteOverBudgetRefuses(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short: a coordinator with workers")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	t.Cleanup(cancel)
+	infra := tmdInfra(t, ctx)
+	tmdWriteTableList(t, ctx, infra, nil, ejTables())
+	c := tmdCoordinatorWithWorkers(t, ctx, infra, nil)
+	const sql = `SELECT a.id, b.id FROM ej_t a LEFT JOIN (SELECT id, upper(s) AS k FROM ej_u) b ON a.id = b.id WHERE upper(a.s) <> b.k`
+	const want = "rows=3 2,2 | 3,3 | 6,6" // PostgreSQL 17.11 (ow/left)
+
+	before := c.OuterJoinDerivedFilterLocalRoutes()
+	res, err := c.ExecuteSQL(ctx, sql)
+	if err != nil {
+		t.Fatalf("within budget: %v", err)
+	}
+	rows, err := tbdCollect(ctx, res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ejRender(rows); got != want {
+		t.Fatalf("within budget: got %s, want %s", got, want)
+	}
+	if n := c.OuterJoinDerivedFilterLocalRoutes() - before; n != 1 {
+		t.Fatalf("within budget: %d outer-join routes, want 1 (the statement must take the route)", n)
+	}
+
+	c.localResultBudgetOverride = 1
+	t.Cleanup(func() { c.localResultBudgetOverride = 0 })
+	before = c.OuterJoinDerivedFilterLocalRoutes()
+	res, err = c.ExecuteSQL(ctx, sql)
+	if err == nil {
+		got := "(no result)"
+		if res != nil {
+			if rows, cerr := tbdCollect(ctx, res); cerr == nil {
+				got = ejRender(rows)
+			}
+		}
+		t.Fatalf("past the budget the routed statement answered %s; it must refuse with the budget error, not fall back", got)
+	}
+	if !errors.Is(err, exec.ErrCollectBudget) || !strings.Contains(err.Error(), "exceeded the local budget") ||
+		!strings.Contains(err.Error(), "--local-fastpath-bytes") {
+		t.Fatalf("past the budget: %v, want the local budget error naming --local-fastpath-bytes", err)
+	}
+	if n := c.OuterJoinDerivedFilterLocalRoutes() - before; n != 1 {
+		t.Fatalf("past the budget: %d outer-join routes, want 1", n)
 	}
 }
