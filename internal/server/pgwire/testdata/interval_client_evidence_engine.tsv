@@ -33,3 +33,7 @@ intervalstyle/show	fields=[IntervalStyle:oid=25:typmod=-1:len=-1:fmt=0] rows=[is
 intervalstyle/text	fields=[t:oid=25:typmod=-1:len=-1:fmt=0] rows=[1 day]
 intervalstyle/reset	fields=[] rows=[]
 intervalstyle/afterReset	fields=[t:oid=25:typmod=-1:len=-1:fmt=0] rows=[1 day]
+door/IntervalStyle/postgres_verbose	ok
+door/IntervalStyle/sql_standard	ok
+door/IntervalStyle/iso_8601	ok
+door/IntervalStyle/postgres	ok

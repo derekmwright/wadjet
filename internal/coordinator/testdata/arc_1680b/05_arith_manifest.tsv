@@ -1,107 +1,107 @@
-# The stage manifest of section 05_arith (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet / door).
-plus/fields	F	refusal bare-interval-result	unmet
-plus/noCarry	F	refusal bare-interval-result	met
-plus/subsec	F	refusal bare-interval-result	unmet
-minus/fields	F	refusal bare-interval-result	met
-minus/zero	F	refusal bare-interval-result	met
-plus/null	F	refusal bare-interval-result	met
-plus/overflowMonths	C	pg-error 22008	unmet
-plus/overflowDays	C	pg-error 22008	met
-plus/overflowTime	C	pg-error 22008	unmet
-plus/toInfinityFields	C	pg-error 22008	unmet
-plus/inf	F	refusal bare-interval-result	unmet
-plus/infMinusInf	C	pg-error 22008	unmet
-plus/infPlusNegInf	C	pg-error 22008	unmet
-neg/basic	F	refusal bare-interval-result	unmet
-neg/inf	F	refusal bare-interval-result	unmet
-neg/minMonths	C	pg-error 22008	met
-neg/minDays	C	pg-error 22008	met
-neg/minTime	C	pg-error 22007	unmet
-neg/minTimeBuilt	C	pg-error 22008	unmet
-neg/minTimeBuiltAlone	F	refusal bare-interval-result	unmet
-mul/int	F	refusal bare-interval-result	unmet
-mul/zero	F	refusal bare-interval-result	unmet
-mul/neg	F	refusal bare-interval-result	unmet
-mul/halfMonth	F	refusal bare-interval-result	met
-mul/thirdMonth	F	refusal bare-interval-result	met
-mul/monthCascade	F	refusal bare-interval-result	met
-mul/monthToTime	F	refusal bare-interval-result	met
-mul/dayFrac	F	refusal bare-interval-result	met
-mul/dayCascade	F	refusal bare-interval-result	met
-mul/yearFrac	F	refusal bare-interval-result	met
-mul/mixedSign	F	refusal bare-interval-result	unmet
-mul/negFrac	F	refusal bare-interval-result	met
-mul/timeOver24	F	refusal bare-interval-result	unmet
-mul/usHalfEven1	F	refusal bare-interval-result	unmet
-mul/usHalfEven2	F	refusal bare-interval-result	unmet
-mul/usHalfEven3	F	refusal bare-interval-result	unmet
-mul/usNeg	F	refusal bare-interval-result	unmet
-mul/tinyMonth	F	refusal bare-interval-result	met
-mul/float8	F	refusal bare-interval-result	met
-mul/real	F	refusal bare-interval-result	met
-mul/bigint	F	refusal bare-interval-result	met
-mul/numeric	F	refusal bare-interval-result	unmet
-mul/unknown	F	refusal bare-interval-result	met
-mul/null	F	refusal bare-interval-result	met
-mul/overflowDays	C	pg-error 22008	met
-mul/overflowMonths	C	pg-error 22008	met
-mul/overflowTime	C	pg-error 22008	unmet
-mul/huge	C	pg-error 22008	met
-mul/nan	C	pg-error 22008	met
-mul/infFactor	F	refusal bare-interval-result	met
-mul/negInfFactor	F	refusal bare-interval-result	met
-mul/zeroTimesInf	C	pg-error 22008	met
-mul/infTimesZero	C	pg-error 22008	unmet
-mul/infTimesNeg	F	refusal bare-interval-result	unmet
-mul/commuted	F	refusal bare-interval-result	unmet
-div/int	F	refusal bare-interval-result	unmet
-div/thirdMonth	F	refusal bare-interval-result	met
-div/thirdDay	F	refusal bare-interval-result	met
-div/monthCascade	F	refusal bare-interval-result	met
-div/yearBy7	F	refusal bare-interval-result	met
-div/neg	F	refusal bare-interval-result	met
-div/frac	F	refusal bare-interval-result	met
-div/half	F	refusal bare-interval-result	met
-div/us	F	refusal bare-interval-result	unmet
-div/us3	F	refusal bare-interval-result	unmet
-div/usNeg	F	refusal bare-interval-result	unmet
-div/zero	C	pg-error 22012	met
-div/zeroFloat	C	pg-error 22012	met
-div/tiny	C	pg-error 22008	met
-div/nan	C	pg-error 22008	met
-div/infDivisor	F	refusal bare-interval-result	met
-div/infDividend	F	refusal bare-interval-result	unmet
-div/infByInf	C	pg-error 22008	unmet
-div/unknown	F	refusal bare-interval-result	met
-div/null	F	refusal bare-interval-result	met
-div/roundTrip	F	refusal bare-interval-result	met
-justify/pos	F	refusal bare-interval-result	unmet
-justify/neg	F	refusal bare-interval-result	unmet
-justify/mixed1	F	refusal bare-interval-result	unmet
-justify/mixed2	F	refusal bare-interval-result	unmet
-justify/mixed3	F	refusal bare-interval-result	unmet
-justify/mixed4	F	refusal bare-interval-result	unmet
-justify/zero	F	refusal bare-interval-result	met
-justify/us	F	refusal bare-interval-result	unmet
-justify/bigHours	F	refusal bare-interval-result	unmet
-justify/bigDays	C	pg-error 22008	unmet
-justify/monthOverflow	C	pg-error 22008	unmet
-justify/inf	F	refusal bare-interval-result	unmet
-justify/null	F	refusal bare-interval-result	met
-agg/sumAvg	F	refusal bare-interval-result	met
-agg/sumAvgSubset	F	refusal bare-interval-result	met
-agg/avgCascade	F	refusal bare-interval-result	met
-agg/avgThirds	F	refusal bare-interval-result	met
-agg/avgUs	F	refusal bare-interval-result	unmet
-agg/avgUs3	F	refusal bare-interval-result	unmet
-agg/sumEmpty	F	refusal bare-interval-result	met
-agg/sumNull	F	refusal bare-interval-result	met
-agg/sumGroup	F	refusal bare-interval-result	met
-agg/sumOverflowDays	E	pg-error 22008	unmet
-agg/sumOverflowThenBack	E	pg-error 22008	unmet
-agg/avgBig	E	pg-error 22008	unmet
-agg/sumInf	F	refusal bare-interval-result	unmet
-agg/sumInfNegInf	E	pg-error 22008	unmet
-agg/avgInfNegInf	E	pg-error 22008	unmet
-agg/sumWindow	F	refusal bare-interval-result	met
-agg/avgWindowSliding	F	refusal bare-interval-result	met
+# The stage manifest of section 05_arith (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet; an IntervalStyle cell by the door's SET answer)<TAB>legal alternatives (ADR-0013; ruling 11 pending).
+plus/fields	A	refusal bare-interval-result	unmet	-
+plus/noCarry	A	refusal bare-interval-result	met	-
+plus/subsec	A	refusal bare-interval-result	unmet	-
+minus/fields	A	refusal bare-interval-result	unmet	-
+minus/zero	A	refusal bare-interval-result	unmet	-
+plus/null	A	refusal bare-interval-result	met	-
+plus/overflowMonths	C	pg-error 22008	unmet	-
+plus/overflowDays	C	pg-error 22008	met	-
+plus/overflowTime	C	pg-error 22008	unmet	-
+plus/toInfinityFields	C	pg-error 22008	unmet	-
+plus/inf	A	refusal bare-interval-result	unmet	-
+plus/infMinusInf	C	pg-error 22008	unmet	-
+plus/infPlusNegInf	C	pg-error 22008	unmet	-
+neg/basic	A	refusal bare-interval-result	unmet	-
+neg/inf	A	refusal bare-interval-result	unmet	-
+neg/minMonths	C	pg-error 22008	met	-
+neg/minDays	C	pg-error 22008	met	-
+neg/minTime	C	pg-error 22007	unmet	-
+neg/minTimeBuilt	C	pg-error 22008	unmet	-
+neg/minTimeBuiltAlone	A	refusal bare-interval-result	unmet	-
+mul/int	A	refusal bare-interval-result	unmet	-
+mul/zero	A	refusal bare-interval-result	unmet	-
+mul/neg	A	refusal bare-interval-result	unmet	-
+mul/halfMonth	A	refusal bare-interval-result	unmet	-
+mul/thirdMonth	A	refusal bare-interval-result	unmet	-
+mul/monthCascade	A	refusal bare-interval-result	unmet	-
+mul/monthToTime	A	refusal bare-interval-result	unmet	-
+mul/dayFrac	A	refusal bare-interval-result	met	-
+mul/dayCascade	A	refusal bare-interval-result	met	-
+mul/yearFrac	A	refusal bare-interval-result	met	-
+mul/mixedSign	A	refusal bare-interval-result	unmet	-
+mul/negFrac	A	refusal bare-interval-result	unmet	-
+mul/timeOver24	A	refusal bare-interval-result	unmet	-
+mul/usHalfEven1	A	refusal bare-interval-result	unmet	-
+mul/usHalfEven2	A	refusal bare-interval-result	unmet	-
+mul/usHalfEven3	A	refusal bare-interval-result	unmet	-
+mul/usNeg	A	refusal bare-interval-result	unmet	-
+mul/tinyMonth	A	refusal bare-interval-result	unmet	-
+mul/float8	A	refusal bare-interval-result	met	-
+mul/real	A	refusal bare-interval-result	unmet	-
+mul/bigint	A	refusal bare-interval-result	met	-
+mul/numeric	A	refusal bare-interval-result	unmet	-
+mul/unknown	A	refusal bare-interval-result	met	-
+mul/null	A	refusal bare-interval-result	met	-
+mul/overflowDays	C	pg-error 22008	met	-
+mul/overflowMonths	C	pg-error 22008	met	-
+mul/overflowTime	C	pg-error 22008	unmet	-
+mul/huge	C	pg-error 22008	met	-
+mul/nan	C	pg-error 22008	met	-
+mul/infFactor	A	refusal bare-interval-result	unmet	-
+mul/negInfFactor	A	refusal bare-interval-result	unmet	-
+mul/zeroTimesInf	C	pg-error 22008	met	-
+mul/infTimesZero	C	pg-error 22008	unmet	-
+mul/infTimesNeg	A	refusal bare-interval-result	unmet	-
+mul/commuted	A	refusal bare-interval-result	unmet	-
+div/int	A	refusal bare-interval-result	unmet	-
+div/thirdMonth	A	refusal bare-interval-result	unmet	-
+div/thirdDay	A	refusal bare-interval-result	met	-
+div/monthCascade	A	refusal bare-interval-result	unmet	-
+div/yearBy7	A	refusal bare-interval-result	unmet	-
+div/neg	A	refusal bare-interval-result	met	-
+div/frac	A	refusal bare-interval-result	met	-
+div/half	A	refusal bare-interval-result	met	-
+div/us	A	refusal bare-interval-result	unmet	-
+div/us3	A	refusal bare-interval-result	unmet	-
+div/usNeg	A	refusal bare-interval-result	unmet	-
+div/zero	C	pg-error 22012	met	-
+div/zeroFloat	C	pg-error 22012	met	-
+div/tiny	C	pg-error 22008	met	-
+div/nan	C	pg-error 22008	met	-
+div/infDivisor	A	refusal bare-interval-result	met	-
+div/infDividend	A	refusal bare-interval-result	unmet	-
+div/infByInf	C	pg-error 22008	unmet	-
+div/unknown	A	refusal bare-interval-result	met	-
+div/null	A	refusal bare-interval-result	met	-
+div/roundTrip	A	refusal bare-interval-result	unmet	-
+justify/pos	A	refusal bare-interval-result	unmet	-
+justify/neg	A	refusal bare-interval-result	unmet	-
+justify/mixed1	A	refusal bare-interval-result	unmet	-
+justify/mixed2	A	refusal bare-interval-result	unmet	-
+justify/mixed3	A	refusal bare-interval-result	unmet	-
+justify/mixed4	A	refusal bare-interval-result	unmet	-
+justify/zero	A	refusal bare-interval-result	unmet	-
+justify/us	A	refusal bare-interval-result	unmet	-
+justify/bigHours	A	refusal bare-interval-result	unmet	-
+justify/bigDays	C	pg-error 22008	unmet	-
+justify/monthOverflow	C	pg-error 22008	unmet	-
+justify/inf	A	refusal bare-interval-result	unmet	-
+justify/null	A	refusal bare-interval-result	unmet	-
+agg/sumAvg	A	refusal bare-interval-result	unmet	-
+agg/sumAvgSubset	A	refusal bare-interval-result	unmet	-
+agg/avgCascade	A	refusal bare-interval-result	unmet	-
+agg/avgThirds	A	refusal bare-interval-result	unmet	-
+agg/avgUs	A	refusal bare-interval-result	unmet	-
+agg/avgUs3	A	refusal bare-interval-result	unmet	-
+agg/sumEmpty	A	refusal bare-interval-result	unmet	-
+agg/sumNull	A	refusal bare-interval-result	unmet	-
+agg/sumGroup	A	refusal bare-interval-result	unmet	-
+agg/sumOverflowDays	E	pg-error 22008	unmet	-
+agg/sumOverflowThenBack	E	pg-error 22008	met	refusal bare-interval-result
+agg/avgBig	E	pg-error 22008	unmet	-
+agg/sumInf	A	refusal bare-interval-result	unmet	-
+agg/sumInfNegInf	E	pg-error 22008	unmet	-
+agg/avgInfNegInf	E	pg-error 22008	unmet	-
+agg/sumWindow	A	refusal bare-interval-result	unmet	-
+agg/avgWindowSliding	A	refusal bare-interval-result	unmet	-

@@ -491,10 +491,35 @@ func iv80RunSingle(ctx context.Context, db *wadjet.DB, sql string) (out string) 
 		cols[i] = parquet.Column{Name: m.Name, Type: m.TypeID, Precision: m.Precision, Scale: m.Scale}
 	}
 	cells := make([][]any, len(res.Rows))
+	varchar := map[int]bool{}
 	for i := range res.Rows {
 		cells[i] = res.Cells(i)
 	}
-	return iv80EngineRender(cols, cells)
+	for i, m := range res.ColumnMetas {
+		varchar[i] = m.TypeID == parquet.TypeString && m.StringLength != 0
+	}
+	return iv80MarkVarchar(iv80EngineRender(cols, cells), varchar)
+}
+
+// iv80MarkVarchar names a string column declared with a length channel
+// (VARCHAR, what the wire sends as OID 1043, pgColumnOID) "character
+// varying", as PostgreSQL's header does (#1680b round 3: cast/toVarchar's
+// type is checkable; the shared ftTypeName prints every string "text").
+func iv80MarkVarchar(ans string, varchar map[int]bool) string {
+	head, body, ok := strings.Cut(ans, " | ")
+	if !ok {
+		return ans
+	}
+	cols := strings.Split(head, ",")
+	if len(cols) != len(varchar) {
+		return ans
+	}
+	for i, c := range cols {
+		if n, typ, ok := strings.Cut(c, ":"); ok && varchar[i] && typ == "text" {
+			cols[i] = n + ":character varying"
+		}
+	}
+	return strings.Join(cols, ",") + " | " + body
 }
 
 // iv80RunDAG runs sql through a coordinator.
@@ -538,7 +563,11 @@ func iv80RunDAG(ctx context.Context, c *Coordinator, sql string) (out string) {
 			cells = append(cells, row)
 		}
 	}
-	return iv80EngineRender(cols, cells)
+	varchar := map[int]bool{}
+	for i, c := range cols {
+		varchar[i] = c.Type == parquet.TypeString && res.StringLength[c.Name] != 0
+	}
+	return iv80MarkVarchar(iv80EngineRender(cols, cells), varchar)
 }
 
 // iv80Arm is one execution arm.

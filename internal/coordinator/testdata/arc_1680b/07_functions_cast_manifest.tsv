@@ -1,19 +1,19 @@
-# The stage manifest of section 07_functions_cast (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet / door).
-trunc/millennium~text	A	refusal function-date_trunc	unmet
-trunc/century~text	A	refusal function-date_trunc	unmet
-trunc/decade~text	A	refusal function-date_trunc	unmet
-trunc/year~text	A	refusal function-date_trunc	unmet
-trunc/quarter~text	A	refusal function-date_trunc	unmet
-trunc/month~text	A	refusal function-date_trunc	unmet
-trunc/day~text	A	refusal function-date_trunc	unmet
-trunc/hour~text	A	refusal function-date_trunc	unmet
-trunc/minute~text	A	refusal function-date_trunc	unmet
-trunc/second~text	A	refusal function-date_trunc	unmet
-trunc/milliseconds~text	A	refusal function-date_trunc	unmet
-trunc/microseconds~text	A	refusal function-date_trunc	unmet
-trunc/inf~text	A	refusal function-date_trunc	unmet
-inf/fields~text	C	supported	unmet
-agg/all~text	E	rep-divergence	unmet
-agg/arrayAgg~text	A	refusal container	unmet
-agg/modeTie~text	E	refusal ordered-aggregate	unmet
-operand/timesUnknown~text	C	supported	met
+# The stage manifest of section 07_functions_cast (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet; an IntervalStyle cell by the door's SET answer)<TAB>legal alternatives (ADR-0013; ruling 11 pending).
+trunc/millennium~text	A	refusal function-date_trunc	unmet	-
+trunc/century~text	A	refusal function-date_trunc	unmet	-
+trunc/decade~text	A	refusal function-date_trunc	unmet	-
+trunc/year~text	A	refusal function-date_trunc	unmet	-
+trunc/quarter~text	A	refusal function-date_trunc	unmet	-
+trunc/month~text	A	refusal function-date_trunc	unmet	-
+trunc/day~text	A	refusal function-date_trunc	unmet	-
+trunc/hour~text	A	refusal function-date_trunc	unmet	-
+trunc/minute~text	A	refusal function-date_trunc	unmet	-
+trunc/second~text	A	refusal function-date_trunc	unmet	-
+trunc/milliseconds~text	A	refusal function-date_trunc	unmet	-
+trunc/microseconds~text	A	refusal function-date_trunc	unmet	-
+trunc/inf~text	A	refusal function-date_trunc	unmet	-
+inf/fields~text	C	supported	unmet	-
+agg/all~text	E	rep-divergence	unmet	-
+agg/arrayAgg~text	A	refusal container	unmet	-
+agg/modeTie~text	A	refusal ordered-aggregate	unmet	-
+operand/timesUnknown~text	C	supported	met	-

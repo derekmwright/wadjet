@@ -7,7 +7,6 @@ import (
 	"os"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -20,66 +19,80 @@ import (
 //
 //	supported              the value AND the declared types equal PostgreSQL's
 //	pg-error <SQLSTATE>    PostgreSQL's own error, the same SQLSTATE
-//	refusal <reason>       an intentional capability refusal: 0A000, its reason named
+//	refusal <reason>       an intentional capability refusal: 0A000 with the named
+//	                       reason's sentence (iv80Reasons)
 //	rep-divergence         an approved representative divergence (ruling 3): the
-//	                       same rows and types, every printed interval SQL-equal to
-//	                       PostgreSQL's, the member the representative rule picks
+//	                       cell's explicit rule-3 answer (iv80RepSpecs), types
+//	                       and the columns outside its units exactly PostgreSQL's
 //
+// The internal-failure exclusion precedes every outcome; unordered results
+// compare as multisets (round 3: arc_1680b_interval_manifest_rules_test.go).
 // No cell is "expected to agree later" without a stage that owns it. The
-// manifest is derived by rules (iv80ManifestOutcome) from the statement and
-// PostgreSQL's answer, written to <stem>_manifest.tsv with each cell's "now"
-// (whether today's baseline already meets the outcome: met, unmet, or door
-// for a cell whose outcome is decided by a session setting the statement
-// itself does not carry), and held by TestArc1680bStageManifest. A stage that
-// lands adds its letter to iv80LandedStages; from then on every cell it owns
-// must be met.
+// manifest is derived by rules (iv80ManifestOutcome, iv80CellStage) from the
+// statement and PostgreSQL's answer, written to <stem>_manifest.tsv with
+// each cell's "now" (whether today's baseline already meets the outcome; an
+// IntervalStyle cell by the engine's SET answer at the door, from
+// pgwire.TestIntervalClientEvidence) and its legal alternatives, and held by
+// TestArc1680bStageManifest. A stage that lands adds its letter to
+// iv80LandedStages; from then on every cell it owns must be met.
 
 // iv80LandedStages are the stages that have landed (none: this item writes
 // no engine code).
 const iv80LandedStages = ""
 
-// iv80Stages are the stages of the definition's §9 (B owns no corpus cell:
-// its gates are the carrier's and the transport's own tests).
+// iv80Stages are the stages of the definition's §9. B owns no corpus cell
+// (its gates are the carrier's and the transport's own tests); F owns none
+// either: the publication policy is enforced from A onward (every refusal is
+// A's) and F audits it with the client transcript.
 var iv80Stages = map[string]string{
-	"A": "declarations and guards (nothing admitted)",
+	"A": "declarations and guards (nothing admitted; every named refusal, the bare-result and write refusals included)",
 	"C": "inline expressions, one proven operation at a time",
 	"D": "internal columns and keys behind the operator allowlist",
 	"E": "aggregates and windows, one family at a time",
-	"F": "publication policy: continued refusal of a bare interval result",
 }
 
-// iv80Reasons are the named capability refusals.
-var iv80Reasons = map[string]string{
-	"bare-interval-result":           "a query result column of type interval (ruling 1: no wire change)",
-	"intervalstyle":                  "SET IntervalStyle other than postgres (ruling 7)",
-	"typmod":                         "an interval typmod: field qualifier or precision (ruling 7)",
-	"timestamptz":                    "timestamptz arithmetic or a timestamptz operand (ruling 7; ruling 8)",
-	"time-type":                      "a TIME / TIMETZ operand (no TIME type: ADR-0012 temporal r23; ruling 8)",
-	"container":                      "an interval inside ARRAY / ROW / MAP or array_agg",
-	"ordered-aggregate":              "an ordered or ordered-set aggregate over an interval (ruling 4)",
-	"distinct-aggregate":             "sum / avg (DISTINCT interval) (ruling 5)",
-	"numeric-infinity":               "an EXTRACT whose numeric result is infinite (ruling 6)",
-	"timestamp-millisecond-carrier":  "a timestamp value or result with sub-millisecond digits (TIMESTAMP is a millisecond carrier, E36)",
-	"interval-write":                 "storing an interval: INSERT / UPDATE / MERGE / CTAS (no persistent interval)",
-	"function-date_trunc":            "date_trunc over an interval (its own item)",
-	"function-to_char":               "to_char over an interval (its own item)",
-	"function-generate_series":       "generate_series with an interval step (its own item)",
-	"function-overlaps":              "OVERLAPS with an interval end (its own item)",
-	"function-width_bucket":          "width_bucket over intervals (its own item)",
-	"range-offset-frame":             "a RANGE frame with an interval offset (offset RANGE frames are refused for every type today)",
-	"postgresql-internal-function":   "interval_hash / interval_hash_extended (PostgreSQL's internal hash support)",
-	"timestamp-difference-to-number": "a timestamp difference compared with or written as a number",
+// iv80Alternative is a legal alternative to a cell's outcome: a plan-dependent
+// answer PostgreSQL's own semantics permit (ADR-0013), checked like an
+// outcome against its own reference answer.
+type iv80Alternative struct {
+	outcome, ref, why string
 }
 
-// iv80RepExpect is the answer a rep-divergence cell must give where the
-// representative changes a value computed from it (whole-row consequence):
-// the rule-3 member (ascending lexicographic (months, days, micros), the
-// minimum wins) is 30 days, so 2024-01-31 + 30 days.
-var iv80RepExpect = map[string]string{
-	"11_relational:reparith/default":    "t | 2024-03-01 00:00:00",
-	"11_relational:reparith/sortagg":    "t | 2024-03-01 00:00:00",
-	"11_relational:reparithRev/default": "t | 2024-03-01 00:00:00",
-	"11_relational:reparithRev/sortagg": "t | 2024-03-01 00:00:00",
+// iv80Alternatives are the cells whose outcome has a legal alternative.
+// Ruling 11 is PENDING with the maintainer: these are written to its
+// recommended option (PostgreSQL's finite-width checked accumulator; which
+// inputs overflow may depend on the combination order of an unordered
+// parallel sum, a loud plan-dependent refusal, never a wrong value). A
+// window's prescribed order (ov/winForward, sw/all) has no alternative.
+var iv80Alternatives = map[string][]iv80Alternative{
+	// {2147483647 days, 1 day, -1 day}: (a + b) + c overflows (PostgreSQL's
+	// serial order), (a + c) + b and (b + c) + a are 2147483647 days
+	// (ov/aggDesc measures that order).
+	"11_relational:ov/aggUnordered": {{"supported", "s:text(25) | 2147483647 days", "another combination order of the unordered sum answers the exact sum (ruling 11, pending)"}},
+	// The same three values with a bare result: the finite order publishes
+	// an interval, which is refused.
+	"05_arith:agg/sumOverflowThenBack": {{"refusal bare-interval-result", "", "another combination order publishes the finite sum, a bare interval result (ruling 11, pending; ruling 1)"}},
+}
+
+// iv80DoorPath is the client transcript the IntervalStyle cells are decided
+// by (the corpus applies a cell's IntervalStyle on the reference only).
+const iv80DoorPath = "../server/pgwire/testdata/interval_client_evidence_engine.tsv"
+
+// iv80Door is the engine's answer to SET IntervalStyle at the door, per
+// style (pgwire.TestIntervalClientEvidence, door/IntervalStyle/<style>).
+func iv80Door(t *testing.T) map[string]string {
+	t.Helper()
+	raw, err := os.ReadFile(iv80DoorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]string{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if name, ans, ok := strings.Cut(line, "\t"); ok && strings.HasPrefix(name, "door/IntervalStyle/") {
+			out[strings.TrimPrefix(name, "door/IntervalStyle/")] = ans
+		}
+	}
+	return out
 }
 
 var (
@@ -87,67 +100,14 @@ var (
 	iv80TimeRe      = regexp.MustCompile(`\bTIME '|\bTIMETZ\b|AS TIME\)`)
 	iv80DistinctAgg = regexp.MustCompile(`(sum|avg)\(DISTINCT`)
 	iv80SubMilliTs  = regexp.MustCompile(`TIMESTAMP '[^']*\.\d{4,}'`)
-	iv80RepFamily   = regexp.MustCompile(`GROUP BY|DISTINCT|UNION|INTERSECT|EXCEPT|\bmin\(|\bmax\(`)
+	// age(DATE, DATE) resolves to the timestamptz overload (measured:
+	// 10_definitions:explain/age/date, age/dateGapHavana against
+	// age/dateGapUTC).
+	iv80DateAge = regexp.MustCompile(`\bage\(DATE '`)
 )
 
 // iv80BaseStem is a section's stem without its "_cast" suffix.
 func iv80BaseStem(stem string) string { return strings.TrimSuffix(stem, "_cast") }
-
-// iv80StageOf is the stage that owns a cell by its family: scalar
-// expressions are C, keys and internal columns D, aggregates and windows E,
-// writes A.
-func iv80StageOf(stem, name string) string {
-	base := strings.TrimSuffix(name, "~text")
-	has := func(prefixes ...string) bool {
-		for _, p := range prefixes {
-			if strings.HasPrefix(base, p) {
-				return true
-			}
-		}
-		return false
-	}
-	switch iv80BaseStem(stem) {
-	case "03_order":
-		switch {
-		case has("cmp/", "between", "in", "filter/"):
-			return "C"
-		case has("order/minMax", "order/minTie"):
-			return "E"
-		}
-		return "D"
-	case "04_keys":
-		if has("partition/", "peers/", "countDistinct/", "withTies") {
-			return "E"
-		}
-		return "D"
-	case "05_arith", "07_functions":
-		if has("agg/", "frame/", "widthBucket") {
-			return "E"
-		}
-		return "C"
-	case "09_model":
-		if has("model/fields", "model/hash") {
-			return "C"
-		}
-		return "D"
-	case "10_definitions":
-		if has("sentinel/sumToNegInf") {
-			return "E"
-		}
-		return "C"
-	case "11_relational":
-		switch {
-		case has("rt/", "opaque/", "filt/", "tsdate/"):
-			return "C"
-		case has("ordagg/", "distagg/", "empty/agg", "null/agg", "ov/", "pm/", "sw/", "frame/", "lag/"):
-			return "E"
-		}
-		return "D"
-	case "12_writes":
-		return "A"
-	}
-	return "C"
-}
 
 // iv80HasNumericInfinity: PostgreSQL's answer has an infinite value in a
 // numeric column.
@@ -229,7 +189,7 @@ func iv80ManifestOutcome(stem string, c iv80Cell, pg string) (outcome string) {
 		}
 	}
 	switch {
-	case strings.Contains(sql, "TIMESTAMPTZ") || strings.Contains(sql, "date_subtract(") || (strings.Contains(sql, "date_add(") && strings.Count(sql, ",") >= 2 && strings.Contains(sql, "'America/")):
+	case strings.Contains(sql, "TIMESTAMPTZ") || iv80DateAge.MatchString(sql) || strings.Contains(sql, "date_subtract(") || (strings.Contains(sql, "date_add(") && strings.Count(sql, ",") >= 2 && strings.Contains(sql, "'America/")):
 		return "refusal timestamptz"
 	case iv80TimeRe.MatchString(sql):
 		return "refusal time-type"
@@ -264,26 +224,25 @@ func iv80ManifestOutcome(stem string, c iv80Cell, pg string) (outcome string) {
 	case pgErr:
 		return "pg-error " + pgCode
 	}
-	if _, ok := iv80RepExpect[iv80BaseStem(stem)+":"+c.name]; ok {
-		return "rep-divergence"
-	}
-	if iv80RepFamily.MatchString(strings.ReplaceAll(sql, "UNION ALL", "")) && iv80PrintsInterval(body) && !strings.Contains(sql, "GREATEST") && !strings.Contains(sql, "LEAST") {
+	// A representative divergence only where a spec names the key or MIN /
+	// MAX columns and their rule-3 answer (round 3: a GROUP BY beside
+	// SUM / AVG alone is not one).
+	if _, ok := iv80RepSpecs()[iv80BaseStem(stem)+":"+c.name]; ok {
 		return "rep-divergence"
 	}
 	return "supported"
 }
 
-// iv80RefusalStage is the stage that owns a refusal: the publication policy
-// is F's; the refusals decided where aggregates and windows are admitted are
-// E's; every other is installed (or kept) by A's declarations and guards.
-func iv80RefusalStage(reason string) string {
-	switch reason {
-	case "bare-interval-result":
-		return "F"
-	case "ordered-aggregate", "distinct-aggregate", "range-offset-frame":
-		return "E"
+// iv80CellStage is the stage that owns a cell: every refusal is A's (a named
+// refusal holds at every stage, from the first: the bare-result, write,
+// ordered- and DISTINCT-aggregate and frame refusals included); every other
+// cell is owned by the earliest stage at which everything it needs is
+// admitted (iv80EarliestStage).
+func iv80CellStage(c iv80Cell, outcome string) string {
+	if strings.HasPrefix(outcome, "refusal ") {
+		return "A"
 	}
-	return "A"
+	return iv80EarliestStage(c.sql)
 }
 
 // iv80OrderedAgg: an aggregate call over an interval states an order: min /
@@ -326,94 +285,17 @@ func iv80OrderedAgg(sql string) bool {
 	return false
 }
 
-// iv80PrintsInterval: some text column of the answer holds interval output.
-func iv80PrintsInterval(ans string) bool {
-	types := iv80HeaderTypes(ans)
-	_, body, ok := strings.Cut(ans, " | ")
-	if !ok || body == "(0 rows)" {
-		return false
-	}
-	for _, row := range strings.Split(body, "; ") {
-		f := strings.Split(row, ",")
-		if len(f) != len(types) {
-			return false
-		}
-		for i, v := range f {
-			if types[i] == "text" && v != "NULL" {
-				if _, ok := iv80ParsePGInterval(v); ok {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
 // iv80ParsePGInterval reads PostgreSQL's postgres-style interval output into
 // its comparison value N = (months*30 + days)*86400e6 + micros (infinity as
 // the reserved triples' N).
 func iv80ParsePGInterval(s string) (*big.Int, bool) {
-	var months, days, micros int64
-	switch s {
-	case "infinity":
-		return iv80CmpValue(iv80ModelValue{2147483647, 2147483647, 9223372036854775807}), true
-	case "-infinity":
-		return iv80CmpValue(iv80ModelValue{-2147483648, -2147483648, -9223372036854775808}), true
-	}
-	toks := strings.Fields(s)
-	if len(toks) == 0 {
+	months, days, micros, ok := iv80Triple(s)
+	if !ok {
 		return nil, false
 	}
-	for i := 0; i < len(toks); i++ {
-		t := toks[i]
-		if strings.Contains(t, ":") {
-			neg := strings.HasPrefix(t, "-")
-			t = strings.TrimLeft(t, "+-")
-			hms := strings.Split(t, ":")
-			if len(hms) != 3 {
-				return nil, false
-			}
-			h, e1 := strconv.ParseInt(hms[0], 10, 64)
-			m, e2 := strconv.ParseInt(hms[1], 10, 64)
-			sec, frac, _ := strings.Cut(hms[2], ".")
-			sv, e3 := strconv.ParseInt(sec, 10, 64)
-			if e1 != nil || e2 != nil || e3 != nil {
-				return nil, false
-			}
-			us := int64(0)
-			if frac != "" {
-				frac = (frac + "000000")[:6]
-				v, err := strconv.ParseInt(frac, 10, 64)
-				if err != nil {
-					return nil, false
-				}
-				us = v
-			}
-			total := ((h*60+m)*60+sv)*1000000 + us
-			if neg {
-				total = -total
-			}
-			micros += total
-			continue
-		}
-		if i+1 >= len(toks) {
-			return nil, false
-		}
-		n, err := strconv.ParseInt(toks[i], 10, 64)
-		if err != nil {
-			return nil, false
-		}
-		switch strings.TrimSuffix(toks[i+1], "s") {
-		case "year":
-			months += 12 * n
-		case "mon":
-			months += n
-		case "day":
-			days += n
-		default:
-			return nil, false
-		}
-		i++
+	switch s {
+	case "infinity", "-infinity":
+		return iv80CmpValue(iv80ModelValue{int32(months), int32(days), micros}), true
 	}
 	d := new(big.Int).Mul(big.NewInt(months), big.NewInt(30))
 	d.Add(d, big.NewInt(days))
@@ -421,100 +303,112 @@ func iv80ParsePGInterval(s string) (*big.Int, bool) {
 	return d.Add(d, big.NewInt(micros)), true
 }
 
-// iv80Meets: one engine answer reaches the outcome against PostgreSQL's.
-func iv80Meets(outcome, engine, pg, repExpect string) bool {
+// iv80Check is what an outcome check needs beyond the two answers: whether
+// the statement orders its result, and a representative cell's spec.
+type iv80Check struct {
+	ordered bool
+	rep     *iv80RepSpec
+}
+
+// iv80Meets: one engine answer reaches the outcome against PostgreSQL's. The
+// internal-failure exclusion comes first, before any outcome.
+func iv80Meets(outcome, engine, pg string, x iv80Check) bool {
+	if iv80InternalFailure(engine) {
+		return false
+	}
 	kind, arg, _ := strings.Cut(outcome, " ")
-	cls := iv80Classify(engine, pg)
 	switch kind {
 	case "supported":
-		return cls == "agree" || cls == "ok"
+		return iv80SameAnswer(engine, pg, x.ordered)
 	case "pg-error":
 		code, _ := iv80ErrCode(engine)
 		return strings.HasPrefix(engine, "ERR ") && code == arg
 	case "refusal":
-		code, _ := iv80ErrCode(engine)
-		return strings.HasPrefix(engine, "ERR ") && code == "0A000" && cls == "refusal"
+		// 0A000 with the NAMED reason's sentence; PostgreSQL may itself
+		// answer 0A000 for the cell (trunc/week): the refusal is still met.
+		code, msg := iv80ErrCode(engine)
+		r, ok := iv80Reasons[arg]
+		return ok && strings.HasPrefix(engine, "ERR ") && code == "0A000" && r.re.MatchString(msg)
 	case "rep-divergence":
-		if repExpect != "" {
-			return ivNormalize(engine) == repExpect
-		}
-		return iv80RepEqual(engine, pg)
+		return x.rep != nil && iv80SameAnswer(engine, iv80RepAnswer(pg, *x.rep), x.ordered)
 	}
 	return false
 }
 
-// iv80RepEqual: the same declared types and rows, and every value equal to
-// PostgreSQL's or, where both print an interval, SQL-equal to it.
-func iv80RepEqual(engine, pg string) bool {
-	pg, _ = iv80Notice(pg)
-	if !strings.Contains(engine, " | ") || ivTypeNames(ivHeaderTypes(engine)) != iv80PGTypes(pg) {
-		return false
-	}
-	_, eb, _ := strings.Cut(ivNormalize(engine), " | ")
-	_, pb, _ := strings.Cut(iv80PGValue(pg), " | ")
-	er, pr := strings.Split(eb, "; "), strings.Split(pb, "; ")
-	if len(er) != len(pr) {
-		return false
-	}
-	// Rows are compared as a multiset of rows (a representative changes a
-	// row's text, not the count of rows; ORDER BY a representative-free key
-	// keeps the order, so compare in order first, then as sorted).
-	cmpRows := func(a, b []string) bool {
-		for i := range a {
-			fa, fb := strings.Split(a[i], ","), strings.Split(b[i], ",")
-			if len(fa) != len(fb) {
-				return false
-			}
-			for j := range fa {
-				if fa[j] == fb[j] {
-					continue
-				}
-				na, oka := iv80ParsePGInterval(fa[j])
-				nb, okb := iv80ParsePGInterval(fb[j])
-				if !oka || !okb || na.Cmp(nb) != 0 {
-					return false
-				}
-			}
-		}
+// iv80MeetsAny: the outcome or one of its legal alternatives is met.
+func iv80MeetsAny(outcome string, alts []iv80Alternative, engine, pg string, x iv80Check) bool {
+	if iv80Meets(outcome, engine, pg, x) {
 		return true
 	}
-	return cmpRows(er, pr)
+	for _, a := range alts {
+		if iv80Meets(a.outcome, engine, a.ref, x) {
+			return true
+		}
+	}
+	return false
 }
 
 // iv80Manifest is a section's manifest lines.
 func iv80Manifest(t *testing.T, sec iv80Section) []string {
 	pg, _ := iv80ReadTSV(t, iv80Path(sec.stem, "_pg17.tsv"))
 	eng, _ := iv80ReadTSV(t, iv80Path(sec.stem, "_engine.tsv"))
+	door := iv80Door(t)
+	specs := iv80RepSpecs()
 	var out []string
 	for _, c := range sec.cells() {
 		if c.pgOnly || (c.ddl && !c.write) {
 			continue
 		}
 		ans := pg[c.name][0]
+		key := iv80BaseStem(sec.stem) + ":" + c.name
 		outcome := iv80ManifestOutcome(sec.stem, c, ans)
-		stage := iv80StageOf(sec.stem, c.name)
-		if kind, reason, _ := strings.Cut(outcome, " "); kind == "refusal" {
-			stage = iv80RefusalStage(reason)
+		stage := iv80CellStage(c, outcome)
+		x := iv80Check{ordered: iv80Ordered(c.sql)}
+		if s, ok := specs[key]; ok {
+			x.rep = &s
 		}
+		alts := iv80Alternatives[key]
 		now := "met"
-		if strings.HasPrefix(outcome, "refusal intervalstyle") {
-			now = "door"
+		if style := iv80CellStyle(c); style != "" {
+			// Decided at the door: the engine's SET IntervalStyle answer.
+			a, ok := door[style]
+			if !ok || !iv80Meets(outcome, a, "ok", x) {
+				now = "unmet"
+			}
 		} else {
-			expect := iv80RepExpect[iv80BaseStem(sec.stem)+":"+c.name]
 			for _, l := range eng[c.name] {
 				f := strings.SplitN(l, "\t", 3)
-				if len(f) == 3 && !iv80Meets(outcome, iv80Unescape(f[2]), ans, expect) {
+				if len(f) == 3 && !iv80MeetsAny(outcome, alts, iv80Unescape(f[2]), ans, x) {
 					now = "unmet"
 				}
 			}
 		}
-		out = append(out, c.name+"\t"+stage+"\t"+outcome+"\t"+now)
+		alt := "-"
+		if len(alts) > 0 {
+			var as []string
+			for _, a := range alts {
+				as = append(as, a.outcome)
+			}
+			alt = strings.Join(as, " / ")
+		}
+		out = append(out, c.name+"\t"+stage+"\t"+outcome+"\t"+now+"\t"+alt)
 	}
 	return out
 }
 
+// iv80CellStyle is the non-postgres IntervalStyle a cell's settings name
+// ("" when none).
+func iv80CellStyle(c iv80Cell) string {
+	for _, kv := range strings.Split(c.settings, ";") {
+		if k, v, _ := strings.Cut(kv, "="); k == "IntervalStyle" && v != "postgres" {
+			return v
+		}
+	}
+	return ""
+}
+
 func iv80ManifestFile(lines []string, stem string) string {
-	return "# The stage manifest of section " + stem + " (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet / door).\n" +
+	return "# The stage manifest of section " + stem + " (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet; an IntervalStyle cell by the door's SET answer)<TAB>legal alternatives (ADR-0013; ruling 11 pending).\n" +
 		strings.Join(lines, "\n") + "\n"
 }
 
@@ -533,6 +427,9 @@ func TestArc1680bStageManifest(t *testing.T) {
 		for _, l := range lines {
 			f := strings.Split(l, "\t")
 			name, stage, outcome, now := f[0], f[1], f[2], f[3]
+			if strings.HasPrefix(outcome, "refusal ") && stage != "A" {
+				t.Errorf("%s:%s: a refusal owned by %s, not A", sec.stem, name, stage)
+			}
 			if _, ok := iv80Stages[stage]; !ok {
 				t.Errorf("%s:%s: unknown stage %q", sec.stem, name, stage)
 			}
@@ -583,67 +480,5 @@ func TestArc1680bStageManifest(t *testing.T) {
 	sort.Strings(keys)
 	for _, k := range keys {
 		t.Logf("%-40s %d", k, counts[k])
-	}
-}
-
-// TestArc1680bOutcomeChecks: the four outcome checks accept what they must
-// and reject an internal store-guard error, a panic, a wrong SQLSTATE and a
-// representative that is not SQL-equal.
-func TestArc1680bOutcomeChecks(t *testing.T) {
-	pgIv := "a:text(25) | 1 mon"
-	pgErr := "ERR 22008: interval out of range"
-	for _, c := range []struct {
-		outcome, engine, pg string
-		want                bool
-	}{
-		{"supported", "a:TEXT | 1 mon", pgIv, true},
-		{"supported", "a:TEXT | 30 days", pgIv, false},
-		{"supported", "a:INT64 | 1 mon", pgIv, false},
-		{"supported", "ERR 0A000: refused", pgIv, false},
-		{"pg-error 22008", "ERR 22008: interval out of range", pgErr, true},
-		{"pg-error 22008", "ERR 0A000: interval values cannot yet be used", pgErr, false},
-		{"pg-error 22008", "ERR 22003: out of range", pgErr, false},
-		{"pg-error 22008", "a:TEXT | 1 mon", pgErr, false},
-		{"refusal typmod", "ERR 0A000: an interval typmod is not supported", pgIv, true},
-		{"refusal typmod", "ERR 42601: syntax error", pgIv, false},
-		{"refusal typmod", "ERR : batch: cannot store expr.IntervalValue into STRING vector (#361 silent-write guard)", pgIv, false},
-		{"refusal typmod", "PANIC runtime error", pgIv, false},
-		{"refusal typmod", "ERR XX000: internal", pgIv, false},
-		{"rep-divergence", "a:TEXT | 30 days", pgIv, true},
-		{"rep-divergence", "a:TEXT | 720:00:00", pgIv, true},
-		{"rep-divergence", "a:TEXT | 31 days", pgIv, false},
-		{"rep-divergence", "a:TEXT | 30 days; 30 days", pgIv, false},
-		{"rep-divergence", "a:INT64 | 30 days", pgIv, false},
-		{"rep-divergence", "a:TEXT | -1 days +24:00:00", "a:text(25) | 00:00:00", true},
-		{"rep-divergence", "a:TEXT | infinity", "a:text(25) | 2147483647 mons 2147483647 days 2562047788:00:54.775807", true},
-	} {
-		if got := iv80Meets(c.outcome, c.engine, c.pg, ""); got != c.want {
-			t.Errorf("iv80Meets(%q, %q, %q) = %v, want %v", c.outcome, c.engine, c.pg, got, c.want)
-		}
-	}
-	if !iv80Meets("rep-divergence", "t:TIMESTAMP | 2024-03-01 00:00:00", "t:timestamp(1114) | 2024-02-29 00:00:00", "t | 2024-03-01 00:00:00") {
-		t.Errorf("an explicit representative expectation is not honoured")
-	}
-	if iv80Meets("rep-divergence", "t:TIMESTAMP | 2024-02-29 00:00:00", "t:timestamp(1114) | 2024-02-29 00:00:00", "t | 2024-03-01 00:00:00") {
-		t.Errorf("PostgreSQL's plan-dependent member passed where the rule's member is expected")
-	}
-	// The baseline classes keep an intentional refusal apart from the rest.
-	for engine, want := range map[string]string{
-		"ERR 0A000: interval values cannot yet be used as a query result column":                    "refusal",
-		"ERR : batch: cannot store expr.IntervalValue into STRING vector (#361 silent-write guard)": "store-guard",
-		"ERR : something without a code":   "internal",
-		"PANIC boom":                       "panic",
-		"ERR 22007: invalid input":         "wrong-sqlstate",
-		"ERR 22008: interval out of range": "pg-error",
-	} {
-		if got := iv80Classify(engine, pgErr); got != want {
-			t.Errorf("iv80Classify(%q) = %q, want %q", engine, got, want)
-		}
-	}
-	if got := iv80Classify("ERR 42601: syntax error", pgIv); got != "error" {
-		t.Errorf("a coded non-0A000 error where PostgreSQL answered: %q, want error", got)
-	}
-	if got := iv80Classify("a:TEXT | 1 mon", pgErr); got != "answers-pg-error" {
-		t.Errorf("an answer where PostgreSQL raised an error: %q, want answers-pg-error", got)
 	}
 }

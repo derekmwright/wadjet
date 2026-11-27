@@ -18,3 +18,9 @@ w/ctasNoDataDerived	-	write	CREATE TABLE iv80_wc4 AS SELECT v FROM (SELECT CAST(
 w/ctasZero	-	write	CREATE TABLE iv80_wc5 AS SELECT CAST(s AS INTERVAL) AS v FROM iv80_r WHERE false
 w/ctasText	-	write	CREATE TABLE iv80_wc6 AS SELECT CAST(CAST(s AS INTERVAL) AS TEXT) AS v FROM iv80_r
 w/ctasTsDiffNoData	-	write	CREATE TABLE iv80_wc7 AS SELECT ts - ts AS v FROM iv80_rt WITH NO DATA
+w/neg/projection	-	write	INSERT INTO iv80_wt SELECT id + 2000, v FROM (SELECT id, w AS v FROM (SELECT id, CAST(s AS INTERVAL) AS w FROM iv80_r WHERE g <> 3) p0) p
+w/neg/derived	-	write	INSERT INTO iv80_wt SELECT id + 2000, v FROM (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) p
+w/neg/cte	-	write	INSERT INTO iv80_wt WITH p AS (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) SELECT id + 2000, v FROM p
+w/neg/subquery	-	write	INSERT INTO iv80_wt SELECT id + 2000, v FROM (SELECT a.id, (SELECT CAST(s AS INTERVAL) FROM iv80_r b WHERE b.id = a.id) AS v FROM iv80_r a WHERE a.g <> 3) p
+w/neg/setop	-	write	INSERT INTO iv80_wt SELECT id + 2000, v FROM (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g IN (1, 2) UNION ALL SELECT id, CAST(s AS INTERVAL) FROM iv80_r WHERE g IN (4, 5)) p
+w/neg/join	-	write	INSERT INTO iv80_wt SELECT id + 2000, v FROM (SELECT a.id, b.v FROM iv80_r a JOIN (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) b ON a.id = b.id) p

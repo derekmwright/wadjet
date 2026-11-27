@@ -20,3 +20,9 @@ w/ctasNoDataDerived	ok
 w/ctasZero	ok
 w/ctasText	ok
 w/ctasTsDiffNoData	ok
+w/neg/projection	ok
+w/neg/derived	ok
+w/neg/cte	ok
+w/neg/subquery	ok
+w/neg/setop	ok
+w/neg/join	ok

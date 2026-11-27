@@ -1,6 +1,6 @@
-# The stage manifest of section 09_model (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet / door).
-model/fields	C	supported	unmet
-model/order	D	supported	unmet
-model/groups	D	supported	unmet
-model/groupsSort	D	supported	unmet
-model/hash	A	refusal postgresql-internal-function	met
+# The stage manifest of section 09_model (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet; an IntervalStyle cell by the door's SET answer)<TAB>legal alternatives (ADR-0013; ruling 11 pending).
+model/fields	C	supported	unmet	-
+model/order	D	supported	unmet	-
+model/groups	D	supported	unmet	-
+model/groupsSort	D	supported	unmet	-
+model/hash	A	refusal postgresql-internal-function	met	-

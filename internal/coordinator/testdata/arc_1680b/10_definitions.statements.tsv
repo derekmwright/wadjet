@@ -110,6 +110,11 @@ age/negInfNegInf	-	sql	SELECT age(TIMESTAMP '-infinity', TIMESTAMP '-infinity') 
 age/bc	-	sql	SELECT age(TIMESTAMP '0001-03-01 BC', TIMESTAMP '0001-01-31') AS a, age(TIMESTAMP '0001-01-01', TIMESTAMP '0001-12-31 BC') AS b
 age/date	-	sql	SELECT age(DATE '2024-03-01', DATE '2024-01-31') AS a
 age/dateNY	TimeZone=America/New_York	sql	SELECT age(DATE '2024-03-11', DATE '2024-03-09') AS a
+age/dateUTC	TimeZone=UTC	sql	SELECT age(DATE '2024-03-11', DATE '2024-03-09') AS a
+age/dateMonthNY	TimeZone=America/New_York	sql	SELECT age(DATE '2024-03-01', DATE '2024-01-31') AS a
+age/dateGapUTC	TimeZone=UTC	sql	SELECT age(DATE '2024-03-11', DATE '2024-03-10') AS a
+age/dateGapHavana	TimeZone=America/Havana	sql	SELECT age(DATE '2024-03-11', DATE '2024-03-10') AS a
+explain/age/date	-	pg-only	EXPLAIN (VERBOSE, COSTS OFF) SELECT age(DATE '2024-03-01', DATE '2024-01-31')
 age/tz/UTC/fallBack	TimeZone=UTC	sql	SELECT age(TIMESTAMPTZ '2024-11-03 12:00:00-05', TIMESTAMPTZ '2024-11-02 12:00:00-04') AS a, age(TIMESTAMPTZ '2024-11-02 12:00:00-04', TIMESTAMPTZ '2024-11-03 12:00:00-05') AS b
 age/tz/America/New_York/fallBack	TimeZone=America/New_York	sql	SELECT age(TIMESTAMPTZ '2024-11-03 12:00:00-05', TIMESTAMPTZ '2024-11-02 12:00:00-04') AS a, age(TIMESTAMPTZ '2024-11-02 12:00:00-04', TIMESTAMPTZ '2024-11-03 12:00:00-05') AS b
 types/datePlusInt	-	sql	SELECT DATE '2024-01-31' + 1 AS a

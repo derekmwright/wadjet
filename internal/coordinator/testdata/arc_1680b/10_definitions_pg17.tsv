@@ -112,6 +112,11 @@ age/negInfNegInf	ERR 22008: interval out of range
 age/bc	a:interval(1186),b:interval(1186) | -10 mons -30 days,1 day
 age/date	a:interval(1186) | 1 mon 1 day
 age/dateNY	a:interval(1186) | 2 days
+age/dateUTC	a:interval(1186) | 2 days
+age/dateMonthNY	a:interval(1186) | 1 mon 1 day
+age/dateGapUTC	a:interval(1186) | 1 day
+age/dateGapHavana	a:interval(1186) | 23:00:00
+explain/age/date	QUERY PLAN:text(25) | Result;   Output: age(('2024-03-01'::date)::timestamp with time zone, ('2024-01-31'::date)::timestamp with time zone)
 age/tz/UTC/fallBack	a:interval(1186),b:interval(1186) | 1 day 01:00:00,-1 days -01:00:00
 age/tz/America/New_York/fallBack	a:interval(1186),b:interval(1186) | 1 day,-1 days
 types/datePlusInt	a:date(1082) | 2024-02-01

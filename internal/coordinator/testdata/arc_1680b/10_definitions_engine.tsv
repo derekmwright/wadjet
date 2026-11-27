@@ -111,6 +111,11 @@ age/negInfNegInf	*	wrong-sqlstate	ERR 42883: unknown function: age (did you mean
 age/bc	*	error	ERR 42883: unknown function: age (did you mean abs?)
 age/date	*	error	ERR 42883: unknown function: age (did you mean abs?)
 age/dateNY	*	error	ERR 42883: unknown function: age (did you mean abs?)
+age/dateUTC	*	error	ERR 42883: unknown function: age (did you mean abs?)
+age/dateMonthNY	*	error	ERR 42883: unknown function: age (did you mean abs?)
+age/dateGapUTC	*	error	ERR 42883: unknown function: age (did you mean abs?)
+age/dateGapHavana	*	error	ERR 42883: unknown function: age (did you mean abs?)
+explain/age/date	*	pg-only	-
 age/tz/UTC/fallBack	*	error	ERR 42883: unknown function: age (did you mean abs?)
 age/tz/America/New_York/fallBack	*	error	ERR 42883: unknown function: age (did you mean abs?)
 types/datePlusInt	*	agree	a:DATE | 2024-02-01

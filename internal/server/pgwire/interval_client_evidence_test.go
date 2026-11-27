@@ -162,7 +162,36 @@ func ceSteps() []ceStep {
 		ceSimple("intervalstyle/text", "SELECT CAST(INTERVAL '1 day' AS TEXT) AS t"),
 		ceSimple("intervalstyle/reset", "RESET IntervalStyle"),
 		ceSimple("intervalstyle/afterReset", "SELECT CAST(INTERVAL '1 day' AS TEXT) AS t"),
+		// The door assertions of the stage manifest's IntervalStyle cells
+		// (#1680b round 3): the corpus applies a cell's IntervalStyle on the
+		// reference only, so the engine side of such a cell is decided here,
+		// by what SET answers at the door (the error's sentence kept, so the
+		// manifest can check the named reason).
+		ceSetStyle("door/IntervalStyle/postgres_verbose", "postgres_verbose"),
+		ceSetStyle("door/IntervalStyle/sql_standard", "sql_standard"),
+		ceSetStyle("door/IntervalStyle/iso_8601", "iso_8601"),
+		ceSetStyle("door/IntervalStyle/postgres", "postgres"),
 	}
+}
+
+// ceSetStyle is SET IntervalStyle to style, answered with the error's
+// SQLSTATE and sentence, then RESET.
+func ceSetStyle(name, style string) ceStep {
+	return ceStep{name, func(ctx context.Context, c *pgconn.PgConn) string {
+		_, err := c.Exec(ctx, "SET IntervalStyle = '"+style+"'").ReadAll()
+		out := "ok"
+		var pe *pgconn.PgError
+		switch {
+		case errors.As(err, &pe):
+			out = "ERR " + pe.Code + ": " + pe.Message
+		case err != nil:
+			out = "ERR : " + err.Error()
+		}
+		if _, err := c.Exec(ctx, "RESET IntervalStyle").ReadAll(); err != nil {
+			return out + " (RESET " + ceErr(err) + ")"
+		}
+		return out
+	}}
 }
 
 // ceTranscript runs every step on one connection (fixture first).

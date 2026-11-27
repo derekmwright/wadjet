@@ -1,134 +1,176 @@
-# The stage manifest of section 11_relational (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet / door).
-rt/mul	C	supported	unmet
-rt/div	C	supported	unmet
-rt/neg	C	supported	unmet
-rt/plus	C	supported	unmet
-rt/justify	C	supported	unmet
-rt/cmp	C	supported	unmet
-rt/lt	C	supported	unmet
-rt/tsPlus	C	supported	unmet
-rt/tsMinus	C	supported	unmet
-rt/isfinite	C	supported	unmet
-rt/extractDay	A	refusal numeric-infinity	met
-rt/extractEpoch	A	refusal numeric-infinity	met
-rt/datePart	C	supported	unmet
-rt/text	C	supported	unmet
-rt/bare	F	refusal bare-interval-result	met
-opaque/apply	C	supported	unmet
-opaque/compare	C	supported	unmet
-opaque/text	C	supported	unmet
-opaque/arith	C	supported	unmet
-ord/text	D	supported	unmet
-ord/textDescNullsLast	D	supported	unmet
-ord/topN	D	supported	unmet
-filt/text	C	supported	unmet
-grp/text/default	D	rep-divergence	unmet
-grp/derived/default	D	rep-divergence	unmet
-distinct/text/default	D	rep-divergence	unmet
-grp/text/sortagg	D	rep-divergence	unmet
-grp/derived/sortagg	D	rep-divergence	unmet
-distinct/text/sortagg	D	rep-divergence	unmet
-tuple/distinct/default	D	rep-divergence	unmet
-tuple/distinctRev/default	D	rep-divergence	unmet
-tuple/group/default	D	rep-divergence	unmet
-tuple/distinct/sortagg	D	rep-divergence	unmet
-tuple/distinctRev/sortagg	D	rep-divergence	unmet
-tuple/group/sortagg	D	rep-divergence	unmet
-tuple/table/default	D	rep-divergence	unmet
-tuple/table/sortagg	D	rep-divergence	unmet
-mixkey/group/default	D	rep-divergence	unmet
-mixkey/distinct/default	D	rep-divergence	unmet
-mixkey/group/sortagg	D	rep-divergence	unmet
-mixkey/distinct/sortagg	D	rep-divergence	unmet
-ordagg/minMax	E	refusal ordered-aggregate	unmet
-ordagg/minMaxRev	E	refusal ordered-aggregate	unmet
-ordagg/unordered	E	rep-divergence	unmet
-ordagg/sumOrdered	E	refusal ordered-aggregate	unmet
-ordagg/percentile	E	refusal ordered-aggregate	unmet
-distagg/sumAvg/default	E	refusal distinct-aggregate	met
-distagg/sumAvgRev/default	E	refusal distinct-aggregate	met
-distagg/sumAvg/sortagg	E	refusal distinct-aggregate	met
-distagg/sumAvgRev/sortagg	E	refusal distinct-aggregate	met
-distagg/countRows	E	supported	unmet
-reparith/default	D	rep-divergence	unmet
-reparithRev/default	D	rep-divergence	unmet
-reparith/sortagg	D	rep-divergence	unmet
-reparithRev/sortagg	D	rep-divergence	unmet
-lag/tsDiff	E	supported	unmet
-lag/tsDiffBare	F	refusal bare-interval-result	met
-lag/tsDiffCompare	E	supported	unmet
-tsdate/text	C	supported	unmet
-tsdate/bare	F	refusal bare-interval-result	unmet
-tsdate/compare	C	supported	unmet
-set/intersect/smallBig/default	D	rep-divergence	unmet
-set/intersect/bigSmall/default	D	rep-divergence	unmet
-set/intersectAll/smallBig/default	D	rep-divergence	unmet
-set/intersectAll/bigSmall/default	D	rep-divergence	unmet
-set/intersectAll/dupRight/default	D	rep-divergence	unmet
-set/exceptAll/dupRight1/default	D	rep-divergence	unmet
-set/except/bigSmall/default	D	rep-divergence	unmet
-set/intersect/smallBig/sortagg	D	rep-divergence	unmet
-set/intersect/bigSmall/sortagg	D	rep-divergence	unmet
-set/intersectAll/smallBig/sortagg	D	rep-divergence	unmet
-set/intersectAll/bigSmall/sortagg	D	rep-divergence	unmet
-set/intersectAll/dupRight/sortagg	D	rep-divergence	unmet
-set/exceptAll/dupRight1/sortagg	D	rep-divergence	unmet
-set/except/bigSmall/sortagg	D	rep-divergence	unmet
-gsets/sets	D	rep-divergence	unmet
-gsets/rollup	D	rep-divergence	unmet
-sub/scalarEq	D	supported	unmet
-sub/scalarMax	D	supported	unmet
-sub/in	D	supported	unmet
-sub/notIn	D	supported	unmet
-sub/any	D	supported	unmet
-sub/all	D	supported	unmet
-sub/correlatedCount	D	supported	unmet
-sub/correlatedMin	D	rep-divergence	unmet
-sub/exists	D	supported	unmet
-sub/scalarPublish	F	refusal bare-interval-result	met
-sub/scalarText	D	supported	unmet
-cte/materializedJoin	D	supported	unmet
-cte/text	D	supported	unmet
-cte/twice	D	supported	unmet
-oj/leftText	D	supported	unmet
-oj/leftDerived	D	supported	unmet
-oj/fullKey	D	supported	unmet
-empty/text	D	supported	met
-empty/bare	F	refusal bare-interval-result	met
-empty/agg	E	supported	unmet
-empty/group	D	supported	unmet
-null/agg	E	supported	unmet
-null/group	D	supported	unmet
-null/order	D	supported	unmet
-ov/winForward	E	pg-error 22008	unmet
-ov/winBackward	E	supported	unmet
-ov/aggAsc	E	refusal ordered-aggregate	unmet
-ov/aggDesc	E	refusal ordered-aggregate	unmet
-ov/aggUnordered	E	pg-error 22008	unmet
-ov/timeForward	E	supported	unmet
-ov/timeBackward	E	supported	unmet
-pm/null	E	rep-divergence	unmet
-pm/posInf	E	rep-divergence	unmet
-pm/negInf	E	rep-divergence	unmet
-pm/bothInf	E	pg-error 22008	unmet
-pm/nullOnly	E	supported	unmet
-pm/posInfTwice	E	rep-divergence	unmet
-pm/groups	E	rep-divergence	unmet
-sw/rows2	E	supported	unmet
-sw/rows3	E	supported	unmet
-sw/following	E	supported	unmet
-sw/all	E	pg-error 22008	unmet
-frame/monthPreceding	E	refusal range-offset-frame	unmet
-frame/monthFollowing	E	refusal range-offset-frame	unmet
-frame/desc	E	refusal range-offset-frame	unmet
-frame/descNullsLast	E	refusal range-offset-frame	unmet
-frame/nullOffset	E	refusal range-offset-frame	unmet
-frame/zeroNormalized	E	refusal range-offset-frame	unmet
-frame/mixedFields	E	refusal range-offset-frame	unmet
-frame/infOffset	E	refusal range-offset-frame	unmet
-frame/infFollowing	E	refusal range-offset-frame	unmet
-frame/negInfOffset	E	refusal range-offset-frame	unmet
-frame/negOffset	E	refusal range-offset-frame	unmet
-frame/tsInfRowsShift	E	supported	unmet
-frame/intervalOrderDesc	E	refusal range-offset-frame	unmet
-frame/intervalOrderAsc	E	refusal range-offset-frame	unmet
+# The stage manifest of section 11_relational (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet; an IntervalStyle cell by the door's SET answer)<TAB>legal alternatives (ADR-0013; ruling 11 pending).
+rt/mul	C	supported	unmet	-
+rt/div	C	supported	unmet	-
+rt/neg	C	supported	unmet	-
+rt/plus	C	supported	unmet	-
+rt/justify	C	supported	unmet	-
+rt/cmp	C	supported	unmet	-
+rt/lt	C	supported	unmet	-
+rt/tsPlus	C	supported	unmet	-
+rt/tsMinus	C	supported	unmet	-
+rt/isfinite	C	supported	unmet	-
+rt/extractDay	A	refusal numeric-infinity	unmet	-
+rt/extractEpoch	A	refusal numeric-infinity	unmet	-
+rt/datePart	C	supported	unmet	-
+rt/text	C	supported	unmet	-
+rt/bare	A	refusal bare-interval-result	met	-
+opaque/apply	C	supported	unmet	-
+opaque/compare	C	supported	unmet	-
+opaque/text	C	supported	unmet	-
+opaque/arith	C	supported	unmet	-
+ord/text	D	supported	unmet	-
+ord/textDescNullsLast	D	supported	unmet	-
+ord/topN	D	supported	unmet	-
+filt/text	C	supported	unmet	-
+grp/text/default	D	rep-divergence	unmet	-
+grp/derived/default	D	rep-divergence	unmet	-
+distinct/text/default	D	rep-divergence	unmet	-
+grp/text/sortagg	D	rep-divergence	unmet	-
+grp/derived/sortagg	D	rep-divergence	unmet	-
+distinct/text/sortagg	D	rep-divergence	unmet	-
+tuple/distinct/default	D	rep-divergence	unmet	-
+tuple/distinctRev/default	D	rep-divergence	unmet	-
+tuple/group/default	D	rep-divergence	unmet	-
+tuple/distinct/sortagg	D	rep-divergence	unmet	-
+tuple/distinctRev/sortagg	D	rep-divergence	unmet	-
+tuple/group/sortagg	D	rep-divergence	unmet	-
+tuple/table/default	D	rep-divergence	unmet	-
+tuple/table/sortagg	D	rep-divergence	unmet	-
+mixkey/group/default	D	rep-divergence	unmet	-
+mixkey/distinct/default	D	rep-divergence	unmet	-
+mixkey/group/sortagg	D	rep-divergence	unmet	-
+mixkey/distinct/sortagg	D	rep-divergence	unmet	-
+ordagg/minMax	A	refusal ordered-aggregate	unmet	-
+ordagg/minMaxRev	A	refusal ordered-aggregate	unmet	-
+ordagg/unordered	E	rep-divergence	unmet	-
+ordagg/sumOrdered	A	refusal ordered-aggregate	unmet	-
+ordagg/percentile	A	refusal ordered-aggregate	unmet	-
+distagg/sumAvg/default	A	refusal distinct-aggregate	unmet	-
+distagg/sumAvgRev/default	A	refusal distinct-aggregate	unmet	-
+distagg/sumAvg/sortagg	A	refusal distinct-aggregate	unmet	-
+distagg/sumAvgRev/sortagg	A	refusal distinct-aggregate	unmet	-
+distagg/countRows	E	supported	unmet	-
+reparith/default	D	rep-divergence	unmet	-
+reparithRev/default	D	rep-divergence	unmet	-
+reparith/sortagg	D	rep-divergence	unmet	-
+reparithRev/sortagg	D	rep-divergence	unmet	-
+lag/tsDiff	C	supported	unmet	-
+lag/tsDiffBare	A	refusal bare-interval-result	met	-
+lag/tsDiffCompare	D	supported	unmet	-
+tsdate/text	C	supported	unmet	-
+tsdate/bare	A	refusal bare-interval-result	unmet	-
+tsdate/compare	C	supported	unmet	-
+set/intersect/smallBig/default	D	rep-divergence	unmet	-
+set/intersect/bigSmall/default	D	rep-divergence	unmet	-
+set/intersectAll/smallBig/default	D	rep-divergence	unmet	-
+set/intersectAll/bigSmall/default	D	rep-divergence	unmet	-
+set/intersectAll/dupRight/default	D	rep-divergence	unmet	-
+set/exceptAll/dupRight1/default	D	rep-divergence	unmet	-
+set/except/bigSmall/default	D	rep-divergence	unmet	-
+set/intersect/smallBig/sortagg	D	rep-divergence	unmet	-
+set/intersect/bigSmall/sortagg	D	rep-divergence	unmet	-
+set/intersectAll/smallBig/sortagg	D	rep-divergence	unmet	-
+set/intersectAll/bigSmall/sortagg	D	rep-divergence	unmet	-
+set/intersectAll/dupRight/sortagg	D	rep-divergence	unmet	-
+set/exceptAll/dupRight1/sortagg	D	rep-divergence	unmet	-
+set/except/bigSmall/sortagg	D	rep-divergence	unmet	-
+gsets/sets	D	rep-divergence	unmet	-
+gsets/rollup	D	rep-divergence	unmet	-
+sub/scalarEq	D	supported	unmet	-
+sub/scalarMax	E	supported	unmet	-
+sub/in	D	supported	unmet	-
+sub/notIn	D	supported	unmet	-
+sub/any	D	supported	unmet	-
+sub/all	D	supported	unmet	-
+sub/correlatedCount	D	supported	unmet	-
+sub/correlatedMin	E	rep-divergence	unmet	-
+sub/exists	D	supported	unmet	-
+sub/scalarPublish	A	refusal bare-interval-result	met	-
+sub/scalarText	D	supported	unmet	-
+cte/materializedJoin	D	supported	unmet	-
+cte/text	D	supported	unmet	-
+cte/twice	D	supported	unmet	-
+oj/leftText	C	supported	unmet	-
+oj/leftDerived	D	supported	unmet	-
+oj/fullKey	D	supported	unmet	-
+empty/text	C	supported	met	-
+empty/bare	A	refusal bare-interval-result	met	-
+empty/agg	E	supported	unmet	-
+empty/group	D	supported	unmet	-
+null/agg	E	supported	unmet	-
+null/group	D	supported	unmet	-
+null/order	D	supported	unmet	-
+ov/winForward	E	pg-error 22008	unmet	-
+ov/winBackward	E	supported	unmet	-
+ov/aggAsc	A	refusal ordered-aggregate	unmet	-
+ov/aggDesc	A	refusal ordered-aggregate	unmet	-
+ov/aggUnordered	E	pg-error 22008	unmet	supported
+ov/timeForward	E	supported	unmet	-
+ov/timeBackward	E	supported	unmet	-
+pm/null	E	rep-divergence	unmet	-
+pm/posInf	E	rep-divergence	unmet	-
+pm/negInf	E	rep-divergence	unmet	-
+pm/bothInf	E	pg-error 22008	unmet	-
+pm/nullOnly	E	supported	unmet	-
+pm/posInfTwice	E	rep-divergence	unmet	-
+pm/groups	E	rep-divergence	unmet	-
+sw/rows2	E	supported	unmet	-
+sw/rows3	E	supported	unmet	-
+sw/following	E	supported	unmet	-
+sw/all	E	pg-error 22008	unmet	-
+frame/monthPreceding	A	refusal range-offset-frame	unmet	-
+frame/monthFollowing	A	refusal range-offset-frame	unmet	-
+frame/desc	A	refusal range-offset-frame	unmet	-
+frame/descNullsLast	A	refusal range-offset-frame	unmet	-
+frame/nullOffset	A	refusal range-offset-frame	unmet	-
+frame/zeroNormalized	A	refusal range-offset-frame	unmet	-
+frame/mixedFields	A	refusal range-offset-frame	unmet	-
+frame/infOffset	A	refusal range-offset-frame	unmet	-
+frame/infFollowing	A	refusal range-offset-frame	unmet	-
+frame/negInfOffset	A	refusal range-offset-frame	unmet	-
+frame/negOffset	A	refusal range-offset-frame	unmet	-
+frame/tsInfRowsShift	C	supported	unmet	-
+frame/intervalOrderDesc	A	refusal range-offset-frame	unmet	-
+frame/intervalOrderAsc	A	refusal range-offset-frame	unmet	-
+neg/projection/toChar	A	refusal function-to_char	unmet	-
+neg/projection/dateTrunc	A	refusal function-date_trunc	unmet	-
+neg/projection/castTime	A	refusal time-type	unmet	-
+neg/projection/orderedAgg	A	refusal ordered-aggregate	unmet	-
+neg/projection/distinctSum	A	refusal distinct-aggregate	unmet	-
+neg/projection/arrayAgg	A	refusal container	unmet	-
+neg/projection/arrayCtor	A	refusal container	unmet	-
+neg/derived/toChar	A	refusal function-to_char	unmet	-
+neg/derived/dateTrunc	A	refusal function-date_trunc	unmet	-
+neg/derived/castTime	A	refusal time-type	unmet	-
+neg/derived/orderedAgg	A	refusal ordered-aggregate	unmet	-
+neg/derived/distinctSum	A	refusal distinct-aggregate	unmet	-
+neg/derived/arrayAgg	A	refusal container	unmet	-
+neg/derived/arrayCtor	A	refusal container	unmet	-
+neg/cte/toChar	A	refusal function-to_char	unmet	-
+neg/cte/dateTrunc	A	refusal function-date_trunc	unmet	-
+neg/cte/castTime	A	refusal time-type	unmet	-
+neg/cte/orderedAgg	A	refusal ordered-aggregate	unmet	-
+neg/cte/distinctSum	A	refusal distinct-aggregate	unmet	-
+neg/cte/arrayAgg	A	refusal container	unmet	-
+neg/cte/arrayCtor	A	refusal container	unmet	-
+neg/subquery/toChar	A	refusal function-to_char	unmet	-
+neg/subquery/dateTrunc	A	refusal function-date_trunc	unmet	-
+neg/subquery/castTime	A	refusal time-type	unmet	-
+neg/subquery/orderedAgg	A	refusal ordered-aggregate	unmet	-
+neg/subquery/distinctSum	A	refusal distinct-aggregate	unmet	-
+neg/subquery/arrayAgg	A	refusal container	unmet	-
+neg/subquery/arrayCtor	A	refusal container	unmet	-
+neg/setop/toChar	A	refusal function-to_char	unmet	-
+neg/setop/dateTrunc	A	refusal function-date_trunc	unmet	-
+neg/setop/castTime	A	refusal time-type	unmet	-
+neg/setop/orderedAgg	A	refusal ordered-aggregate	unmet	-
+neg/setop/distinctSum	A	refusal distinct-aggregate	unmet	-
+neg/setop/arrayAgg	A	refusal container	unmet	-
+neg/setop/arrayCtor	A	refusal container	unmet	-
+neg/join/toChar	A	refusal function-to_char	unmet	-
+neg/join/dateTrunc	A	refusal function-date_trunc	unmet	-
+neg/join/castTime	A	refusal time-type	unmet	-
+neg/join/orderedAgg	A	refusal ordered-aggregate	unmet	-
+neg/join/distinctSum	A	refusal distinct-aggregate	unmet	-
+neg/join/arrayAgg	A	refusal container	unmet	-
+neg/join/arrayCtor	A	refusal container	unmet	-

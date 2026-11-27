@@ -163,3 +163,45 @@ frame/negOffset	*	wrong-sqlstate	ERR 42601: syntax error at or near "INTERVAL"
 frame/tsInfRowsShift	*	refusal	ERR 0A000: interval unit "mon" is not supported; use YEAR, MONTH, WEEK, DAY, HOUR, MINUTE or SECOND
 frame/intervalOrderDesc	*	error	ERR 42601: syntax error at or near "INTERVAL"
 frame/intervalOrderAsc	*	error	ERR 42601: syntax error at or near "INTERVAL"
+neg/projection/toChar	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/projection/dateTrunc	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/projection/castTime	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/projection/orderedAgg	*	error	ERR 42601: syntax error at or near "WITHIN"
+neg/projection/distinctSum	*	error	ERR 42883: function sum(text) does not exist
+neg/projection/arrayAgg	*	error	ERR 42601: syntax error at or near "ORDER"
+neg/projection/arrayCtor	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/derived/toChar	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/derived/dateTrunc	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/derived/castTime	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/derived/orderedAgg	*	error	ERR 42601: syntax error at or near "WITHIN"
+neg/derived/distinctSum	*	error	ERR 42883: function sum(text) does not exist
+neg/derived/arrayAgg	*	error	ERR 42601: syntax error at or near "ORDER"
+neg/derived/arrayCtor	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/cte/toChar	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/cte/dateTrunc	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/cte/castTime	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/cte/orderedAgg	*	error	ERR 42601: syntax error at or near "WITHIN"
+neg/cte/distinctSum	*	error	ERR 42883: function sum(text) does not exist
+neg/cte/arrayAgg	*	error	ERR 42601: syntax error at or near "ORDER"
+neg/cte/arrayCtor	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/subquery/toChar	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/subquery/dateTrunc	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/subquery/castTime	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/subquery/orderedAgg	*	error	ERR 42601: syntax error at or near "WITHIN"
+neg/subquery/distinctSum	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/subquery/arrayAgg	*	error	ERR 42601: syntax error at or near "ORDER"
+neg/subquery/arrayCtor	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/setop/toChar	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/setop/dateTrunc	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/setop/castTime	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/setop/orderedAgg	*	error	ERR 42601: syntax error at or near "WITHIN"
+neg/setop/distinctSum	*	error	ERR 42883: function sum(text) does not exist
+neg/setop/arrayAgg	*	error	ERR 42601: syntax error at or near "ORDER"
+neg/setop/arrayCtor	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/join/toChar	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/join/dateTrunc	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/join/castTime	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration
+neg/join/orderedAgg	*	error	ERR 42601: syntax error at or near "WITHIN"
+neg/join/distinctSum	*	error	ERR 42883: function sum(text) does not exist
+neg/join/arrayAgg	*	error	ERR 42601: syntax error at or near "ORDER"
+neg/join/arrayCtor	*	refusal	ERR 0A000: interval values cannot yet be used as a query result column: compare or apply an interval inline, cast it to text explicitly for display (CAST(... AS TEXT)), or use DURATION for a stored nanosecond duration

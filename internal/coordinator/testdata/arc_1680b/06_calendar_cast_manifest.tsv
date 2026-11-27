@@ -1,17 +1,17 @@
-# The stage manifest of section 06_calendar_cast (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet / door).
-tz/UTC/minus~text	A	refusal timestamptz	met
-tz/UTC/age~text	A	refusal timestamptz	unmet
-tz/America/New_York/minus~text	A	refusal timestamptz	met
-tz/America/New_York/age~text	A	refusal timestamptz	unmet
-time/minusTime~text	A	refusal time-type	unmet
-tsdiff/days~text	C	supported	unmet
-tsdiff/time~text	C	supported	unmet
-tsdiff/over24~text	C	supported	unmet
-tsdiff/neg~text	C	supported	unmet
-tsdiff/year~text	C	supported	unmet
-tsdiff/us~text	A	refusal timestamp-millisecond-carrier	met
-tsdiff/mixedNeg~text	C	supported	unmet
-tsdiff/inf~text	C	supported	unmet
-age/basic~text	C	supported	unmet
-age/time~text	A	refusal timestamp-millisecond-carrier	unmet
-rows/diff~text	C	supported	unmet
+# The stage manifest of section 06_calendar_cast (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet; an IntervalStyle cell by the door's SET answer)<TAB>legal alternatives (ADR-0013; ruling 11 pending).
+tz/UTC/minus~text	A	refusal timestamptz	unmet	-
+tz/UTC/age~text	A	refusal timestamptz	unmet	-
+tz/America/New_York/minus~text	A	refusal timestamptz	unmet	-
+tz/America/New_York/age~text	A	refusal timestamptz	unmet	-
+time/minusTime~text	A	refusal time-type	unmet	-
+tsdiff/days~text	C	supported	unmet	-
+tsdiff/time~text	C	supported	unmet	-
+tsdiff/over24~text	C	supported	unmet	-
+tsdiff/neg~text	C	supported	unmet	-
+tsdiff/year~text	C	supported	unmet	-
+tsdiff/us~text	A	refusal timestamp-millisecond-carrier	unmet	-
+tsdiff/mixedNeg~text	C	supported	unmet	-
+tsdiff/inf~text	C	supported	unmet	-
+age/basic~text	C	supported	unmet	-
+age/time~text	A	refusal timestamp-millisecond-carrier	unmet	-
+rows/diff~text	C	supported	unmet	-

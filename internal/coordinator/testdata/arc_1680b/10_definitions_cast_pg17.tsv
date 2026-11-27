@@ -76,6 +76,10 @@ age/infOpposed~text	a:text(25),b:text(25) | infinity,-infinity
 age/bc~text	a:text(25),b:text(25) | -10 mons -30 days,1 day
 age/date~text	a:text(25) | 1 mon 1 day
 age/dateNY~text	a:text(25) | 2 days
+age/dateUTC~text	a:text(25) | 2 days
+age/dateMonthNY~text	a:text(25) | 1 mon 1 day
+age/dateGapUTC~text	a:text(25) | 1 day
+age/dateGapHavana~text	a:text(25) | 23:00:00
 age/tz/UTC/fallBack~text	a:text(25),b:text(25) | 1 day 01:00:00,-1 days -01:00:00
 age/tz/America/New_York/fallBack~text	a:text(25),b:text(25) | 1 day,-1 days
 types/tsMinusTs~text	a:text(25) | 1 day 01:00:00

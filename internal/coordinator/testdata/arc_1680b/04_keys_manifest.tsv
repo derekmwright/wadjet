@@ -1,76 +1,76 @@
-# The stage manifest of section 04_keys (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet / door).
-group/iv80_k/default	F	refusal bare-interval-result	met
-distinct/iv80_k/default	F	refusal bare-interval-result	met
-union/iv80_k/default	F	refusal bare-interval-result	met
-intersect/iv80_k/default	F	refusal bare-interval-result	met
-exceptAll/iv80_k/default	F	refusal bare-interval-result	met
-group/iv80_k/sortagg	F	refusal bare-interval-result	met
-distinct/iv80_k/sortagg	F	refusal bare-interval-result	met
-union/iv80_k/sortagg	F	refusal bare-interval-result	met
-intersect/iv80_k/sortagg	F	refusal bare-interval-result	met
-exceptAll/iv80_k/sortagg	F	refusal bare-interval-result	met
-group/iv80_k/hashagg	F	refusal bare-interval-result	met
-distinct/iv80_k/hashagg	F	refusal bare-interval-result	met
-union/iv80_k/hashagg	F	refusal bare-interval-result	met
-intersect/iv80_k/hashagg	F	refusal bare-interval-result	met
-exceptAll/iv80_k/hashagg	F	refusal bare-interval-result	met
-groupCount/iv80_k	D	supported	unmet
-distinctCount/iv80_k	D	supported	unmet
-countDistinct/iv80_k	E	supported	unmet
-partition/iv80_k	E	supported	unmet
-peers/iv80_k	E	supported	unmet
-orderTie/iv80_k	F	refusal bare-interval-result	met
-withTies/iv80_k	E	supported	unmet
-withTiesCount/iv80_k	E	supported	unmet
-group/iv80_kr/default	F	refusal bare-interval-result	met
-distinct/iv80_kr/default	F	refusal bare-interval-result	met
-union/iv80_kr/default	F	refusal bare-interval-result	met
-intersect/iv80_kr/default	F	refusal bare-interval-result	met
-exceptAll/iv80_kr/default	F	refusal bare-interval-result	met
-group/iv80_kr/sortagg	F	refusal bare-interval-result	met
-distinct/iv80_kr/sortagg	F	refusal bare-interval-result	met
-union/iv80_kr/sortagg	F	refusal bare-interval-result	met
-intersect/iv80_kr/sortagg	F	refusal bare-interval-result	met
-exceptAll/iv80_kr/sortagg	F	refusal bare-interval-result	met
-group/iv80_kr/hashagg	F	refusal bare-interval-result	met
-distinct/iv80_kr/hashagg	F	refusal bare-interval-result	met
-union/iv80_kr/hashagg	F	refusal bare-interval-result	met
-intersect/iv80_kr/hashagg	F	refusal bare-interval-result	met
-exceptAll/iv80_kr/hashagg	F	refusal bare-interval-result	met
-groupCount/iv80_kr	D	supported	unmet
-distinctCount/iv80_kr	D	supported	unmet
-countDistinct/iv80_kr	E	supported	unmet
-partition/iv80_kr	E	supported	unmet
-peers/iv80_kr	E	supported	unmet
-orderTie/iv80_kr	F	refusal bare-interval-result	met
-withTies/iv80_kr	E	supported	unmet
-withTiesCount/iv80_kr	E	supported	unmet
-join/default	D	supported	unmet
-join/hash	D	supported	unmet
-join/merge	D	supported	unmet
-join/nestloop	D	supported	unmet
-join/left	D	supported	unmet
-join/semi	D	supported	unmet
-join/anti	D	supported	unmet
-setLit/union/default	F	refusal bare-interval-result	unmet
-setLit/unionRev/default	F	refusal bare-interval-result	unmet
-setLit/intersect/default	F	refusal bare-interval-result	met
-setLit/except/default	F	refusal bare-interval-result	met
-setLit/exceptAll/default	F	refusal bare-interval-result	unmet
-setLit/intersectAll/default	F	refusal bare-interval-result	unmet
-setLit/valuesDistinct/default	F	refusal bare-interval-result	unmet
-setLit/union/sortagg	F	refusal bare-interval-result	unmet
-setLit/unionRev/sortagg	F	refusal bare-interval-result	unmet
-setLit/intersect/sortagg	F	refusal bare-interval-result	met
-setLit/except/sortagg	F	refusal bare-interval-result	met
-setLit/exceptAll/sortagg	F	refusal bare-interval-result	unmet
-setLit/intersectAll/sortagg	F	refusal bare-interval-result	unmet
-setLit/valuesDistinct/sortagg	F	refusal bare-interval-result	unmet
-wrap/group	D	supported	unmet
-wrap/join	D	supported	unmet
-wrap/hashCollide	A	refusal postgresql-internal-function	unmet
-adr0024/intersectNumericSort	D	supported	unmet
-adr0024/intersectNumericHash	D	supported	met
-array/group	A	refusal container	met
-array/eq	A	refusal container	unmet
-row/group	D	supported	unmet
+# The stage manifest of section 04_keys (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet; an IntervalStyle cell by the door's SET answer)<TAB>legal alternatives (ADR-0013; ruling 11 pending).
+group/iv80_k/default	A	refusal bare-interval-result	met	-
+distinct/iv80_k/default	A	refusal bare-interval-result	met	-
+union/iv80_k/default	A	refusal bare-interval-result	met	-
+intersect/iv80_k/default	A	refusal bare-interval-result	met	-
+exceptAll/iv80_k/default	A	refusal bare-interval-result	met	-
+group/iv80_k/sortagg	A	refusal bare-interval-result	met	-
+distinct/iv80_k/sortagg	A	refusal bare-interval-result	met	-
+union/iv80_k/sortagg	A	refusal bare-interval-result	met	-
+intersect/iv80_k/sortagg	A	refusal bare-interval-result	met	-
+exceptAll/iv80_k/sortagg	A	refusal bare-interval-result	met	-
+group/iv80_k/hashagg	A	refusal bare-interval-result	met	-
+distinct/iv80_k/hashagg	A	refusal bare-interval-result	met	-
+union/iv80_k/hashagg	A	refusal bare-interval-result	met	-
+intersect/iv80_k/hashagg	A	refusal bare-interval-result	met	-
+exceptAll/iv80_k/hashagg	A	refusal bare-interval-result	met	-
+groupCount/iv80_k	D	supported	unmet	-
+distinctCount/iv80_k	D	supported	unmet	-
+countDistinct/iv80_k	E	supported	unmet	-
+partition/iv80_k	E	supported	unmet	-
+peers/iv80_k	E	supported	unmet	-
+orderTie/iv80_k	A	refusal bare-interval-result	met	-
+withTies/iv80_k	D	supported	unmet	-
+withTiesCount/iv80_k	D	supported	unmet	-
+group/iv80_kr/default	A	refusal bare-interval-result	met	-
+distinct/iv80_kr/default	A	refusal bare-interval-result	met	-
+union/iv80_kr/default	A	refusal bare-interval-result	met	-
+intersect/iv80_kr/default	A	refusal bare-interval-result	met	-
+exceptAll/iv80_kr/default	A	refusal bare-interval-result	met	-
+group/iv80_kr/sortagg	A	refusal bare-interval-result	met	-
+distinct/iv80_kr/sortagg	A	refusal bare-interval-result	met	-
+union/iv80_kr/sortagg	A	refusal bare-interval-result	met	-
+intersect/iv80_kr/sortagg	A	refusal bare-interval-result	met	-
+exceptAll/iv80_kr/sortagg	A	refusal bare-interval-result	met	-
+group/iv80_kr/hashagg	A	refusal bare-interval-result	met	-
+distinct/iv80_kr/hashagg	A	refusal bare-interval-result	met	-
+union/iv80_kr/hashagg	A	refusal bare-interval-result	met	-
+intersect/iv80_kr/hashagg	A	refusal bare-interval-result	met	-
+exceptAll/iv80_kr/hashagg	A	refusal bare-interval-result	met	-
+groupCount/iv80_kr	D	supported	unmet	-
+distinctCount/iv80_kr	D	supported	unmet	-
+countDistinct/iv80_kr	E	supported	unmet	-
+partition/iv80_kr	E	supported	unmet	-
+peers/iv80_kr	E	supported	unmet	-
+orderTie/iv80_kr	A	refusal bare-interval-result	met	-
+withTies/iv80_kr	D	supported	unmet	-
+withTiesCount/iv80_kr	D	supported	unmet	-
+join/default	D	supported	unmet	-
+join/hash	D	supported	unmet	-
+join/merge	D	supported	unmet	-
+join/nestloop	D	supported	unmet	-
+join/left	D	supported	unmet	-
+join/semi	D	supported	unmet	-
+join/anti	D	supported	unmet	-
+setLit/union/default	A	refusal bare-interval-result	unmet	-
+setLit/unionRev/default	A	refusal bare-interval-result	unmet	-
+setLit/intersect/default	A	refusal bare-interval-result	met	-
+setLit/except/default	A	refusal bare-interval-result	met	-
+setLit/exceptAll/default	A	refusal bare-interval-result	unmet	-
+setLit/intersectAll/default	A	refusal bare-interval-result	unmet	-
+setLit/valuesDistinct/default	A	refusal bare-interval-result	unmet	-
+setLit/union/sortagg	A	refusal bare-interval-result	unmet	-
+setLit/unionRev/sortagg	A	refusal bare-interval-result	unmet	-
+setLit/intersect/sortagg	A	refusal bare-interval-result	met	-
+setLit/except/sortagg	A	refusal bare-interval-result	met	-
+setLit/exceptAll/sortagg	A	refusal bare-interval-result	unmet	-
+setLit/intersectAll/sortagg	A	refusal bare-interval-result	unmet	-
+setLit/valuesDistinct/sortagg	A	refusal bare-interval-result	unmet	-
+wrap/group	D	supported	unmet	-
+wrap/join	D	supported	unmet	-
+wrap/hashCollide	A	refusal postgresql-internal-function	unmet	-
+adr0024/intersectNumericSort	C	supported	unmet	-
+adr0024/intersectNumericHash	C	supported	met	-
+array/group	A	refusal container	met	-
+array/eq	A	refusal container	unmet	-
+row/group	D	supported	unmet	-

@@ -1,94 +1,98 @@
-# The stage manifest of section 10_definitions_cast (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet / door).
-in/usMinUnit~text	C	supported	unmet
-in/usMaxUnit~text	C	supported	unmet
-in/usMinUnitAgo~text	C	supported	unmet
-in/allMin~text	C	supported	unmet
-in/allMinNear~text	A	refusal timestamp-millisecond-carrier	unmet
-in/allMaxUnits~text	C	supported	unmet
-in/allMaxNear~text	C	supported	unmet
-in/allMinCastText~text	C	supported	unmet
-in/allMinMake~text	C	supported	unmet
-frac/1.5us~text	C	supported	unmet
-frac/-1.5us~text	C	supported	unmet
-frac/2.5us~text	C	supported	unmet
-frac/3.5us~text	C	supported	unmet
-frac/0.5us~text	C	supported	unmet
-frac/clockNearSecond~text	C	supported	unmet
-frac/minuteUnit~text	C	supported	unmet
-frac/years1~text	C	supported	unmet
-frac/years2~text	C	supported	unmet
-frac/decade~text	C	supported	unmet
-frac/months~text	C	supported	unmet
-frac/weeks1~text	C	supported	unmet
-frac/weeks2~text	C	supported	unmet
-ago/1 day 02:00:00 ago~text	C	supported	unmet
-ago/1-2 ago~text	C	supported	unmet
-ago/3 4:05:06 ago~text	C	supported	unmet
-ago/-1 day +02:00:00 ago~text	C	supported	unmet
-ago/2147483647 days ago~text	C	supported	unmet
-ago/@ 1 mon ago~text	C	supported	unmet
-typmod/bareHM~text	C	supported	unmet
-typmod/hm~text	A	refusal typmod	unmet
-typmod/ms~text	A	refusal typmod	unmet
-typmod/dm~text	A	refusal typmod	unmet
-typmod/bareNumber~text	C	supported	met
-typmod/minute~text	A	refusal typmod	unmet
-typmod/dayToHour~text	A	refusal typmod	unmet
-typmod/yearToMonth~text	A	refusal typmod	unmet
-typmod/hourFrac~text	A	refusal typmod	unmet
-typmod/secondTyp5~text	A	refusal typmod	unmet
-typmod/prec7~text	A	refusal typmod	unmet
-typmod/prec7Literal~text	A	refusal typmod	unmet
-typmod/prec7Half~text	A	refusal typmod	unmet
-ar/mulMixed~text	C	supported	unmet
-ar/divMixed2~text	C	supported	unmet
-ar/divMixed3~text	C	supported	unmet
-ar/mulCarry~text	C	supported	unmet
-ar/infFactorNegSign~text	C	supported	unmet
-ar/infFactorPosSign~text	C	supported	unmet
-ar/negInfFactorNegSign~text	C	supported	unmet
-ar/infDivFiniteSign~text	C	supported	unmet
-ar/divRecipMonths~text	C	supported	unmet
-ar/divRecipDays~text	C	supported	met
-ar/divRecipJudge~text	C	supported	unmet
-justify/bigDays24h~text	C	supported	unmet
-justify/bigDays24h/hoursOfDays~text	C	supported	unmet
-justify/negBigDays24h~text	C	supported	unmet
-justify/negBigDays24h/hoursOfDays~text	C	supported	unmet
-justify/monMinus25h~text	C	supported	unmet
-justify/monMinus25h/hoursOfDays~text	C	supported	unmet
-justify/monMinus25h/daysOfHours~text	C	supported	unmet
-justify/negMonPlus25h~text	C	supported	unmet
-justify/negMonPlus25h/hoursOfDays~text	C	supported	unmet
-justify/negMonPlus25h/daysOfHours~text	C	supported	unmet
-infop/ivInfMinusNegInf~text	C	supported	unmet
-sentinel/negOfNearMax~text	A	refusal timestamp-millisecond-carrier	unmet
-sentinel/negOfInfinityTriple~text	C	supported	unmet
-sentinel/mulNegInfinityTriple~text	C	supported	unmet
-age/borrow~text	C	supported	unmet
-age/timeBorrow~text	A	refusal timestamp-millisecond-carrier	unmet
-age/null~text	C	supported	unmet
-age/infLeft~text	C	supported	unmet
-age/infRight~text	C	supported	unmet
-age/infOpposed~text	C	supported	unmet
-age/bc~text	C	supported	unmet
-age/date~text	C	supported	unmet
-age/dateNY~text	C	supported	unmet
-age/tz/UTC/fallBack~text	A	refusal timestamptz	unmet
-age/tz/America/New_York/fallBack~text	A	refusal timestamptz	unmet
-types/tsMinusTs~text	C	supported	unmet
-types/tsMinusDate~text	C	supported	unmet
-types/dateMinusTs~text	C	supported	unmet
-types/timeMinusTime~text	A	refusal time-type	unmet
-types/tstzMinusTstz~text	A	refusal timestamptz	met
-types/tstzMinusTs~text	A	refusal timestamptz	met
-types/intervalTimesInt~text	C	supported	met
-types/intTimesInterval~text	C	supported	met
-types/intervalDivInt~text	C	supported	met
-types/negInterval~text	C	supported	met
-closure/tsMinusDate~text	C	supported	unmet
-closure/dateMinusTs~text	C	supported	unmet
-closure/coalesce~text	C	supported	unmet
-closure/case~text	C	supported	unmet
-closure/nullif~text	C	supported	unmet
-fn/truncMixedSign~text	A	refusal function-date_trunc	unmet
+# The stage manifest of section 10_definitions_cast (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet; an IntervalStyle cell by the door's SET answer)<TAB>legal alternatives (ADR-0013; ruling 11 pending).
+in/usMinUnit~text	C	supported	unmet	-
+in/usMaxUnit~text	C	supported	unmet	-
+in/usMinUnitAgo~text	C	supported	unmet	-
+in/allMin~text	C	supported	unmet	-
+in/allMinNear~text	A	refusal timestamp-millisecond-carrier	unmet	-
+in/allMaxUnits~text	C	supported	unmet	-
+in/allMaxNear~text	C	supported	unmet	-
+in/allMinCastText~text	C	supported	unmet	-
+in/allMinMake~text	C	supported	unmet	-
+frac/1.5us~text	C	supported	unmet	-
+frac/-1.5us~text	C	supported	unmet	-
+frac/2.5us~text	C	supported	unmet	-
+frac/3.5us~text	C	supported	unmet	-
+frac/0.5us~text	C	supported	unmet	-
+frac/clockNearSecond~text	C	supported	unmet	-
+frac/minuteUnit~text	C	supported	unmet	-
+frac/years1~text	C	supported	unmet	-
+frac/years2~text	C	supported	unmet	-
+frac/decade~text	C	supported	unmet	-
+frac/months~text	C	supported	unmet	-
+frac/weeks1~text	C	supported	unmet	-
+frac/weeks2~text	C	supported	unmet	-
+ago/1 day 02:00:00 ago~text	C	supported	unmet	-
+ago/1-2 ago~text	C	supported	unmet	-
+ago/3 4:05:06 ago~text	C	supported	unmet	-
+ago/-1 day +02:00:00 ago~text	C	supported	unmet	-
+ago/2147483647 days ago~text	C	supported	unmet	-
+ago/@ 1 mon ago~text	C	supported	unmet	-
+typmod/bareHM~text	C	supported	unmet	-
+typmod/hm~text	A	refusal typmod	unmet	-
+typmod/ms~text	A	refusal typmod	unmet	-
+typmod/dm~text	A	refusal typmod	unmet	-
+typmod/bareNumber~text	C	supported	met	-
+typmod/minute~text	A	refusal typmod	unmet	-
+typmod/dayToHour~text	A	refusal typmod	unmet	-
+typmod/yearToMonth~text	A	refusal typmod	unmet	-
+typmod/hourFrac~text	A	refusal typmod	unmet	-
+typmod/secondTyp5~text	A	refusal typmod	unmet	-
+typmod/prec7~text	A	refusal typmod	unmet	-
+typmod/prec7Literal~text	A	refusal typmod	unmet	-
+typmod/prec7Half~text	A	refusal typmod	unmet	-
+ar/mulMixed~text	C	supported	unmet	-
+ar/divMixed2~text	C	supported	unmet	-
+ar/divMixed3~text	C	supported	unmet	-
+ar/mulCarry~text	C	supported	unmet	-
+ar/infFactorNegSign~text	C	supported	unmet	-
+ar/infFactorPosSign~text	C	supported	unmet	-
+ar/negInfFactorNegSign~text	C	supported	unmet	-
+ar/infDivFiniteSign~text	C	supported	unmet	-
+ar/divRecipMonths~text	C	supported	unmet	-
+ar/divRecipDays~text	C	supported	met	-
+ar/divRecipJudge~text	C	supported	unmet	-
+justify/bigDays24h~text	C	supported	unmet	-
+justify/bigDays24h/hoursOfDays~text	C	supported	unmet	-
+justify/negBigDays24h~text	C	supported	unmet	-
+justify/negBigDays24h/hoursOfDays~text	C	supported	unmet	-
+justify/monMinus25h~text	C	supported	unmet	-
+justify/monMinus25h/hoursOfDays~text	C	supported	unmet	-
+justify/monMinus25h/daysOfHours~text	C	supported	unmet	-
+justify/negMonPlus25h~text	C	supported	unmet	-
+justify/negMonPlus25h/hoursOfDays~text	C	supported	unmet	-
+justify/negMonPlus25h/daysOfHours~text	C	supported	unmet	-
+infop/ivInfMinusNegInf~text	C	supported	unmet	-
+sentinel/negOfNearMax~text	A	refusal timestamp-millisecond-carrier	unmet	-
+sentinel/negOfInfinityTriple~text	C	supported	unmet	-
+sentinel/mulNegInfinityTriple~text	C	supported	unmet	-
+age/borrow~text	C	supported	unmet	-
+age/timeBorrow~text	A	refusal timestamp-millisecond-carrier	unmet	-
+age/null~text	C	supported	unmet	-
+age/infLeft~text	C	supported	unmet	-
+age/infRight~text	C	supported	unmet	-
+age/infOpposed~text	C	supported	unmet	-
+age/bc~text	C	supported	unmet	-
+age/date~text	A	refusal timestamptz	unmet	-
+age/dateNY~text	A	refusal timestamptz	unmet	-
+age/dateUTC~text	A	refusal timestamptz	unmet	-
+age/dateMonthNY~text	A	refusal timestamptz	unmet	-
+age/dateGapUTC~text	A	refusal timestamptz	unmet	-
+age/dateGapHavana~text	A	refusal timestamptz	unmet	-
+age/tz/UTC/fallBack~text	A	refusal timestamptz	unmet	-
+age/tz/America/New_York/fallBack~text	A	refusal timestamptz	unmet	-
+types/tsMinusTs~text	C	supported	unmet	-
+types/tsMinusDate~text	C	supported	unmet	-
+types/dateMinusTs~text	C	supported	unmet	-
+types/timeMinusTime~text	A	refusal time-type	unmet	-
+types/tstzMinusTstz~text	A	refusal timestamptz	unmet	-
+types/tstzMinusTs~text	A	refusal timestamptz	unmet	-
+types/intervalTimesInt~text	C	supported	met	-
+types/intTimesInterval~text	C	supported	met	-
+types/intervalDivInt~text	C	supported	met	-
+types/negInterval~text	C	supported	met	-
+closure/tsMinusDate~text	C	supported	unmet	-
+closure/dateMinusTs~text	C	supported	unmet	-
+closure/coalesce~text	C	supported	unmet	-
+closure/case~text	C	supported	unmet	-
+closure/nullif~text	C	supported	unmet	-
+fn/truncMixedSign~text	A	refusal function-date_trunc	unmet	-

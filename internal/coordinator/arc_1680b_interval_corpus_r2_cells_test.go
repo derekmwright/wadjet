@@ -301,6 +301,16 @@ func iv80Definitions() []iv80Cell {
 	b.add("age/bc", "SELECT age("+ts("0001-03-01 BC")+", "+ts("0001-01-31")+") AS a, age("+ts("0001-01-01")+", "+ts("0001-12-31 BC")+") AS b")
 	b.add("age/date", "SELECT age(DATE '2024-03-01', DATE '2024-01-31') AS a")
 	b.set("age/dateNY", "TimeZone=America/New_York", "SELECT age(DATE '2024-03-11', DATE '2024-03-09') AS a")
+	// Round 3 (the second judge record, correction 1): the same date pairs
+	// under both zones, and the overload PostgreSQL resolves: age(date,
+	// date) is the timestamptz age of two local midnights, so a zone whose
+	// midnight falls in a DST gap (America/Havana, 2024-03-10) answers
+	// differently from UTC for one pair.
+	b.set("age/dateUTC", "TimeZone=UTC", "SELECT age(DATE '2024-03-11', DATE '2024-03-09') AS a")
+	b.set("age/dateMonthNY", "TimeZone=America/New_York", "SELECT age(DATE '2024-03-01', DATE '2024-01-31') AS a")
+	b.set("age/dateGapUTC", "TimeZone=UTC", "SELECT age(DATE '2024-03-11', DATE '2024-03-10') AS a")
+	b.set("age/dateGapHavana", "TimeZone=America/Havana", "SELECT age(DATE '2024-03-11', DATE '2024-03-10') AS a")
+	b.pg("explain/age/date", "", "EXPLAIN (VERBOSE, COSTS OFF) SELECT age(DATE '2024-03-01', DATE '2024-01-31')")
 	for _, z := range []string{"UTC", "America/New_York"} {
 		b.set("age/tz/"+z+"/fallBack", "TimeZone="+z, "SELECT age(TIMESTAMPTZ '2024-11-03 12:00:00-05', TIMESTAMPTZ '2024-11-02 12:00:00-04') AS a, age(TIMESTAMPTZ '2024-11-02 12:00:00-04', TIMESTAMPTZ '2024-11-03 12:00:00-05') AS b")
 	}
@@ -608,7 +618,63 @@ func iv80Relational() []iv80Cell {
 	b.add("frame/tsInfRowsShift", "SELECT id, CAST(ts + INTERVAL '-1 day' AS TEXT) AS a, CAST(ts - INTERVAL '1 mon' AS TEXT) AS b, ts + INTERVAL '1 day' > TIMESTAMP '2024-01-01' AS c FROM iv80_fr WHERE id IN (5, 7, 8) ORDER BY id")
 	b.add("frame/intervalOrderDesc", "SELECT id, count(*) OVER (ORDER BY "+c+" DESC RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW) AS n FROM iv80_r ORDER BY id")
 	b.add("frame/intervalOrderAsc", "SELECT id, count(*) OVER (ORDER BY "+c+" RANGE BETWEEN CURRENT ROW AND INTERVAL '1 day' FOLLOWING) AS n FROM iv80_r ORDER BY id")
+
+	// Round 3 (the second judge record, correction 3): an interval COLUMN
+	// reaching an unsupported consumer through each relational boundary.
+	// Each must be an intentional, named refusal at every stage (owned by A),
+	// on every arm (the spilled and shuffled arms are the spill and shuffle
+	// boundaries). iv80_r's finite rows only (g <> 3), so no consumer meets an
+	// infinity.
+	for _, nb := range iv80NegBoundaries() {
+		for _, nc := range iv80NegConsumers() {
+			b.add("neg/"+nb.k+"/"+nc.k, nc.sql(nb.from))
+		}
+	}
 	return b.out
+}
+
+// iv80NegBoundary is a FROM clause that hands an interval column v (beside
+// id) across one relational boundary ("p" is the CTE p).
+type iv80NegBoundary struct{ k, from string }
+
+const iv80NegCTE = "WITH p AS (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) "
+
+func iv80NegBoundaries() []iv80NegBoundary {
+	c := "CAST(s AS INTERVAL)"
+	return []iv80NegBoundary{
+		{"projection", "(SELECT id, w AS v FROM (SELECT id, " + c + " AS w FROM iv80_r WHERE g <> 3) p0) p"},
+		{"derived", "(SELECT id, " + c + " AS v FROM iv80_r WHERE g <> 3) p"},
+		{"cte", "p"},
+		{"subquery", "(SELECT a.id, (SELECT " + c + " FROM iv80_r b WHERE b.id = a.id) AS v FROM iv80_r a WHERE a.g <> 3) p"},
+		{"setop", "(SELECT id, " + c + " AS v FROM iv80_r WHERE g IN (1, 2) UNION ALL SELECT id, " + c + " FROM iv80_r WHERE g IN (4, 5)) p"},
+		{"join", "(SELECT a.id, b.v FROM iv80_r a JOIN (SELECT id, " + c + " AS v FROM iv80_r WHERE g <> 3) b ON a.id = b.id) p"},
+	}
+}
+
+// iv80NegConsumer is an unsupported consumer of the column v.
+type iv80NegConsumer struct {
+	k   string
+	sql func(from string) string
+}
+
+func iv80NegConsumers() []iv80NegConsumer {
+	sel := func(from, list string) string {
+		if from == "p" {
+			return iv80NegCTE + list + " FROM p"
+		}
+		return list + " FROM " + from
+	}
+	return []iv80NegConsumer{
+		{"toChar", func(f string) string { return sel(f, "SELECT id, to_char(v, 'HH24:MI') AS x") + " ORDER BY id" }},
+		{"dateTrunc", func(f string) string {
+			return sel(f, "SELECT id, CAST(date_trunc('hour', v) AS TEXT) AS x") + " ORDER BY id"
+		}},
+		{"castTime", func(f string) string { return sel(f, "SELECT id, CAST(CAST(v AS TIME) AS TEXT) AS x") + " ORDER BY id" }},
+		{"orderedAgg", func(f string) string { return sel(f, "SELECT CAST(mode() WITHIN GROUP (ORDER BY v) AS TEXT) AS x") }},
+		{"distinctSum", func(f string) string { return sel(f, "SELECT CAST(sum(DISTINCT v) AS TEXT) AS x") }},
+		{"arrayAgg", func(f string) string { return sel(f, "SELECT CAST(array_agg(v ORDER BY id) AS TEXT) AS x") }},
+		{"arrayCtor", func(f string) string { return sel(f, "SELECT id, CAST(ARRAY[v] AS TEXT) AS x") + " ORDER BY id" }},
+	}
 }
 
 // --- 12. Writes: DML and CTAS through derived columns -------------------
@@ -635,5 +701,14 @@ func iv80Writes() []iv80Cell {
 	b.write("w/ctasZero", "CREATE TABLE iv80_wc5 AS SELECT "+c+" AS v FROM iv80_r WHERE false")
 	b.write("w/ctasText", "CREATE TABLE iv80_wc6 AS SELECT CAST("+c+" AS TEXT) AS v FROM iv80_r")
 	b.write("w/ctasTsDiffNoData", "CREATE TABLE iv80_wc7 AS SELECT ts - ts AS v FROM iv80_rt WITH NO DATA")
+	// Round 3: an interval column written through each relational boundary
+	// (beside 11_relational:neg/*).
+	for _, nb := range iv80NegBoundaries() {
+		sel := "SELECT id + 2000, v FROM " + nb.from
+		if nb.from == "p" {
+			sel = iv80NegCTE + "SELECT id + 2000, v FROM p"
+		}
+		b.write("w/neg/"+nb.k, "INSERT INTO iv80_wt "+sel)
+	}
 	return b.out
 }

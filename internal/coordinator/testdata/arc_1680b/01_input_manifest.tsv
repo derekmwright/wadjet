@@ -1,155 +1,155 @@
-# The stage manifest of section 01_input (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet / door).
-lit/0/1 day	F	refusal bare-interval-result	met
-lit/1/1 day 2 hours	F	refusal bare-interval-result	unmet
-lit/2/1 year 2 months 3 days 4 hours 5 minutes 6 seconds	F	refusal bare-interval-result	unmet
-lit/3/1-2	F	refusal bare-interval-result	unmet
-lit/4/-1-2	F	refusal bare-interval-result	unmet
-lit/5/3 4:05:06	F	refusal bare-interval-result	met
-lit/6/-3 -4:05:06	F	refusal bare-interval-result	met
-lit/7/1-2 3 4:05:06	F	refusal bare-interval-result	unmet
-lit/8/4:05:06	F	refusal bare-interval-result	unmet
-lit/9/4:05	F	refusal bare-interval-result	unmet
-lit/10/-4:05:06	F	refusal bare-interval-result	unmet
-lit/11/1 day 25:00:00	F	refusal bare-interval-result	unmet
-lit/12/-1 day +25:00:00	F	refusal bare-interval-result	unmet
-lit/13/1 mon -30 days	F	refusal bare-interval-result	unmet
-lit/14/-1 year -2 mons +3 days	F	refusal bare-interval-result	unmet
-lit/15/1 year -1 second	F	refusal bare-interval-result	unmet
-lit/16/P1Y2M3DT4H5M6S	F	refusal bare-interval-result	unmet
-lit/17/P1Y2M3DT4H5M6.5S	F	refusal bare-interval-result	unmet
-lit/18/PT36H	F	refusal bare-interval-result	unmet
-lit/19/P1.5M	F	refusal bare-interval-result	unmet
-lit/20/P0.5Y	F	refusal bare-interval-result	unmet
-lit/21/P1W	F	refusal bare-interval-result	unmet
-lit/22/-P1D	C	pg-error 22007	unmet
-lit/23/P-1DT-1H	F	refusal bare-interval-result	unmet
-lit/24/P0001-02-03T04:05:06	F	refusal bare-interval-result	unmet
-lit/25/PT0S	F	refusal bare-interval-result	unmet
-lit/26/@ 1 year 2 mons	F	refusal bare-interval-result	unmet
-lit/27/@ 1 year 2 mons ago	F	refusal bare-interval-result	unmet
-lit/28/1 day ago	F	refusal bare-interval-result	unmet
-lit/29/-1 day ago	F	refusal bare-interval-result	unmet
-lit/30/@ 3 days 4 hours 5 mins 6 secs	F	refusal bare-interval-result	unmet
-lit/31/1.5 months	F	refusal bare-interval-result	unmet
-lit/32/1.5 days	F	refusal bare-interval-result	unmet
-lit/33/1.5 years	F	refusal bare-interval-result	unmet
-lit/34/0.5 weeks	F	refusal bare-interval-result	unmet
-lit/35/1.5 hours	F	refusal bare-interval-result	unmet
-lit/36/1.5 minutes	F	refusal bare-interval-result	unmet
-lit/37/0.1 months	F	refusal bare-interval-result	unmet
-lit/38/1.0333333 months	F	refusal bare-interval-result	unmet
-lit/39/-1.5 months	F	refusal bare-interval-result	unmet
-lit/40/-1.5 days	F	refusal bare-interval-result	unmet
-lit/41/1.5 centuries	F	refusal bare-interval-result	unmet
-lit/42/1 decade	F	refusal bare-interval-result	met
-lit/43/1 century	F	refusal bare-interval-result	met
-lit/44/1 millennium	F	refusal bare-interval-result	met
-lit/45/10 weeks	F	refusal bare-interval-result	met
-lit/46/1.000001 seconds	F	refusal bare-interval-result	unmet
-lit/47/0.0000005 seconds	F	refusal bare-interval-result	unmet
-lit/48/0.0000015 seconds	F	refusal bare-interval-result	unmet
-lit/49/0.0000025 seconds	F	refusal bare-interval-result	unmet
-lit/50/1 microsecond	F	refusal bare-interval-result	met
-lit/51/1 millisecond	F	refusal bare-interval-result	met
-lit/52/1.5 microseconds	F	refusal bare-interval-result	unmet
-lit/53/1:2:3.123456789	F	refusal bare-interval-result	unmet
-lit/54/-0.000001 seconds	F	refusal bare-interval-result	unmet
-lit/55/00:00:00.000001	F	refusal bare-interval-result	unmet
-lit/56/0	F	refusal bare-interval-result	met
-lit/57/0 seconds	F	refusal bare-interval-result	met
-lit/58/00:00:00	F	refusal bare-interval-result	unmet
-lit/59/-0 days	F	refusal bare-interval-result	met
-lit/60/100	F	refusal bare-interval-result	met
-lit/61/1.5	F	refusal bare-interval-result	unmet
-lit/62/-100	F	refusal bare-interval-result	met
-lit/63/178956970 years 7 months	F	refusal bare-interval-result	unmet
-lit/64/178956970 years 8 months	C	pg-error 22008	unmet
-lit/65/-178956970 years -8 months	F	refusal bare-interval-result	unmet
-lit/66/-178956970 years -9 months	C	pg-error 22008	unmet
-lit/67/2147483647 months	F	refusal bare-interval-result	met
-lit/68/2147483648 months	C	pg-error 22015	met
-lit/69/-2147483648 months	F	refusal bare-interval-result	met
-lit/70/-2147483649 months	C	pg-error 22015	met
-lit/71/2147483647 days	F	refusal bare-interval-result	met
-lit/72/2147483648 days	C	pg-error 22015	met
-lit/73/-2147483648 days	F	refusal bare-interval-result	met
-lit/74/-2147483649 days	C	pg-error 22015	met
-lit/75/2562047788:00:54.775807	F	refusal bare-interval-result	unmet
-lit/76/2562047788:00:54.775808	C	pg-error 22015	unmet
-lit/77/-2562047788:00:54.775808	C	pg-error 22007	unmet
-lit/78/-2562047788:00:54.775809	C	pg-error 22007	unmet
-lit/79/2147483647 months 2147483647 days 2562047788:00:54.775807	F	refusal bare-interval-result	unmet
-lit/80/-2147483648 months -2147483648 days -2562047788:00:54.775808	C	pg-error 22007	met
-lit/81/infinity	F	refusal bare-interval-result	unmet
-lit/82/-infinity	F	refusal bare-interval-result	unmet
-lit/83/+infinity	F	refusal bare-interval-result	unmet
-lit/84/INFINITY	F	refusal bare-interval-result	unmet
-lit/85/	C	pg-error 22007	met
-lit/86/ 	C	pg-error 22007	met
-lit/87/garbage	C	pg-error 22007	unmet
-lit/88/1 fortnight	C	pg-error 22007	unmet
-lit/89/1 day 1 day	C	pg-error 22007	met
-lit/90/1 2 3	C	pg-error 22007	met
-lit/91/P1Y2	C	pg-error 22007	unmet
-lit/92/1 days 2 days	C	pg-error 22007	met
-lit/null	F	refusal bare-interval-result	met
-std/ym	A	refusal typmod	unmet
-std/ymNeg	A	refusal typmod	unmet
-std/ds	A	refusal typmod	unmet
-std/dsFrac	A	refusal typmod	unmet
-std/year	A	refusal typmod	met
-std/month	A	refusal typmod	met
-std/day	A	refusal typmod	met
-std/hour	A	refusal typmod	met
-std/minute	A	refusal typmod	met
-std/second	A	refusal typmod	met
-std/secondFrac	A	refusal typmod	unmet
-std/dh	A	refusal typmod	unmet
-std/dm	A	refusal typmod	unmet
-std/hm	A	refusal typmod	unmet
-std/ms	A	refusal typmod	unmet
-std/hs	A	refusal typmod	unmet
-std/dayDropsTime	A	refusal typmod	unmet
-std/yearDropsMonths	A	refusal typmod	unmet
-std/monthDropsDays	A	refusal typmod	unmet
-std/hourDropsMinutes	A	refusal typmod	unmet
-std/yearFrac	A	refusal typmod	unmet
-std/dayFrac	A	refusal typmod	unmet
-std/hourNeg	A	refusal typmod	met
-std/yearOver	A	refusal typmod	unmet
-std/dayOver	A	refusal typmod	unmet
-prec/iv3	A	refusal typmod	unmet
-prec/iv0	A	refusal typmod	unmet
-prec/literal3	A	refusal typmod	unmet
-prec/second3	A	refusal typmod	unmet
-prec/ds2	A	refusal typmod	unmet
-prec/iv6	A	refusal typmod	unmet
-prec/iv7	A	refusal typmod	unmet
-prec/castDay	A	refusal typmod	unmet
-prec/castYear	A	refusal typmod	unmet
-prec/castMonthTyp	A	refusal typmod	unmet
-cast/fromText	F	refusal bare-interval-result	met
-cast/colon	F	refusal bare-interval-result	met
-cast/toText	C	supported	unmet
-cast/toVarchar	C	supported	unmet
-cast/toTextNull	C	supported	met
-cast/fromInt	C	pg-error 42846	met
-cast/fromNumeric	C	pg-error 42846	met
-cast/fromTime	A	refusal time-type	met
-cast/toTime	A	refusal time-type	unmet
-cast/toBigint	C	pg-error 42846	met
-cast/fromDuration	C	pg-error 42704	unmet
-make/all	F	refusal bare-interval-result	unmet
-make/days	F	refusal bare-interval-result	unmet
-make/secs	F	refusal bare-interval-result	unmet
-make/negMins	F	refusal bare-interval-result	unmet
-make/weeks	F	refusal bare-interval-result	unmet
-make/zero	F	refusal bare-interval-result	unmet
-make/yearsOver	C	pg-error 22008	unmet
-make/secsInf	C	pg-error 22008	unmet
-make/null	F	refusal bare-interval-result	unmet
-make/hoursOver	F	refusal bare-interval-result	unmet
-row/cast	F	refusal bare-interval-result	met
-row/castText	C	supported	unmet
-row/bad	C	pg-error 22007	unmet
-row/badUnreached	C	supported	met
+# The stage manifest of section 01_input (arc_1680b_interval_manifest_test.go): name<TAB>owning stage<TAB>outcome<TAB>today's baseline meets it (met / unmet; an IntervalStyle cell by the door's SET answer)<TAB>legal alternatives (ADR-0013; ruling 11 pending).
+lit/0/1 day	A	refusal bare-interval-result	met	-
+lit/1/1 day 2 hours	A	refusal bare-interval-result	unmet	-
+lit/2/1 year 2 months 3 days 4 hours 5 minutes 6 seconds	A	refusal bare-interval-result	unmet	-
+lit/3/1-2	A	refusal bare-interval-result	unmet	-
+lit/4/-1-2	A	refusal bare-interval-result	unmet	-
+lit/5/3 4:05:06	A	refusal bare-interval-result	unmet	-
+lit/6/-3 -4:05:06	A	refusal bare-interval-result	unmet	-
+lit/7/1-2 3 4:05:06	A	refusal bare-interval-result	unmet	-
+lit/8/4:05:06	A	refusal bare-interval-result	unmet	-
+lit/9/4:05	A	refusal bare-interval-result	unmet	-
+lit/10/-4:05:06	A	refusal bare-interval-result	unmet	-
+lit/11/1 day 25:00:00	A	refusal bare-interval-result	unmet	-
+lit/12/-1 day +25:00:00	A	refusal bare-interval-result	unmet	-
+lit/13/1 mon -30 days	A	refusal bare-interval-result	unmet	-
+lit/14/-1 year -2 mons +3 days	A	refusal bare-interval-result	unmet	-
+lit/15/1 year -1 second	A	refusal bare-interval-result	unmet	-
+lit/16/P1Y2M3DT4H5M6S	A	refusal bare-interval-result	unmet	-
+lit/17/P1Y2M3DT4H5M6.5S	A	refusal bare-interval-result	unmet	-
+lit/18/PT36H	A	refusal bare-interval-result	unmet	-
+lit/19/P1.5M	A	refusal bare-interval-result	unmet	-
+lit/20/P0.5Y	A	refusal bare-interval-result	unmet	-
+lit/21/P1W	A	refusal bare-interval-result	unmet	-
+lit/22/-P1D	C	pg-error 22007	unmet	-
+lit/23/P-1DT-1H	A	refusal bare-interval-result	unmet	-
+lit/24/P0001-02-03T04:05:06	A	refusal bare-interval-result	unmet	-
+lit/25/PT0S	A	refusal bare-interval-result	unmet	-
+lit/26/@ 1 year 2 mons	A	refusal bare-interval-result	unmet	-
+lit/27/@ 1 year 2 mons ago	A	refusal bare-interval-result	unmet	-
+lit/28/1 day ago	A	refusal bare-interval-result	unmet	-
+lit/29/-1 day ago	A	refusal bare-interval-result	unmet	-
+lit/30/@ 3 days 4 hours 5 mins 6 secs	A	refusal bare-interval-result	unmet	-
+lit/31/1.5 months	A	refusal bare-interval-result	unmet	-
+lit/32/1.5 days	A	refusal bare-interval-result	unmet	-
+lit/33/1.5 years	A	refusal bare-interval-result	unmet	-
+lit/34/0.5 weeks	A	refusal bare-interval-result	unmet	-
+lit/35/1.5 hours	A	refusal bare-interval-result	unmet	-
+lit/36/1.5 minutes	A	refusal bare-interval-result	unmet	-
+lit/37/0.1 months	A	refusal bare-interval-result	unmet	-
+lit/38/1.0333333 months	A	refusal bare-interval-result	unmet	-
+lit/39/-1.5 months	A	refusal bare-interval-result	unmet	-
+lit/40/-1.5 days	A	refusal bare-interval-result	unmet	-
+lit/41/1.5 centuries	A	refusal bare-interval-result	unmet	-
+lit/42/1 decade	A	refusal bare-interval-result	unmet	-
+lit/43/1 century	A	refusal bare-interval-result	unmet	-
+lit/44/1 millennium	A	refusal bare-interval-result	unmet	-
+lit/45/10 weeks	A	refusal bare-interval-result	met	-
+lit/46/1.000001 seconds	A	refusal bare-interval-result	unmet	-
+lit/47/0.0000005 seconds	A	refusal bare-interval-result	unmet	-
+lit/48/0.0000015 seconds	A	refusal bare-interval-result	unmet	-
+lit/49/0.0000025 seconds	A	refusal bare-interval-result	unmet	-
+lit/50/1 microsecond	A	refusal bare-interval-result	unmet	-
+lit/51/1 millisecond	A	refusal bare-interval-result	unmet	-
+lit/52/1.5 microseconds	A	refusal bare-interval-result	unmet	-
+lit/53/1:2:3.123456789	A	refusal bare-interval-result	unmet	-
+lit/54/-0.000001 seconds	A	refusal bare-interval-result	unmet	-
+lit/55/00:00:00.000001	A	refusal bare-interval-result	unmet	-
+lit/56/0	A	refusal bare-interval-result	met	-
+lit/57/0 seconds	A	refusal bare-interval-result	met	-
+lit/58/00:00:00	A	refusal bare-interval-result	unmet	-
+lit/59/-0 days	A	refusal bare-interval-result	met	-
+lit/60/100	A	refusal bare-interval-result	met	-
+lit/61/1.5	A	refusal bare-interval-result	unmet	-
+lit/62/-100	A	refusal bare-interval-result	met	-
+lit/63/178956970 years 7 months	A	refusal bare-interval-result	unmet	-
+lit/64/178956970 years 8 months	C	pg-error 22008	unmet	-
+lit/65/-178956970 years -8 months	A	refusal bare-interval-result	unmet	-
+lit/66/-178956970 years -9 months	C	pg-error 22008	unmet	-
+lit/67/2147483647 months	A	refusal bare-interval-result	met	-
+lit/68/2147483648 months	C	pg-error 22015	met	-
+lit/69/-2147483648 months	A	refusal bare-interval-result	met	-
+lit/70/-2147483649 months	C	pg-error 22015	met	-
+lit/71/2147483647 days	A	refusal bare-interval-result	met	-
+lit/72/2147483648 days	C	pg-error 22015	met	-
+lit/73/-2147483648 days	A	refusal bare-interval-result	met	-
+lit/74/-2147483649 days	C	pg-error 22015	met	-
+lit/75/2562047788:00:54.775807	A	refusal bare-interval-result	unmet	-
+lit/76/2562047788:00:54.775808	C	pg-error 22015	unmet	-
+lit/77/-2562047788:00:54.775808	C	pg-error 22007	unmet	-
+lit/78/-2562047788:00:54.775809	C	pg-error 22007	unmet	-
+lit/79/2147483647 months 2147483647 days 2562047788:00:54.775807	A	refusal bare-interval-result	unmet	-
+lit/80/-2147483648 months -2147483648 days -2562047788:00:54.775808	C	pg-error 22007	met	-
+lit/81/infinity	A	refusal bare-interval-result	unmet	-
+lit/82/-infinity	A	refusal bare-interval-result	unmet	-
+lit/83/+infinity	A	refusal bare-interval-result	unmet	-
+lit/84/INFINITY	A	refusal bare-interval-result	unmet	-
+lit/85/	C	pg-error 22007	met	-
+lit/86/ 	C	pg-error 22007	met	-
+lit/87/garbage	C	pg-error 22007	unmet	-
+lit/88/1 fortnight	C	pg-error 22007	unmet	-
+lit/89/1 day 1 day	C	pg-error 22007	met	-
+lit/90/1 2 3	C	pg-error 22007	met	-
+lit/91/P1Y2	C	pg-error 22007	unmet	-
+lit/92/1 days 2 days	C	pg-error 22007	met	-
+lit/null	A	refusal bare-interval-result	met	-
+std/ym	A	refusal typmod	unmet	-
+std/ymNeg	A	refusal typmod	unmet	-
+std/ds	A	refusal typmod	unmet	-
+std/dsFrac	A	refusal typmod	unmet	-
+std/year	A	refusal typmod	unmet	-
+std/month	A	refusal typmod	unmet	-
+std/day	A	refusal typmod	unmet	-
+std/hour	A	refusal typmod	unmet	-
+std/minute	A	refusal typmod	unmet	-
+std/second	A	refusal typmod	unmet	-
+std/secondFrac	A	refusal typmod	unmet	-
+std/dh	A	refusal typmod	unmet	-
+std/dm	A	refusal typmod	unmet	-
+std/hm	A	refusal typmod	unmet	-
+std/ms	A	refusal typmod	unmet	-
+std/hs	A	refusal typmod	unmet	-
+std/dayDropsTime	A	refusal typmod	unmet	-
+std/yearDropsMonths	A	refusal typmod	unmet	-
+std/monthDropsDays	A	refusal typmod	unmet	-
+std/hourDropsMinutes	A	refusal typmod	unmet	-
+std/yearFrac	A	refusal typmod	unmet	-
+std/dayFrac	A	refusal typmod	unmet	-
+std/hourNeg	A	refusal typmod	unmet	-
+std/yearOver	A	refusal typmod	unmet	-
+std/dayOver	A	refusal typmod	unmet	-
+prec/iv3	A	refusal typmod	unmet	-
+prec/iv0	A	refusal typmod	unmet	-
+prec/literal3	A	refusal typmod	unmet	-
+prec/second3	A	refusal typmod	unmet	-
+prec/ds2	A	refusal typmod	unmet	-
+prec/iv6	A	refusal typmod	unmet	-
+prec/iv7	A	refusal typmod	unmet	-
+prec/castDay	A	refusal typmod	unmet	-
+prec/castYear	A	refusal typmod	unmet	-
+prec/castMonthTyp	A	refusal typmod	unmet	-
+cast/fromText	A	refusal bare-interval-result	met	-
+cast/colon	A	refusal bare-interval-result	met	-
+cast/toText	C	supported	unmet	-
+cast/toVarchar	C	supported	unmet	-
+cast/toTextNull	C	supported	met	-
+cast/fromInt	C	pg-error 42846	met	-
+cast/fromNumeric	C	pg-error 42846	met	-
+cast/fromTime	A	refusal time-type	unmet	-
+cast/toTime	A	refusal time-type	unmet	-
+cast/toBigint	C	pg-error 42846	met	-
+cast/fromDuration	C	pg-error 42704	unmet	-
+make/all	A	refusal bare-interval-result	unmet	-
+make/days	A	refusal bare-interval-result	unmet	-
+make/secs	A	refusal bare-interval-result	unmet	-
+make/negMins	A	refusal bare-interval-result	unmet	-
+make/weeks	A	refusal bare-interval-result	unmet	-
+make/zero	A	refusal bare-interval-result	unmet	-
+make/yearsOver	C	pg-error 22008	unmet	-
+make/secsInf	C	pg-error 22008	unmet	-
+make/null	A	refusal bare-interval-result	unmet	-
+make/hoursOver	A	refusal bare-interval-result	unmet	-
+row/cast	A	refusal bare-interval-result	met	-
+row/castText	C	supported	unmet	-
+row/bad	C	pg-error 22007	unmet	-
+row/badUnreached	C	supported	met	-

@@ -162,3 +162,45 @@ frame/negOffset	-	sql	SELECT id, count(*) OVER (ORDER BY ts RANGE BETWEEN INTERV
 frame/tsInfRowsShift	-	sql	SELECT id, CAST(ts + INTERVAL '-1 day' AS TEXT) AS a, CAST(ts - INTERVAL '1 mon' AS TEXT) AS b, ts + INTERVAL '1 day' > TIMESTAMP '2024-01-01' AS c FROM iv80_fr WHERE id IN (5, 7, 8) ORDER BY id
 frame/intervalOrderDesc	-	sql	SELECT id, count(*) OVER (ORDER BY CAST(s AS INTERVAL) DESC RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW) AS n FROM iv80_r ORDER BY id
 frame/intervalOrderAsc	-	sql	SELECT id, count(*) OVER (ORDER BY CAST(s AS INTERVAL) RANGE BETWEEN CURRENT ROW AND INTERVAL '1 day' FOLLOWING) AS n FROM iv80_r ORDER BY id
+neg/projection/toChar	-	sql	SELECT id, to_char(v, 'HH24:MI') AS x FROM (SELECT id, w AS v FROM (SELECT id, CAST(s AS INTERVAL) AS w FROM iv80_r WHERE g <> 3) p0) p ORDER BY id
+neg/projection/dateTrunc	-	sql	SELECT id, CAST(date_trunc('hour', v) AS TEXT) AS x FROM (SELECT id, w AS v FROM (SELECT id, CAST(s AS INTERVAL) AS w FROM iv80_r WHERE g <> 3) p0) p ORDER BY id
+neg/projection/castTime	-	sql	SELECT id, CAST(CAST(v AS TIME) AS TEXT) AS x FROM (SELECT id, w AS v FROM (SELECT id, CAST(s AS INTERVAL) AS w FROM iv80_r WHERE g <> 3) p0) p ORDER BY id
+neg/projection/orderedAgg	-	sql	SELECT CAST(mode() WITHIN GROUP (ORDER BY v) AS TEXT) AS x FROM (SELECT id, w AS v FROM (SELECT id, CAST(s AS INTERVAL) AS w FROM iv80_r WHERE g <> 3) p0) p
+neg/projection/distinctSum	-	sql	SELECT CAST(sum(DISTINCT v) AS TEXT) AS x FROM (SELECT id, w AS v FROM (SELECT id, CAST(s AS INTERVAL) AS w FROM iv80_r WHERE g <> 3) p0) p
+neg/projection/arrayAgg	-	sql	SELECT CAST(array_agg(v ORDER BY id) AS TEXT) AS x FROM (SELECT id, w AS v FROM (SELECT id, CAST(s AS INTERVAL) AS w FROM iv80_r WHERE g <> 3) p0) p
+neg/projection/arrayCtor	-	sql	SELECT id, CAST(ARRAY[v] AS TEXT) AS x FROM (SELECT id, w AS v FROM (SELECT id, CAST(s AS INTERVAL) AS w FROM iv80_r WHERE g <> 3) p0) p ORDER BY id
+neg/derived/toChar	-	sql	SELECT id, to_char(v, 'HH24:MI') AS x FROM (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) p ORDER BY id
+neg/derived/dateTrunc	-	sql	SELECT id, CAST(date_trunc('hour', v) AS TEXT) AS x FROM (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) p ORDER BY id
+neg/derived/castTime	-	sql	SELECT id, CAST(CAST(v AS TIME) AS TEXT) AS x FROM (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) p ORDER BY id
+neg/derived/orderedAgg	-	sql	SELECT CAST(mode() WITHIN GROUP (ORDER BY v) AS TEXT) AS x FROM (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) p
+neg/derived/distinctSum	-	sql	SELECT CAST(sum(DISTINCT v) AS TEXT) AS x FROM (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) p
+neg/derived/arrayAgg	-	sql	SELECT CAST(array_agg(v ORDER BY id) AS TEXT) AS x FROM (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) p
+neg/derived/arrayCtor	-	sql	SELECT id, CAST(ARRAY[v] AS TEXT) AS x FROM (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) p ORDER BY id
+neg/cte/toChar	-	sql	WITH p AS (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) SELECT id, to_char(v, 'HH24:MI') AS x FROM p ORDER BY id
+neg/cte/dateTrunc	-	sql	WITH p AS (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) SELECT id, CAST(date_trunc('hour', v) AS TEXT) AS x FROM p ORDER BY id
+neg/cte/castTime	-	sql	WITH p AS (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) SELECT id, CAST(CAST(v AS TIME) AS TEXT) AS x FROM p ORDER BY id
+neg/cte/orderedAgg	-	sql	WITH p AS (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) SELECT CAST(mode() WITHIN GROUP (ORDER BY v) AS TEXT) AS x FROM p
+neg/cte/distinctSum	-	sql	WITH p AS (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) SELECT CAST(sum(DISTINCT v) AS TEXT) AS x FROM p
+neg/cte/arrayAgg	-	sql	WITH p AS (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) SELECT CAST(array_agg(v ORDER BY id) AS TEXT) AS x FROM p
+neg/cte/arrayCtor	-	sql	WITH p AS (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) SELECT id, CAST(ARRAY[v] AS TEXT) AS x FROM p ORDER BY id
+neg/subquery/toChar	-	sql	SELECT id, to_char(v, 'HH24:MI') AS x FROM (SELECT a.id, (SELECT CAST(s AS INTERVAL) FROM iv80_r b WHERE b.id = a.id) AS v FROM iv80_r a WHERE a.g <> 3) p ORDER BY id
+neg/subquery/dateTrunc	-	sql	SELECT id, CAST(date_trunc('hour', v) AS TEXT) AS x FROM (SELECT a.id, (SELECT CAST(s AS INTERVAL) FROM iv80_r b WHERE b.id = a.id) AS v FROM iv80_r a WHERE a.g <> 3) p ORDER BY id
+neg/subquery/castTime	-	sql	SELECT id, CAST(CAST(v AS TIME) AS TEXT) AS x FROM (SELECT a.id, (SELECT CAST(s AS INTERVAL) FROM iv80_r b WHERE b.id = a.id) AS v FROM iv80_r a WHERE a.g <> 3) p ORDER BY id
+neg/subquery/orderedAgg	-	sql	SELECT CAST(mode() WITHIN GROUP (ORDER BY v) AS TEXT) AS x FROM (SELECT a.id, (SELECT CAST(s AS INTERVAL) FROM iv80_r b WHERE b.id = a.id) AS v FROM iv80_r a WHERE a.g <> 3) p
+neg/subquery/distinctSum	-	sql	SELECT CAST(sum(DISTINCT v) AS TEXT) AS x FROM (SELECT a.id, (SELECT CAST(s AS INTERVAL) FROM iv80_r b WHERE b.id = a.id) AS v FROM iv80_r a WHERE a.g <> 3) p
+neg/subquery/arrayAgg	-	sql	SELECT CAST(array_agg(v ORDER BY id) AS TEXT) AS x FROM (SELECT a.id, (SELECT CAST(s AS INTERVAL) FROM iv80_r b WHERE b.id = a.id) AS v FROM iv80_r a WHERE a.g <> 3) p
+neg/subquery/arrayCtor	-	sql	SELECT id, CAST(ARRAY[v] AS TEXT) AS x FROM (SELECT a.id, (SELECT CAST(s AS INTERVAL) FROM iv80_r b WHERE b.id = a.id) AS v FROM iv80_r a WHERE a.g <> 3) p ORDER BY id
+neg/setop/toChar	-	sql	SELECT id, to_char(v, 'HH24:MI') AS x FROM (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g IN (1, 2) UNION ALL SELECT id, CAST(s AS INTERVAL) FROM iv80_r WHERE g IN (4, 5)) p ORDER BY id
+neg/setop/dateTrunc	-	sql	SELECT id, CAST(date_trunc('hour', v) AS TEXT) AS x FROM (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g IN (1, 2) UNION ALL SELECT id, CAST(s AS INTERVAL) FROM iv80_r WHERE g IN (4, 5)) p ORDER BY id
+neg/setop/castTime	-	sql	SELECT id, CAST(CAST(v AS TIME) AS TEXT) AS x FROM (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g IN (1, 2) UNION ALL SELECT id, CAST(s AS INTERVAL) FROM iv80_r WHERE g IN (4, 5)) p ORDER BY id
+neg/setop/orderedAgg	-	sql	SELECT CAST(mode() WITHIN GROUP (ORDER BY v) AS TEXT) AS x FROM (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g IN (1, 2) UNION ALL SELECT id, CAST(s AS INTERVAL) FROM iv80_r WHERE g IN (4, 5)) p
+neg/setop/distinctSum	-	sql	SELECT CAST(sum(DISTINCT v) AS TEXT) AS x FROM (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g IN (1, 2) UNION ALL SELECT id, CAST(s AS INTERVAL) FROM iv80_r WHERE g IN (4, 5)) p
+neg/setop/arrayAgg	-	sql	SELECT CAST(array_agg(v ORDER BY id) AS TEXT) AS x FROM (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g IN (1, 2) UNION ALL SELECT id, CAST(s AS INTERVAL) FROM iv80_r WHERE g IN (4, 5)) p
+neg/setop/arrayCtor	-	sql	SELECT id, CAST(ARRAY[v] AS TEXT) AS x FROM (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g IN (1, 2) UNION ALL SELECT id, CAST(s AS INTERVAL) FROM iv80_r WHERE g IN (4, 5)) p ORDER BY id
+neg/join/toChar	-	sql	SELECT id, to_char(v, 'HH24:MI') AS x FROM (SELECT a.id, b.v FROM iv80_r a JOIN (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) b ON a.id = b.id) p ORDER BY id
+neg/join/dateTrunc	-	sql	SELECT id, CAST(date_trunc('hour', v) AS TEXT) AS x FROM (SELECT a.id, b.v FROM iv80_r a JOIN (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) b ON a.id = b.id) p ORDER BY id
+neg/join/castTime	-	sql	SELECT id, CAST(CAST(v AS TIME) AS TEXT) AS x FROM (SELECT a.id, b.v FROM iv80_r a JOIN (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) b ON a.id = b.id) p ORDER BY id
+neg/join/orderedAgg	-	sql	SELECT CAST(mode() WITHIN GROUP (ORDER BY v) AS TEXT) AS x FROM (SELECT a.id, b.v FROM iv80_r a JOIN (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) b ON a.id = b.id) p
+neg/join/distinctSum	-	sql	SELECT CAST(sum(DISTINCT v) AS TEXT) AS x FROM (SELECT a.id, b.v FROM iv80_r a JOIN (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) b ON a.id = b.id) p
+neg/join/arrayAgg	-	sql	SELECT CAST(array_agg(v ORDER BY id) AS TEXT) AS x FROM (SELECT a.id, b.v FROM iv80_r a JOIN (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) b ON a.id = b.id) p
+neg/join/arrayCtor	-	sql	SELECT id, CAST(ARRAY[v] AS TEXT) AS x FROM (SELECT a.id, b.v FROM iv80_r a JOIN (SELECT id, CAST(s AS INTERVAL) AS v FROM iv80_r WHERE g <> 3) b ON a.id = b.id) p ORDER BY id
