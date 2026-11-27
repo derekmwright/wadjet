@@ -79,7 +79,7 @@ ar/iv_plus_ts	rows=[1|1970-01-02 00:00:00 ; 2|2024-01-16 10:30:00 ; 3|infinity ;
 ar/lit_cast_rt	rows=[infinity|-infinity]
 ar/lit_d_int	rows=[infinity|-infinity]
 ar/lit_d_minus	ERR 22008
-ar/lit_minus_ts	rows=[1|19723 days ; 2|-14 days -10:30:00 ; 3|-infinity ; 4|infinity ; 5|NULL ; 6|-2913173 days -23:59:59 ; 7|19723 days 00:00:00.001 ; 8|-infinity]	ERR 22008	temporal r2 (an infinite value has no number: 22008)
+ar/lit_minus_ts	rows=[1|19723 days ; 2|-14 days -10:30:00 ; 3|-infinity ; 4|infinity ; 5|NULL ; 6|-2913173 days -23:59:59 ; 7|19723 days 00:00:00.001 ; 8|-infinity]	ERR 0A000	temporal r16 (a timestamp difference is an interval: refused 0A000 at plan time, #1713d round 6)
 ar/lit_ts_iv	rows=[infinity|-infinity]
 ar/lit_ts_minus	ERR 22008
 ar/of_d_big_ts	ERR 22008
@@ -98,8 +98,8 @@ ar/of_ts_years	ERR 22008
 ar/one_plus_d	rows=[1|1970-01-02 ; 2|2024-01-16 ; 3|infinity ; 4|-infinity ; 5|NULL ; 6|10000-01-01 ; 7|1970-01-01 ; 8|infinity]
 ar/sort_by_arith	rows=[4 ; 7 ; 1 ; 2 ; 6 ; 3 ; 8 ; 5]
 ar/ts_minus_iv	rows=[1|1969-12-31 00:00:00 ; 2|2024-01-14 10:30:00 ; 3|infinity ; 4|-infinity ; 5|NULL ; 6|9999-12-30 23:59:59 ; 7|1969-12-30 23:59:59.999 ; 8|infinity]
-ar/ts_minus_lit	rows=[1|-19723 days ; 2|14 days 10:30:00 ; 3|infinity ; 4|-infinity ; 5|NULL ; 6|2913173 days 23:59:59 ; 7|-19723 days -00:00:00.001 ; 8|infinity]	ERR 22008	temporal r2 (an infinite value has no number: 22008)
-ar/ts_minus_ts	ERR 22008
+ar/ts_minus_lit	rows=[1|-19723 days ; 2|14 days 10:30:00 ; 3|infinity ; 4|-infinity ; 5|NULL ; 6|2913173 days 23:59:59 ; 7|-19723 days -00:00:00.001 ; 8|infinity]	ERR 0A000	temporal r16 (a timestamp difference is an interval: refused 0A000 at plan time, #1713d round 6)
+ar/ts_minus_ts	ERR 22008	ERR 0A000	temporal r16 (a timestamp difference is an interval: refused 0A000 at plan time, #1713d round 6)
 ar/ts_plus_iv	rows=[1|1970-01-02 00:00:00 ; 2|2024-01-16 10:30:00 ; 3|infinity ; 4|-infinity ; 5|NULL ; 6|10000-01-01 23:59:59 ; 7|1970-01-01 23:59:59.999 ; 8|infinity]
 ar/ts_to_bigint	ERR 42846	ERR 22008	temporal r2 (an infinite value has no number: 22008)
 ar/ts_to_d	rows=[1|1970-01-01 ; 2|2024-01-15 ; 3|infinity ; 4|-infinity ; 5|NULL ; 6|9999-12-31 ; 7|1969-12-31 ; 8|infinity]

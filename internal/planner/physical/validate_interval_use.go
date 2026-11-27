@@ -60,6 +60,19 @@ import (
 // that does not exist for an interval, 22007 for constant text that is no
 // interval input); the rest is 0A000.
 //
+// A timestamp difference (`timestamp - timestamp`, both operands declared
+// TIMESTAMP) is a PRODUCER too (#1713d round 6, the maintainer's ruling):
+// PostgreSQL types it interval, and this engine computes it as a double of
+// milliseconds (ADR-0012 temporal r16). It is classified interval-valued like
+// any other producer, so publication, keys, aggregates, function arguments,
+// casts and PostgreSQL's own 42883 / 42804 for a number beside an interval
+// apply to it unchanged; and because its value here is that millisecond
+// number, not an interval, every allowlisted operation that would consume it
+// (a comparison, a shift, a cast to text, an allowlisted function) refuses it
+// instead (carriesTsDiff, tsDiffRefusal). Only IS [NOT] NULL takes it, where
+// the number and the interval are NULL on the same rows. No statement can
+// observe the millisecond number.
+//
 // What this rule cannot see — the ROW's text under CAST(s AS INTERVAL), which
 // may be input this engine cannot hold (an opaque IntervalValue) — is guarded
 // where it is applied, compared or rendered, 0A000 at run time
@@ -73,29 +86,83 @@ func intervalRefusal(use string) error {
 		"stored nanosecond duration", use)
 }
 
-// tsDiffRefusal is the 0A000 for a timestamp difference used beside an
-// interval. `timestamp - timestamp` is a double of milliseconds here
-// (ADR-0012 temporal r16) where PostgreSQL types it interval and answers the
-// statement, so a 42883 / 42804 for a number beside an interval would claim
-// a refusal PostgreSQL does not make, and an answer would compare or combine
-// a millisecond count with an interval.
+// tsDiffRefusal is the 0A000 for a timestamp difference used where
+// PostgreSQL would use an interval and this engine cannot yet: the
+// difference is computed here as a number of milliseconds (ADR-0012 temporal
+// r16), never an interval, so no use of it may answer. Both workarounds were
+// measured against PostgreSQL 17.11 (1713d_r3.md, 1713d_r6.md).
 func tsDiffRefusal(use string) error {
-	return sqlerr.New("0A000", "a timestamp difference (timestamp - timestamp) cannot yet be %s: "+
-		"it is a number of milliseconds here, not an interval; compare the timestamps themselves "+
-		"instead, for example ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or "+
-		"a.ts > b.ts + INTERVAL '30 days'", use)
+	return sqlerr.New("0A000", "a timestamp difference (timestamp - timestamp) is an interval and "+
+		"cannot yet be used as %s: compare the timestamps themselves instead, for example "+
+		"ts > TIMESTAMP '2024-01-01 00:00:00' + INTERVAL '30 days' or a.ts > b.ts + INTERVAL '30 days', "+
+		"or take a number of seconds as extract(epoch FROM ts2) - extract(epoch FROM ts1)", use)
+}
+
+// refusal is the 0A000 for an interval-valued n used as use: the timestamp
+// difference's own wording when n's value derives from one.
+func (t intervalTyper) refusal(n plansql.Node, use string) error {
+	if t.carriesTsDiff(n) {
+		return tsDiffRefusal(use)
+	}
+	return intervalRefusal(use)
+}
+
+// carriesTsDiff reports an interval-valued n whose value derives from a
+// timestamp difference: the difference itself, or an interval construct
+// (arithmetic, CASE, COALESCE, NULLIF, GREATEST, LEAST, a CAST to INTERVAL)
+// over one. Such a value is a millisecond number at run time.
+func (t intervalTyper) carriesTsDiff(n plansql.Node) bool {
+	if !t.isInterval(n) {
+		return false
+	}
+	if t.isTimestampDifference(n) {
+		return true
+	}
+	for _, k := range exprOperands(n) {
+		if t.carriesTsDiff(k) {
+			return true
+		}
+	}
+	return false
+}
+
+// anyCarriesTsDiff is carriesTsDiff over several operands.
+func (t intervalTyper) anyCarriesTsDiff(ns []plansql.Node) bool {
+	for _, k := range ns {
+		if t.carriesTsDiff(k) {
+			return true
+		}
+	}
+	return false
 }
 
 // isTimestampDifference reports `timestamp - timestamp` (r16's millisecond
 // double), parentheses aside.
 func (t intervalTyper) isTimestampDifference(n plansql.Node) bool {
+	return timestampDifference(n, func(k plansql.Node) bool {
+		id, ok := t.declaredID(k)
+		return ok && id == parquet.TypeTimestamp
+	})
+}
+
+// timestampDifference reports a `-` PostgreSQL types interval as the
+// difference of two timestamps (timestamp_mi; with or without time zone,
+// one engine type here): both operands declared TIMESTAMP (isTs), or one
+// declared TIMESTAMP beside NULL or a quoted literal, which PostgreSQL
+// resolves to timestamp (`ts - '2024-01-01'`, `'2024-01-03' - ts`, `ts -
+// NULL`; measured, 1713d_r6.md). A quoted literal that is interval input
+// (`ts - '1 day'`) is no difference: the date arms refuse it 22007, as
+// PostgreSQL does. `date - date` is an integer on both sides and is not here.
+func timestampDifference(n plansql.Node, isTs func(plansql.Node) bool) bool {
 	b, ok := plansql.Unparen(n).(*plansql.BinaryOp)
 	if !ok || b.Op != "-" {
 		return false
 	}
-	l, lok := t.declaredID(b.Left)
-	r, rok := t.declaredID(b.Right)
-	return lok && rok && l == parquet.TypeTimestamp && r == parquet.TypeTimestamp
+	unknown := func(k plansql.Node) bool {
+		return isUnknownOperand(k) && !expr.IsQuotedIntervalText(k)
+	}
+	l, r := isTs(b.Left), isTs(b.Right)
+	return (l && r) || (l && unknown(b.Right)) || (r && unknown(b.Left))
 }
 
 // intervalTyper carries the declarations an operand's type is read from.
@@ -106,9 +173,9 @@ type intervalTyper struct {
 	subquery func(sql string) (parquet.TypeID, bool)
 }
 
-// isInterval is the provenance rule.
+// isInterval is the provenance rule, the timestamp difference a producer.
 func (t intervalTyper) isInterval(n plansql.Node) bool {
-	return n != nil && expr.IsIntervalNode(n)
+	return n != nil && expr.IsIntervalNodeWith(n, t.isTimestampDifference)
 }
 
 // isUnknown reports a quoted literal or NULL: PostgreSQL resolves either to
@@ -191,7 +258,7 @@ func (t intervalTyper) refuseIntervalTop(n plansql.Node, use string) error {
 		if err := expr.ConstantEvalError(n); err != nil {
 			return err
 		}
-		return intervalRefusal(use)
+		return t.refusal(n, use)
 	}
 	return nil
 }
@@ -263,6 +330,10 @@ func (t intervalTyper) judge(node plansql.Node) error {
 		if t.isInterval(n.Inner) && !castAdmitsInterval(n.TypeName) {
 			return sqlerr.New("42846", "cannot cast type interval to %s", strings.ToLower(strings.TrimSpace(n.TypeName)))
 		}
+		if t.carriesTsDiff(n.Inner) {
+			// CAST(<difference> AS TEXT) would print the millisecond number.
+			return tsDiffRefusal("the operand of a cast to " + strings.ToLower(strings.TrimSpace(n.TypeName)))
+		}
 	case *plansql.UnaryOp:
 		if t.isInterval(n.Inner) {
 			switch n.Op {
@@ -310,13 +381,13 @@ func (t intervalTyper) judge(node plansql.Node) error {
 	case *plansql.ArrayLitNode:
 		for _, e := range n.Elements {
 			if t.isInterval(e) {
-				return intervalRefusal("an array element")
+				return t.refusal(e, "an array element")
 			}
 		}
 	case *plansql.TupleNode:
 		for _, e := range n.Elements {
 			if t.isInterval(e) {
-				return intervalRefusal("a row element")
+				return t.refusal(e, "a row element")
 			}
 		}
 	}
@@ -367,13 +438,14 @@ func (t intervalTyper) comparison(op string, left plansql.Node, rights []plansql
 		switch {
 		case t.isInterval(k):
 		case isSubqueryOperand(k):
+			if t.anyCarriesTsDiff(all) {
+				return tsDiffRefusal("an operand compared with a subquery's column (subquery membership)")
+			}
 			return intervalRefusal("a comparison with a subquery's column (subquery membership)")
 		case isUnknownOperand(k):
 			if err := checkUnknown(k); err != nil {
 				return err
 			}
-		case t.isTimestampDifference(k):
-			return tsDiffRefusal("compared with an interval (" + strings.ToLower(op) + ")")
 		default:
 			l, r := "interval", t.typeName(k)
 			if !t.isInterval(left) {
@@ -381,6 +453,12 @@ func (t intervalTyper) comparison(op string, left plansql.Node, rights []plansql
 			}
 			return sqlerr.New("42883", "operator does not exist: %s %s %s", l, strings.ToLower(op), r)
 		}
+	}
+	if t.anyCarriesTsDiff(all) {
+		// Every operand is an interval to PostgreSQL, which answers; here the
+		// difference is a millisecond number and the comparison would compare
+		// that number with an interval.
+		return tsDiffRefusal("an operand of a comparison (" + strings.ToLower(op) + ")")
 	}
 	return nil
 }
@@ -425,9 +503,6 @@ func (t intervalTyper) binaryOp(n *plansql.BinaryOp) error {
 	if ri {
 		other, otherIsLeft = n.Left, true
 	}
-	if (n.Op == "+" || n.Op == "-") && t.isTimestampDifference(other) {
-		return tsDiffRefusal("combined with an interval (" + n.Op + ")")
-	}
 	opName := func() error {
 		l, r := "interval", t.typeName(other)
 		if otherIsLeft {
@@ -435,16 +510,38 @@ func (t intervalTyper) binaryOp(n *plansql.BinaryOp) error {
 		}
 		return sqlerr.New("42883", "operator does not exist: %s %s %s", l, n.Op, r)
 	}
+	ivOperand := n.Left
+	if ri {
+		ivOperand = n.Right
+	}
+	var err error
 	switch n.Op {
 	case "+":
-		return t.shiftOperand(other, opName, false)
+		err = t.shiftOperand(other, opName, false)
 	case "-":
 		// x - interval shifts; interval - x exists only for an interval x.
-		return t.shiftOperand(other, opName, li)
+		err = t.shiftOperand(other, opName, li)
 	case "||":
-		return intervalRefusal("an operand of || (an implicit text conversion)")
+		return t.refusal(ivOperand, "an operand of || (an implicit text conversion)")
+	default:
+		return opName()
 	}
-	return opName()
+	if err != nil || !t.carriesTsDiff(ivOperand) {
+		return err
+	}
+	// The interval operand is a timestamp difference (a millisecond number
+	// here). A number beside it is PostgreSQL's 42883 (no interval ± number),
+	// which shiftOperand admits for the run time to refuse — where the
+	// difference, a number, would be added instead. Any other operand it
+	// admits (a date or timestamp shifted by the difference) would shift by
+	// that number.
+	if lit, ok := plansql.Unparen(other).(*plansql.Lit); ok && lit.Kind == plansql.LitNumber {
+		return opName()
+	}
+	if id, ok := t.declaredID(other); ok && isNumericClass(id) {
+		return opName()
+	}
+	return tsDiffRefusal("an operand of " + n.Op + " beside " + t.typeName(other))
 }
 
 // shiftOperand admits `date/timestamp ± interval` (a TIMESTAMP), a TEXT
@@ -540,8 +637,6 @@ func (t intervalTyper) choice(what string, branches []plansql.Node) error {
 			if err := checkUnknown(b); err != nil {
 				return err
 			}
-		case t.isTimestampDifference(b):
-			return tsDiffRefusal("matched with an interval in " + what)
 		default:
 			first, second := t.typeName(b), "interval"
 			for _, p := range branches[:i] {
@@ -598,6 +693,16 @@ func (t intervalTyper) funcCall(fc *plansql.FuncCallNode) error {
 		}
 		return sqlerr.New("42883", "function ifnull(%s) does not exist", strings.Join(names, ", "))
 	}
+	label := name
+	if fc.OutputLabel != "" {
+		label = fc.OutputLabel
+	}
+	if t.anyCarriesTsDiff(fc.Args) {
+		// EXTRACT / date_part of the difference would read the millisecond
+		// number (epoch in milliseconds, not PostgreSQL's seconds); an
+		// aggregate would sum or order it.
+		return tsDiffRefusal("an argument of " + label)
+	}
 	if plansql.IsAggregate(name) || windowValueFunctions[name] {
 		return sqlerr.New("0A000", "%s over an interval argument is not supported", name)
 	}
@@ -608,10 +713,6 @@ func (t intervalTyper) funcCall(fc *plansql.FuncCallNode) error {
 			}
 		}
 		return nil
-	}
-	label := name
-	if fc.OutputLabel != "" {
-		label = fc.OutputLabel
 	}
 	if strings.EqualFold(label, "extract") {
 		return sqlerr.New("0A000", "EXTRACT over an interval argument is not supported: "+
@@ -718,4 +819,34 @@ func RefuseIntervalWrite(node plansql.Node, alias string, schema []parquet.Colum
 // ruling forbids. PostgreSQL stores the text (an assignment cast).
 func IntervalWriteRefusal() error {
 	return intervalRefusal("a written value")
+}
+
+// IsIntervalValuedWith is the provenance rule for a write door's source
+// expression, its columns declared by schema as DeclaredTypeOfNodeWith reads
+// them: an interval producer, a timestamp difference among them.
+func IsIntervalValuedWith(node plansql.Node, schema []parquet.Column, cat []expr.PGCategory, p *Planner) bool {
+	isTs := func(k plansql.Node) bool {
+		switch plansql.Unparen(k).(type) {
+		case *plansql.Lit, *plansql.SubqueryNode:
+			return false
+		}
+		d, c := DeclaredTypeOfNodeWith(k, schema, cat, p)
+		return c == expr.Decided && !d.Untyped && d.ID == parquet.TypeTimestamp
+	}
+	return node != nil && expr.IsIntervalNodeWith(node, func(k plansql.Node) bool {
+		return timestampDifference(k, isTs)
+	})
+}
+
+// IsTimestampDifferenceWith reports a write door's source expression whose
+// interval value derives from a timestamp difference (a millisecond number
+// here): its refusal names the difference.
+func IsTimestampDifferenceWith(node plansql.Node, schema []parquet.Column, cat []expr.PGCategory, p *Planner) bool {
+	return IsIntervalValuedWith(node, schema, cat, p) && !expr.IsIntervalNode(node)
+}
+
+// TsDiffWriteRefusal is the 0A000 for a timestamp difference written to a
+// TEXT column (stored, it would be the millisecond number's text).
+func TsDiffWriteRefusal() error {
+	return tsDiffRefusal("a written value")
 }

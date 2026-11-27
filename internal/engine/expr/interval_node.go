@@ -23,18 +23,30 @@ import (
 //
 // It is one rule for the plan (the declaration, the temporal validators) and
 // the compile (an unknown literal beside an interval reads as an interval).
-func IsIntervalNode(node plansql.Node) bool {
+func IsIntervalNode(node plansql.Node) bool { return IsIntervalNodeWith(node, nil) }
+
+// IsIntervalNodeWith is IsIntervalNode with one more PRODUCER, a node the
+// caller's declarations type interval where this package cannot: the
+// planner's `timestamp - timestamp` (#1713d round 6; PostgreSQL types it
+// interval). The same composition rules apply over it, so a CASE, COALESCE,
+// NULLIF, GREATEST, LEAST or interval arithmetic over a producer is one too.
+// producer nil is IsIntervalNode.
+func IsIntervalNodeWith(node plansql.Node, producer func(plansql.Node) bool) bool {
+	if producer != nil && node != nil && producer(node) {
+		return true
+	}
+	rec := func(k plansql.Node) bool { return IsIntervalNodeWith(k, producer) }
 	switch n := node.(type) {
 	case *plansql.ParenNode:
-		return IsIntervalNode(n.Inner)
+		return rec(n.Inner)
 	case *plansql.IntervalLit:
 		return true
 	case *plansql.CastNode:
 		return strings.EqualFold(strings.TrimSpace(n.TypeName), "interval")
 	case *plansql.UnaryOp:
-		return n.Op == "-" && IsIntervalNode(n.Inner)
+		return n.Op == "-" && rec(n.Inner)
 	case *plansql.BinaryOp:
-		l, r := IsIntervalNode(n.Left), IsIntervalNode(n.Right)
+		l, r := rec(n.Left), rec(n.Right)
 		switch n.Op {
 		case "+", "-":
 			// A quoted operand that reads as interval input beside an
@@ -54,16 +66,16 @@ func IsIntervalNode(node plansql.Node) bool {
 		if n.Else != nil {
 			results = append(results, n.Else)
 		}
-		return intervalOrNullChoice(results)
+		return intervalOrNullChoice(results, producer)
 	case *plansql.FuncCallNode:
 		switch strings.ToLower(n.Name) {
 		case "coalesce":
-			return intervalOrNullChoice(n.Args)
+			return intervalOrNullChoice(n.Args, producer)
 		case "nullif":
-			return len(n.Args) == 2 && IsIntervalNode(n.Args[0])
+			return len(n.Args) == 2 && rec(n.Args[0])
 		case "greatest", "least":
 			for _, a := range n.Args {
-				if IsIntervalNode(a) {
+				if rec(a) {
 					return true
 				}
 			}
@@ -71,6 +83,11 @@ func IsIntervalNode(node plansql.Node) bool {
 	}
 	return false
 }
+
+// IsQuotedIntervalText reports a quoted literal that reads as interval input
+// (the planner's timestamp-difference producer leaves `ts - '1 day'` to the
+// date arms, which refuse it 22007 as PostgreSQL does).
+func IsQuotedIntervalText(n plansql.Node) bool { return isQuotedIntervalText(n) }
 
 // isQuotedIntervalText reports a quoted literal that reads as interval input.
 func isQuotedIntervalText(n plansql.Node) bool {
@@ -88,11 +105,11 @@ func isQuotedIntervalText(n plansql.Node) bool {
 // intervalOrNullChoice reports a choice's branches that are each an interval,
 // a quoted literal or NULL, at least one an interval: PostgreSQL's
 // select_common_type answers interval for them.
-func intervalOrNullChoice(branches []plansql.Node) bool {
+func intervalOrNullChoice(branches []plansql.Node, producer func(plansql.Node) bool) bool {
 	saw := false
 	for _, b := range branches {
 		switch {
-		case IsIntervalNode(b):
+		case IsIntervalNodeWith(b, producer):
 			saw = true
 		case isNullNode(b), isQuotedNode(b):
 		default:

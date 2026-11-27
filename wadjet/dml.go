@@ -1736,11 +1736,15 @@ type assignSource struct {
 	// evaluated inside an expression (`CASE … THEN 2.50 END`) arrives as a
 	// float box and is numeric at that scale (arc VL).
 	declScale int
-	// interval is an interval-valued source (expr.IsIntervalNode): there is
+	// interval is an interval-valued source (physical.IsIntervalValuedWith,
+	// a timestamp difference among them): there is
 	// no INTERVAL column type, so check refuses it — 0A000 into TEXT, where
 	// it would be stored as its text (#1713d), and PostgreSQL's 42804 into
 	// any other column.
 	interval bool
+	// tsDiff: the interval derives from a timestamp difference, whose
+	// refusal names it (a millisecond number here; #1713d round 6).
+	tsDiff bool
 }
 
 // assignSourceOf classifies a source expression. schema resolves column
@@ -1749,8 +1753,8 @@ type assignSource struct {
 // (nil for a catalog schema) and p declares a scalar subquery from its own
 // plan — see dmlSourceIsFloat. A JSON field read declares TEXT (dmlJSONAccess).
 func assignSourceOf(node plansql.Node, schema []parquet.Column, cat []expr.PGCategory, p *physical.Planner) assignSource {
-	if expr.IsIntervalNode(node) {
-		return assignSource{interval: true}
+	if physical.IsIntervalValuedWith(node, schema, cat, p) {
+		return assignSource{interval: true, tsDiff: physical.IsTimestampDifferenceWith(node, schema, cat, p)}
 	}
 	if lit, ok := dmlLiteralText(node); ok {
 		src := assignSource{literal: lit, isLiteral: true}
@@ -1846,6 +1850,9 @@ func numericLiteralText(lit string) string {
 func (s assignSource) check(col parquet.Column) error {
 	if s.interval {
 		if col.Type == parquet.TypeString {
+			if s.tsDiff {
+				return physical.TsDiffWriteRefusal()
+			}
 			return physical.IntervalWriteRefusal()
 		}
 		return sqlerr.New("42804", "column %q is of type %s but expression is of type interval",

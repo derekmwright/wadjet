@@ -126,7 +126,6 @@ func TestQuotedTemporalOperandIsResolvedInEveryStatement(t *testing.T) {
 	for _, tc := range []struct{ e, tgt string }{
 		{"d - '2026-03-01'", "i"}, {"'2026-03-05' - d", "i"},
 		{"ts + '1 day'", "ts"}, {"'1 day' + ts", "ts"}, {"ts + '0'", "ts"},
-		{"ts - '2026-03-01 10:00:00'", "f"},
 	} {
 		for _, st := range statements(tc.e, tc.tgt) {
 			cells++
@@ -136,6 +135,25 @@ func TestQuotedTemporalOperandIsResolvedInEveryStatement(t *testing.T) {
 			reset()
 		}
 	}
+	// `ts - '…'` is a timestamp difference, an interval on PostgreSQL 17.11
+	// (#1713d round 6): published, keyed, aggregated or written it is
+	// refused — 0A000, or PostgreSQL's own 42804 for an interval written to
+	// a double precision column — and only IS [NOT] NULL answers. It used to
+	// answer the millisecond count in every statement.
+	tsDiff := map[string]string{
+		"select": "0A000", "group_by": "0A000", "having": "0A000", "order_by": "0A000",
+		"window_order": "0A000", "insert_select": "0A000", "ctas": "0A000",
+		"values": "42804", "update_set": "42804", "merge_set": "42804", "merge_insert": "42804",
+		"where": "", "update_where": "", "delete_where": "", "merge_when": "",
+	}
+	for _, st := range statements("ts - '2026-03-01 10:00:00'", "f") {
+		cells++
+		err := run(st[1])
+		if got := sqlerr.StateOf(err); got != tsDiff[st[0]] {
+			t.Errorf("ts - '2026-03-01 10:00:00' / %s: got %q (%v), want %q\n  %s", st[0], got, err, tsDiff[st[0]], st[1])
+		}
+		reset()
+	}
 	for _, tc := range []struct{ sql, want string }{
 		{"SELECT d - '2026-03-01' AS v FROM qo", "2"},
 		{"SELECT '2026-03-05' - d AS v FROM qo", "2"},
@@ -143,8 +161,6 @@ func TestQuotedTemporalOperandIsResolvedInEveryStatement(t *testing.T) {
 		{"SELECT CAST('1 day' + ts AS TEXT) AS v FROM qo", "2026-03-04 10:20:30"},
 		{"SELECT CAST(ts + '0' AS TEXT) AS v FROM qo", "2026-03-03 10:20:30"},
 		{"SELECT CAST(ts + '90 minutes' AS TEXT) AS v FROM qo", "2026-03-03 11:50:30"},
-		// No INTERVAL type: `timestamp - timestamp` is the documented milliseconds.
-		{"SELECT ts - '2026-03-01 10:00:00' AS v FROM qo", "1.7403e+08"},
 		{"SELECT d - NULL AS v FROM qo", "<nil>"},
 	} {
 		res, err := db.Query(ctx, tc.sql)

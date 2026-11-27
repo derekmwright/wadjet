@@ -54,6 +54,11 @@ func checkBooleanContext(node plansql.Node, scope *colScope, site string) error 
 		// integer on the server and DELETED every row here (round-1 review,
 		// B1; the arm below is the reviewer's, with credit in the commit).
 	}
+	if (intervalTyper{decls: rowFieldScopeDecls(scope)}).isInterval(node) {
+		// An interval by provenance (a timestamp difference among them,
+		// #1713d round 6), whatever its carrier declares.
+		return sqlerr.New("42804", "argument of %s must be type boolean, not type interval", site)
+	}
 	_, name, ok := provableNonBooleanType(node, scope)
 	if !ok {
 		return nil

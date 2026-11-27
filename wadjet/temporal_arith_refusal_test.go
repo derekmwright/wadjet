@@ -53,7 +53,7 @@ func TestTemporalArithmeticPostgreSQLHasNoOperatorFor(t *testing.T) {
 	}
 	for _, sql := range []string{
 		"SELECT d + 1 AS v FROM ta", "SELECT 1 + d AS v FROM ta", "SELECT d - d AS v FROM ta",
-		"SELECT ts - ts AS v FROM ta", "SELECT ts + INTERVAL '1 hour' AS v FROM ta",
+		"SELECT (ts - ts) IS NULL AS v FROM ta", "SELECT ts + INTERVAL '1 hour' AS v FROM ta",
 		"SELECT MAX(d) + 0 AS v FROM ta", "SELECT CURRENT_DATE - 1 AS v",
 	} {
 		if _, err := db.Query(ctx, sql); err != nil {

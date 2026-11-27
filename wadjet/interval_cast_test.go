@@ -70,11 +70,13 @@ func TestTextCastToIntervalIsTheLiteralsInterval(t *testing.T) {
 	if _, err := db.Execute(ctx, "UPDATE iv SET ts = ts + CAST('1 day' AS INTERVAL)"); err != nil {
 		t.Fatal(err)
 	}
-	res, err := db.Query(ctx, "SELECT CAST(ts AS TEXT) AS v, ts - ts AS z FROM iv")
+	res, err := db.Query(ctx, "SELECT CAST(ts AS TEXT) AS v FROM iv")
 	if err != nil || len(res.Rows) != 1 || fmt.Sprint(res.Rows[0]["v"]) != "2026-03-04 10:00:00" {
 		t.Fatalf("after UPDATE: %v %v", res, err)
 	}
-	if len(res.OutputSchema) != 2 || res.OutputSchema[1].Type != parquet.TypeFloat64 {
-		t.Errorf("ts - ts declared %v, want double precision (the documented milliseconds)", res.OutputSchema)
+	// #1713d round 6: `ts - ts` is an interval (PostgreSQL's type), not the
+	// millisecond double it was declared, and a published one is refused.
+	if _, err := db.Query(ctx, "SELECT ts - ts AS z FROM iv"); sqlerr.StateOf(err) != "0A000" {
+		t.Errorf("ts - ts published: %v, want 0A000 (a timestamp difference is an interval)", err)
 	}
 }
