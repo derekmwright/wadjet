@@ -184,7 +184,6 @@ func unibArmKept() map[string]struct {
 		"null_xu": {unibTableLess, map[string]string{"async": "ERR a table-less SELECT has no distributed stage", "async-probesplit": "ERR a table-less SELECT has no distributed stage"}},
 		"null_x2": {unibTableLess, map[string]string{"async": "ERR a table-less SELECT has no distributed stage", "async-probesplit": "ERR a table-less SELECT has no distributed stage"}},
 		"xx_n_gk": {unibNoSelectList, map[string]string{"async": "ERR the stage DAG computed no SELECT list for this shape", "async-probesplit": "ERR the stage DAG computed no SELECT list for this shape"}},
-		"e08":     {unibSwappedRename, map[string]string{"async": "rows=6 0.75,NULL | 1.25,NULL | 10.00,NULL | 2.50,NULL | 3.33,NULL | NULL,NULL", "async-probesplit": "rows=6 0.75,NULL | 1.25,NULL | 10.00,NULL | 2.50,NULL | 3.33,NULL | NULL,NULL"}},
 	}
 }
 
@@ -193,7 +192,6 @@ const (
 	unibGroupByMerge    = "the forced probe split cannot merge a GROUP BY over a text key, at c67ebf5b too (review r4 N2)"
 	unibProbeSplitCount = "the forced probe split merges no DISTINCT / GROUP BY / MIN: one row per worker, at c67ebf5b too (review r4 N2)"
 	unibTableLess       = "the asynchronous door refuses an arm with no FROM clause, at c67ebf5b too (review r4 N3)"
-	unibSwappedRename   = "the asynchronous door answers NULL for the second of two swapped names under a GROUP BY, at c67ebf5b too (UN-F10)"
 )
 
 var unibVals = []string{"1", "1.5", "7", "0.0000000001", "NULL"}
