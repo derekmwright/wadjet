@@ -1344,8 +1344,9 @@ spill manager (`exec.TestNEBuildDeclinesToTheSpillingBuild`,
 `coordinator.TestCompactBuildBudgetEveryArm`). No such route exists for the
 key-only builds or once rows are consumed: those refuse.
 
-Remaining bounds: the parallel key-only build's per-worker tables are sized for
-a whole batch of new keys each, so with many CPUs it holds megabytes for a few
+A parallel key-only worker makes its table on its first batch, so workers that
+pull nothing hold nothing. Remaining bounds: each worker's table is sized for a
+whole batch of new keys, so with many CPUs the build holds megabytes for a few
 thousand distinct keys and now refuses at small budgets where it used to answer
 uncharged; the worker count follows `runtime.NumCPU()`, not
 `WADJET_SCAN_WORKERS`; a DAG worker's NE build declines only when its stage
