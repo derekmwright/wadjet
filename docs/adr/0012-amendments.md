@@ -1224,7 +1224,7 @@ The round-6 entry below says "No statement can observe the number." That was not
 | family | row | change | gate |
 |---|---|---|---|
 | temporal | [r16](0012-divergences/temporal.md#catalog) | Amended: the two layers (statement rule, expression guard) recorded; the aggregate, window, scalar-subquery (star body, outer column), `lag(NULL, 1, ts)` and write-door subquery shapes refused (b0a3e59d: the millisecond number) | `coordinator.TestArc1713dTimestampDifferenceGuardEveryArm`, `server.TestTimestampDifferenceGuardOnEveryDoor`, `wadjet.TestTimestampDifferenceGuardOnTheWriteDoors`, `expr.TestTimestampDifferenceGuardSites` |
-| temporal | [r2](0012-divergences/temporal.md#catalog) | Narrowed: where the statement rule does not refuse a difference over an infinite column value first, the guard's 0A000 precedes the 22008 (`ts - '…'` keeps 22008: the literal is read first) | `expr.TestArcTIInfiniteValueOwners` |
+| temporal | [r2](0012-divergences/temporal.md#catalog) | Unchanged at the doors: an infinite operand of a difference the guard refuses on the boxed path keeps 22008 (the constant `TIMESTAMP 'infinity' - TIMESTAMP 'infinity'` among them); a finite one is the guard's 0A000 (through round 7: the milliseconds) | `expr.TestArcTIInfiniteValueOwners`, `coordinator.TestArcTIInfinityEveryArm` (ar/lit\_ts\_minus) |
 
 ## 2026-11-26: a timestamp difference is an interval (#1713d round 6)
 
