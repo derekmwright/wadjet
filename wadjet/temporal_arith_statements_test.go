@@ -144,7 +144,14 @@ func TestTemporalArithmeticRefusedInEveryStatement(t *testing.T) {
 	// interval") writing it into the double column. This engine computes
 	// neither, so the binder refuses the pair 0A000 timestamp-date-difference
 	// in every statement (the rulings on 1680c r3: its 42883 was untrue), and
-	// nothing is written.
+	// nothing is written. On the five write statements into the double
+	// column (values, insert_select, update_set, merge_set, merge_insert)
+	// PostgreSQL's own 42804 would win (rule 3); here the binder's refusal
+	// precedes it. Pinned as a KNOWN CODE MISMATCH, both loud refusals: the
+	// write door's own type check (assignSource.check through
+	// physical.IsIntervalValuedWith) does not type the pair as an interval at
+	// all, so putting it first is not a local reordering (the architect's
+	// ruling on 1680c r4: leave the order, pin, list as an open line).
 	for _, e := range []string{"d - ts", "ts - d"} {
 		for _, st := range statements(e, "f") {
 			cells++
