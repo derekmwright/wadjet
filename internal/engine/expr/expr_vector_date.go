@@ -141,6 +141,10 @@ func vecExtract(args []*batch.Vector, out *batch.Vector, n int) {
 			out.Float64Data[i] = float64(t.YearDay())
 		case "epoch":
 			out.Float64Data[i] = epochSeconds(t)
+		case "timezone", "timezone_hour", "timezone_minute":
+			// The session zone's offset: every session runs at UTC (#1680
+			// line d), so zero, as fnTimezoneHour answers.
+			out.Float64Data[i] = 0
 		default:
 			// fnExtract returns nil for an unrecognized unit. Leaving the
 			// pooled vector's stale contents in place instead answered with

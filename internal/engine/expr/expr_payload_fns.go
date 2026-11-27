@@ -576,24 +576,26 @@ func fnToMilliseconds(args []any) any {
 	return nil
 }
 
+// fnTimezoneHour and fnTimezoneMinute answer the session time zone's offset
+// at the instant, as PostgreSQL's `extract(timezone_hour / timezone_minute
+// FROM timestamptz)` does. Every session of this engine runs at UTC (a SET
+// TimeZone naming another zone is refused at the door, #1680 line d), so the
+// offset is zero. They read time.UnixMilli(ms).Zone() until #1680 line d —
+// the offset of the SERVER PROCESS's local zone (TZ / /etc/localtime), so
+// the answer was -4 on a host in New York in July and 0 on one in UTC, under
+// a session that reported TimeZone=UTC.
 func fnTimezoneHour(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	ms := int64(ToFloat64(args[0]))
-	t := time.UnixMilli(ms)
-	_, offset := t.Zone()
-	return int64(offset / 3600)
+	return int64(0)
 }
 
 func fnTimezoneMinute(args []any) any {
 	if len(args) < 1 || args[0] == nil {
 		return nil
 	}
-	ms := int64(ToFloat64(args[0]))
-	t := time.UnixMilli(ms)
-	_, offset := t.Zone()
-	return int64((offset % 3600) / 60)
+	return int64(0)
 }
 
 // ── Formatting ──────────────────────────────────────────────────────────────

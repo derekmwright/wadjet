@@ -120,6 +120,11 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		}
 	}
 	if k := castTemporalKindLower(strings.TrimSpace(dest)); k != castNotTemporal {
+		if strings.TrimSpace(dest) == "timestamptz" {
+			if ms, isText := castTimestamptzText(v); isText {
+				return ms
+			}
+		}
 		return castTemporal(b, row, e.Operand, v, k)
 	}
 	// An infinite DATE or TIMESTAMP has a text and nothing else: the number

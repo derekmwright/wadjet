@@ -168,6 +168,12 @@ func fnExtract(args []any) any {
 		return float64(t.YearDay())
 	case "epoch":
 		return epochSeconds(t)
+	case "timezone", "timezone_hour", "timezone_minute":
+		// The session zone's offset at the instant: every session runs at
+		// UTC (#1680 line d), so zero, as fnTimezoneHour answers. These
+		// answered NULL (the unknown-unit arm below) where PostgreSQL
+		// answers 0 under TimeZone=UTC.
+		return float64(0)
 	default:
 		return nil
 	}

@@ -43,6 +43,38 @@ func castTemporalText(src any, kind castTemporalKindT) (any, bool) {
 	return ms, true
 }
 
+// castTimestamptzText reads TEXT as a `timestamp with time zone`: the INSTANT
+// it names, held in the TIMESTAMP carrier as that instant's UTC wall clock
+// (#1680 line d). This engine has no timestamptz type and runs every session
+// at UTC (a SET TimeZone naming another zone is refused at the door), so a
+// spelling with no zone is that wall clock at UTC, as PostgreSQL reads it
+// under TimeZone=UTC, and a spelling with an offset (`+05:30`, `-04`, `Z`)
+// names the instant wall − offset. Before this, `TIMESTAMPTZ '2024-07-01
+// 12:00:00+05:30'` and `CAST('…+05:30' AS TIMESTAMPTZ)` read the offset the
+// way TIMESTAMP input does — discarded — and answered 12:00 where PostgreSQL
+// answers 06:30 UTC: a wrong instant under every zone.
+//
+// The accept-set and every refusal are the TIMESTAMP grammar's
+// (castTemporalText): text it refuses keeps its 22007 / 22008, and the
+// infinities keep their carrier extremes. An instant the shift carries past
+// PostgreSQL's timestamp range is its 22008. ok=false means v is not text.
+func castTimestamptzText(v any) (any, bool) {
+	text, isText := stringOperand(v)
+	if !isText {
+		return nil, false
+	}
+	box, _ := castTemporalText(text, castToTimestampKind)
+	_, off, zoned, ok := parquet.ParseTimestampZone(text)
+	if !ok || !zoned || off == 0 {
+		return box, true
+	}
+	ms := box.(int64) - int64(off)*1000
+	if err := parquet.TimestampMillisInRange(ms); err != nil {
+		panic(fatalEval{err})
+	}
+	return ms, true
+}
+
 // castFloatText reads TEXT as a value of a float destination, refusing what
 // PostgreSQL refuses instead of answering ToFloat64's zero.
 //
