@@ -1305,3 +1305,44 @@ answering and a failed own spill fails the statement
 `exec.TestStaleReliefAtBuildEnd`,
 `worker.TestFragmentJoinBuildFailureReleasesTheSharedPool`,
 `physical.TestPoolJoinBuildFailureReleasesOnEveryRoute`.
+
+### 2026-11-27: the whole-file read pool hands out at most twice the request (#1706, line 1706q)
+
+Factual record; nothing here changes what is charged. Producers 2 and 4 still
+charge a whole-file buffer at its `cap()`, because that capacity is held while
+the buffer is out. What changed is which buffer a request can be given.
+`readBufPool` was one process-wide `sync.Pool` that handed out any buffer at
+least as big as the request, so the charge depended on unrelated earlier work
+in the same process: on a store without `GetReaderAt`, the footer pass for
+`d5_outer`'s 297-byte file on one `wadjet.DB` drew the 933,736-byte buffer that
+another DB's query had left behind. That put a 512 KiB statement at 934,033
+bytes before it had read anything, and its file load was forced
+(`coordinator.TestCorrelatedRerunPaysTheFullReserveWaitPerOuterRow`: 5 of 5
+failures at `GOGC=off` at bc499c20, 5 of 5 passes at the fix).
+
+The pool now uses the row-group slab rule. Buckets are power-of-two classes of
+the buffer's capacity. A request for n bytes probes its own class and the class
+above, and takes a buffer only if its capacity is in [n, 2n]. Any other buffer
+goes back to its bucket, and the request allocates exactly n. So a whole-file
+buffer is charged at most twice the bytes it was asked to hold (the request's
+size, which is the manifest's `SizeBytes`). No buffer smaller than 64 KiB is
+pooled, so a request under 32 KiB never probes the pool. Gates:
+`physical.TestReadBufPoolBoundsWhatItHandsOut` and
+`physical.TestASmallFileIsNotChargedForAForeignPooledBuffer`. The second gate
+seeds the pool with megabyte buffers and runs with the collector off, so it
+does not depend on GC timing. Against the old rule it peaks at 2,097,152
+charged bytes for a 298-byte file and forces one reservation; with the bound
+it peaks at 596 bytes and forces none.
+
+The in-process TPC-H SF1 run never touches this pool. MemStore has
+`GetReaderAt`, and the row-group path carries every load: 0 hits and 0 misses
+on both arms.
+
+The other process-wide buffer pools do not take part in a tracked charge:
+the parquet chunk pool and the zstd page pool are not charged to any tracker;
+the row-group slab pool charges the row group's own byte range, in buckets that
+are already bounded at twice that range; `scan.fileReadPool` belongs to the
+legacy `engine/scan` Scanner and is uncharged. `exec.routedBufPool` (the
+partitioned aggregate) is not charged either. `BackingPool`, the decode-ahead
+buffers and the shuffle decode-ahead pool are owned by one scan or one reader,
+not by the process.
