@@ -462,10 +462,11 @@ func (inner *scanSourceInner) putSlab(buf []byte) {
 // cold at every query and the scan allocates its whole working set again —
 // measured at +8.4% suite heap over TPC-H SF1 against the whole-file read,
 // whose pool is warm from the query before. What makes a shared pool safe here
-// is the CLASS: readBufPool mixes whole-file buffers with row-group ones and
-// hands out whatever is big enough, which is how a 332-byte row group came to
-// be held in 105,900 bytes; a class bucket can only ever hand back a buffer
-// within a factor of two of what was asked for.
+// is the CLASS: readBufPool used to mix whole-file buffers with row-group ones
+// and hand out whatever was big enough, which is how a 332-byte row group came
+// to be held in 105,900 bytes; a class bucket can only ever hand back a buffer
+// within a factor of two of what was asked for. readBufPool now keeps the
+// same rule for whole-file buffers (#1706), in buckets of its own.
 //
 // A handful of classes exist in any process, so the map stays tiny, and
 // sync.Pool sheds idle buffers at GC exactly as readBufPool's do.

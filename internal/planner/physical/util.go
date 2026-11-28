@@ -63,29 +63,87 @@ func footerCacheIdentity(cat *catalog.Catalog, entry catalog.FileEntry, size int
 		"@" + strconv.FormatInt(entry.CreatedAt.UnixNano(), 10)
 }
 
-// readBufPool reuses []byte buffers across queries to reduce allocation
-// pressure on the GC. At SF1, file reads allocate ~7.6GB cumulatively
-// across 22 TPC-H queries — pooling cuts this by 60-70% since the same
-// Parquet files are re-read by multiple queries.
-var readBufPool sync.Pool
+// readBufPool reuses whole-file []byte buffers across queries to reduce
+// allocation pressure on the GC: the same Parquet files are re-read by many
+// queries. It is PROCESS-wide, shared by every wadjet.DB and every statement,
+// and its buffers are charged to the statement that holds them at their
+// CAPACITY (trackPooledBuf, fileSlot.ensureLoadedFor) — the capacity really is
+// held while the buffer is out.
+//
+// So what the pool may hand out is bounded: a request for n bytes receives a
+// buffer of capacity in [n, 2n], never more (readBufPoolBound). The pool is
+// kept in power-of-two size classes keyed by capacity (slabClass), and a
+// request probes its own class and the one above, admitting a buffer only
+// inside the bound and putting any other back — the row-group slab pool's
+// rule (getSlab). Before the bound, one pool handed out any buffer at least as
+// big as the request, so a 297-byte file was given, and its statement charged
+// for, a 933,736-byte buffer another DB's query had left behind; the charge
+// alone put a 512 KiB statement over budget before it had read a byte, and its
+// next reservation waited and was forced (#1706). A miss allocates exactly n,
+// never the class: rounding every buffer up is paid again after every GC.
+var (
+	readBufPoolMu sync.Mutex
+	readBufPools  = map[int]*sync.Pool{}
 
-// getReadBuf returns a []byte of at least size bytes from the pool,
-// or allocates a new one.
+	// readBufHits and readBufMisses count getReadBuf's outcomes, so the pool's
+	// hit rate is measurable (a bounded pool that never hits is a regression).
+	readBufHits   atomic.Int64
+	readBufMisses atomic.Int64
+)
+
+// readBufPoolBound is the largest capacity, as a multiple of the request,
+// that getReadBuf hands out.
+const readBufPoolBound = 2
+
+// readBufPoolMinCap is the smallest capacity putReadBuf keeps: smaller
+// buffers are left to the GC rather than polluting the pool.
+const readBufPoolMinCap = 64 * 1024
+
+func readBufBucket(class int) *sync.Pool {
+	readBufPoolMu.Lock()
+	defer readBufPoolMu.Unlock()
+	p := readBufPools[class]
+	if p == nil {
+		p = &sync.Pool{}
+		readBufPools[class] = p
+	}
+	return p
+}
+
+// ReadBufPoolStats returns how many whole-file read buffers this process has
+// taken from the pool and how many it allocated, since start.
+func ReadBufPoolStats() (hits, misses int64) {
+	return readBufHits.Load(), readBufMisses.Load()
+}
+
+// getReadBuf returns a []byte of len size whose capacity is at most
+// readBufPoolBound*size, from the pool when one fits, else freshly allocated.
 func getReadBuf(size int) []byte {
-	if v := readBufPool.Get(); v != nil {
-		buf := v.([]byte)
-		if cap(buf) >= size {
-			return buf[:size]
+	// No pooled buffer is under readBufPoolMinCap, so no request under half of
+	// it can be served inside the bound: do not probe.
+	if size*readBufPoolBound >= readBufPoolMinCap {
+		class := slabClass(size)
+		for _, c := range [2]int{class, 2 * class} {
+			p := readBufBucket(c)
+			if v := p.Get(); v != nil {
+				buf := v.([]byte)
+				if cap(buf) >= size && cap(buf) <= readBufPoolBound*size {
+					readBufHits.Add(1)
+					return buf[:size]
+				}
+				p.Put(buf) // too small, or bigger than the bound allows
+			}
 		}
 	}
+	readBufMisses.Add(1)
 	return make([]byte, size)
 }
 
-// putReadBuf returns a buffer to the pool for reuse. Only pool buffers
-// above 64KB to avoid polluting the pool with tiny allocations.
+// putReadBuf returns a buffer to its size class for reuse. Only buffers of
+// readBufPoolMinCap or more are kept.
 func putReadBuf(buf []byte) {
-	if cap(buf) >= 64*1024 {
-		readBufPool.Put(buf[:cap(buf)])
+	if cap(buf) >= readBufPoolMinCap {
+		readBufBucket(slabClass(cap(buf))).Put(buf[:cap(buf)])
 	}
 }
 
