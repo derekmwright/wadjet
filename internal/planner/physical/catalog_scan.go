@@ -26,7 +26,6 @@ func (p *Planner) newScanner(ctx context.Context, node *logical.Node) exec.Sourc
 	if err != nil {
 		return &exec.SliceSource{}
 	}
-	_ = tableMeta
 
 	// Create a scanner source that reads from the catalog
 	src := &catalogScanSource{
@@ -34,6 +33,7 @@ func (p *Planner) newScanner(ctx context.Context, node *logical.Node) exec.Sourc
 		tableName:        tableName,
 		partitionFilter:  partFilter,
 		requiredCols:     requiredCols,
+		storedCols:       tableMeta.Schema.Columns,
 		scanPreds:        scanPreds,
 		manifestSnapshot: p.ManifestSnapshot,
 	}
@@ -65,15 +65,21 @@ type catalogScanSource struct {
 	tableName       string
 	partitionFilter map[string]string
 	requiredCols    []string
-	scanPreds       []logical.Predicate
-	allowedFiles    []string // probe-split: only scan these files (nil = all)
-	inner           exec.Source
-	cache           *scanCached      // non-nil when this table is scanned multiple times
-	replayIdx       atomic.Int64     // position in cache replay (atomic for parallel pipeline)
-	projOnce        sync.Once        // guards projIdx/projSchema init (replay Next is concurrent)
-	projIdx         []int            // cache-batch column indices for this consumer; nil = no projection
-	projSchema      []parquet.Column // this consumer's projected schema
-	isReplay        bool             // true when reading from cache instead of scanning; written once in Init before runParallel starts, so no synchronization needed
+	// storedCols is the table's declared schema: the read schema the scan's
+	// row values and its row-group statistics are both reconciled to (DECIMAL
+	// scale, TIMESTAMP unit — parquet.ReconcileRowGroupStats,
+	// TimestampDivisorFromSchemaNode). The build-key scan filter guard reads a
+	// column's stored type here (scanFilterTarget, #1677 line r).
+	storedCols   []parquet.Column
+	scanPreds    []logical.Predicate
+	allowedFiles []string // probe-split: only scan these files (nil = all)
+	inner        exec.Source
+	cache        *scanCached      // non-nil when this table is scanned multiple times
+	replayIdx    atomic.Int64     // position in cache replay (atomic for parallel pipeline)
+	projOnce     sync.Once        // guards projIdx/projSchema init (replay Next is concurrent)
+	projIdx      []int            // cache-batch column indices for this consumer; nil = no projection
+	projSchema   []parquet.Column // this consumer's projected schema
+	isReplay     bool             // true when reading from cache instead of scanning; written once in Init before runParallel starts, so no synchronization needed
 	// claimedCache is true when THIS source created cache.ready, i.e. it owes
 	// every other consumer a release. Written once in Init, before any worker
 	// goroutine exists, for the same reason isReplay is.

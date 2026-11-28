@@ -6,6 +6,7 @@ package physical
 import (
 	"strings"
 
+	"github.com/derekmwright/wadjet/internal/engine/batch"
 	"github.com/derekmwright/wadjet/internal/engine/exec"
 	"github.com/derekmwright/wadjet/internal/planner/logical"
 )
@@ -79,23 +80,25 @@ func frontLoadBlooms(source exec.Source, ops []exec.UnaryOperator) []exec.UnaryO
 
 // attachBloomToScanSource installs a join's bloom scan filter on the probe
 // side's catalog scan for row-group pruning — only where scanFilterTarget
-// PROVES the probe key at the join is that scan's stored column (#1677). ops
-// are the operators between source and the join's probe, in pipeline order.
-func attachBloomToScanSource(source exec.Source, ops []exec.UnaryOperator, bsf *exec.BloomScanFilter) {
-	if s := scanFilterTarget(source, ops, bsf.Column); s != nil {
+// PROVES the probe key at the join is that scan's stored column and the
+// bloom's values are in its stored type (#1677). ops are the operators
+// between source and the join's probe, in pipeline order; valTypes is
+// scanFilterValueTypes' answer for the join.
+func attachBloomToScanSource(source exec.Source, ops []exec.UnaryOperator, bsf *exec.BloomScanFilter, valTypes map[string]batch.TypeID) {
+	if s := scanFilterTarget(source, ops, bsf.Column, scanFilterValueType(valTypes, bsf.Column)); s != nil {
 		s.SetBloomFilter(bsf)
 	}
 }
 
 // attachDynamicFilterToScanSource installs a join's build-key min/max ranges
 // on the probe side's catalog scan for row-group pruning, keeping only the
-// ranges whose column scanFilterTarget proves (#1677). ops are as for
-// attachBloomToScanSource.
-func attachDynamicFilterToScanSource(source exec.Source, ops []exec.UnaryOperator, ranges []exec.DynamicRange) {
+// ranges whose column and value type scanFilterTarget proves (#1677). ops and
+// valTypes are as for attachBloomToScanSource.
+func attachDynamicFilterToScanSource(source exec.Source, ops []exec.UnaryOperator, ranges []exec.DynamicRange, valTypes map[string]batch.TypeID) {
 	var target *catalogScanSource
 	var kept []exec.DynamicRange
 	for _, r := range ranges {
-		s := scanFilterTarget(source, ops, r.Column)
+		s := scanFilterTarget(source, ops, r.Column, scanFilterValueType(valTypes, r.Column))
 		if s == nil || (target != nil && s != target) {
 			continue
 		}
@@ -105,6 +108,35 @@ func attachDynamicFilterToScanSource(source exec.Source, ops []exec.UnaryOperato
 	if target != nil {
 		target.SetDynamicFilter(kept)
 	}
+}
+
+// scanFilterValueTypes maps each probe key column of a built join to the type
+// its build-key scan filters carry their values in
+// (exec.HashJoin.ScanFilterValueTypes; leftKeys are the join's LeftKeys, in
+// key order). A column named by two keys whose types are not one proved type
+// maps to exec.KeyTypeUnresolved: the range BuildKeyRange returns per key
+// names only the column, so the conservative answer covers both.
+func scanFilterValueTypes(leftKeys []string, types []batch.TypeID) map[string]batch.TypeID {
+	out := make(map[string]batch.TypeID, len(leftKeys))
+	for i, k := range leftKeys {
+		t := exec.KeyTypeUnresolved
+		if i < len(types) {
+			t = types[i]
+		}
+		if prev, seen := out[k]; seen && prev != t {
+			t = exec.KeyTypeUnresolved
+		}
+		out[k] = t
+	}
+	return out
+}
+
+// scanFilterValueType is col's entry in valTypes, or exec.KeyTypeUnresolved.
+func scanFilterValueType(valTypes map[string]batch.TypeID, col string) batch.TypeID {
+	if t, ok := valTypes[col]; ok {
+		return t
+	}
+	return exec.KeyTypeUnresolved
 }
 
 // findScanRowEstimate returns the total row estimate from scan nodes in a subtree.

@@ -1,0 +1,10 @@
+-- #1677 line r fixture: one statement per line, run verbatim by wadjet and PostgreSQL 17.11 (postgres:17-alpine,
+-- initdb --locale=C --encoding=UTF8). xp holds one value of every key type per row (one file, one row group);
+-- xb's 'k' row matches xp row 3 under PostgreSQL's cross-type comparison. A build-key range read in the
+-- build's own units against the probe's stored statistics misses them for DATE against TIMESTAMP (days against
+-- milliseconds, both ways) and for NUMERIC against an integer (the stored unscaled 300 against 3), so a scan
+-- filter that ignores the type change prunes the row group holding the match.
+CREATE TABLE xp (id INTEGER, i4 INTEGER, i8 BIGINT, f8 DOUBLE PRECISION, f4 REAL, m NUMERIC(10,2), w NUMERIC(12,4), d DATE, ts TIMESTAMP, s VARCHAR)
+CREATE TABLE xb (tag VARCHAR, i4 INTEGER, i8 BIGINT, f8 DOUBLE PRECISION, f4 REAL, m NUMERIC(10,2), w NUMERIC(12,4), d DATE, ts TIMESTAMP, s VARCHAR)
+INSERT INTO xp VALUES (1, 1, 1, 1, 1, 1.00, 1.0000, DATE '2024-01-01', TIMESTAMP '2024-01-01 00:00:00', 's01'), (2, 2, 2, 2, 2, 2.00, 2.0000, DATE '2024-01-02', TIMESTAMP '2024-01-02 00:00:00', 's02'), (3, 3, 3, 3, 3, 3.00, 3.0000, DATE '2024-01-03', TIMESTAMP '2024-01-03 00:00:00', 's03'), (4, 4, 4, 4, 4, 4.00, 4.0000, DATE '2024-01-04', TIMESTAMP '2024-01-04 00:00:00', 's04'), (5, 5, 5, 5, 5, 5.00, 5.0000, DATE '2024-01-05', TIMESTAMP '2024-01-05 00:00:00', 's05'), (6, 6, 6, 6, 6, 6.00, 6.0000, DATE '2024-01-06', TIMESTAMP '2024-01-06 00:00:00', 's06'), (7, 7, 7, 7, 7, 7.00, 7.0000, DATE '2024-01-07', TIMESTAMP '2024-01-07 00:00:00', 's07'), (8, 8, 8, 8, 8, 8.00, 8.0000, DATE '2024-01-08', TIMESTAMP '2024-01-08 00:00:00', 's08'), (9, 9, 9, 9, 9, 9.00, 9.0000, DATE '2024-01-09', TIMESTAMP '2024-01-09 00:00:00', 's09'), (10, 10, 10, 10, 10, 10.00, 10.0000, DATE '2024-01-10', TIMESTAMP '2024-01-10 00:00:00', 's10')
+INSERT INTO xb VALUES ('k', 3, 3, 3, 3, 3.00, 3.0000, DATE '2024-01-03', TIMESTAMP '2024-01-03 00:00:00', 's03'), ('z', 50, 50, 50, 50, 50.00, 50.0000, DATE '2025-06-01', TIMESTAMP '2025-06-01 12:00:00', 's50')

@@ -590,6 +590,12 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 
 	// SemiAntiFilter already set above (pre-goroutine).
 
+	// The type each key's build-key scan filters carry their values in, read
+	// before PruneBuildColumns can drop the build schema it comes from: the
+	// eligibility guard installs a filter only on a stored column of exactly
+	// that type (#1677 line r).
+	scanValTypes := scanFilterValueTypes(hj.LeftKeys, hj.ScanFilterValueTypes())
+
 	// For SEMI/ANTI joins, prune build-side batches to only columns needed by
 	// the SemiAntiFilter. The build side never appears in the output, so after
 	// the hash index is built, only filter columns need to be retained.
@@ -609,7 +615,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		// keys, attach a BloomScanFilter so entire row groups whose key
 		// range has no hits in the bloom filter are skipped before I/O.
 		if bsf := bf.BloomScanFilter(); bsf != nil {
-			attachBloomToScanSource(leftSource, probeOps, bsf)
+			attachBloomToScanSource(leftSource, probeOps, bsf, scanValTypes)
 		}
 	}
 
@@ -617,7 +623,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// Complements the bloom filter: works for all types (string, date, wide int
 	// ranges) and is cheaper to evaluate (single range comparison per row group).
 	if ranges := hj.BuildKeyRange(); len(ranges) > 0 {
-		attachDynamicFilterToScanSource(leftSource, leftOps, ranges)
+		attachDynamicFilterToScanSource(leftSource, leftOps, ranges, scanValTypes)
 	}
 	probe := hj.Probe()
 	p.applyLateMaterialization(probe)

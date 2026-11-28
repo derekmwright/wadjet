@@ -41,7 +41,7 @@ import (
 // exercises what `taskset -c 0` does.
 func TestArc1677qScanFiltersNeverPruneThroughAKeyChange(t *testing.T) {
 	ctx := context.Background()
-	cells := arc1677qCells(t)
+	cells := arc1677qCells(t, "testdata/arc_1677q_cells.tsv")
 	arms := []struct {
 		name   string
 		budget int64
@@ -54,7 +54,7 @@ func TestArc1677qScanFiltersNeverPruneThroughAKeyChange(t *testing.T) {
 				name += "/serial-build"
 			}
 			t.Run(name, func(t *testing.T) {
-				db := arc1677qOpen(t, ctx, arm.budget)
+				db := arc1677qOpen(t, ctx, arm.budget, "testdata/arc_1677q_fixture.sql")
 				if serial {
 					defer exec.ForceSerialJoinBuildForTest()()
 				}
@@ -72,9 +72,9 @@ func TestArc1677qScanFiltersNeverPruneThroughAKeyChange(t *testing.T) {
 	}
 }
 
-func arc1677qCells(t *testing.T) [][3]string {
+func arc1677qCells(t *testing.T, path string) [][3]string {
 	t.Helper()
-	raw, err := os.ReadFile("testdata/arc_1677q_cells.tsv")
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func arc1677qCells(t *testing.T) [][3]string {
 	return cells
 }
 
-func arc1677qOpen(t *testing.T, ctx context.Context, budget int64) *DB {
+func arc1677qOpen(t *testing.T, ctx context.Context, budget int64, fixture string) *DB {
 	t.Helper()
 	cfg := Config{Store: objstore.NewMemStore(), Bucket: "test"}
 	if budget > 0 {
@@ -104,7 +104,7 @@ func arc1677qOpen(t *testing.T, ctx context.Context, budget int64) *DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	raw, err := os.ReadFile("testdata/arc_1677q_fixture.sql")
+	raw, err := os.ReadFile(fixture)
 	if err != nil {
 		t.Fatal(err)
 	}
